@@ -1,0 +1,10 @@
+[package]
+name = "nuraloumi"
+version = "0.1.0"
+edition = "2021"
+description = "Low-resource touch-first menu shell for ASUS SL101/Nura: DeskHalloumi semantics, Cairo software rendering, native Wayland shm/layer-shell, and graceful GPU acceleration."
+license = "MIT"
+
+[dependencies]
+
+[dev-dependencies]

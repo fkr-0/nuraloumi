@@ -1,0 +1,27 @@
+version: 1
+name: nuraloumi
+description: Low-resource touch-first menu shell for ASUS SL101/Nura: DeskHalloumi semantics, Cairo software rendering, native Wayland shm/layer-shell, and graceful GPU acceleration.
+default_track: local
+shell: true
+sync_dir:
+  - .
+
+agent:
+  notes: |
+    Project created by ws-bridge create_project. Keep bridge.yml commands runnable from the project root.
+  tasks: []
+  changelog:
+    - Initialized project scaffold.
+
+commands:
+  build:
+    description: Build the Rust crate
+    category: build
+    cwd: .
+    run: ["cargo", "build"]
+
+  test:
+    description: Run Rust tests
+    category: test
+    cwd: .
+    run: ["cargo", "test"]
