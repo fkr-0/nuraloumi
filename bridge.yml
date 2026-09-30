@@ -1,27 +1,93 @@
 version: 1
 name: nuraloumi
-description: Low-resource touch-first menu shell for ASUS SL101/Nura: DeskHalloumi semantics, Cairo software rendering, native Wayland shm/layer-shell, and graceful GPU acceleration.
+description: Low-resource touch-first menu shell for ASUS SL101/Nura.
 default_track: local
 shell: true
-sync_dir:
-  - .
+sync_dir: ["."]
 
 agent:
   notes: |
-    Project created by ws-bridge create_project. Keep bridge.yml commands runnable from the project root.
-  tasks: []
+    Read AGENTS.md, ROADMAP.md, DESIGN.md, docs/ARCHITECTURE.md and docs/CONTRACTS.md before implementation.
+    Six Wave-1 lanes are intentionally non-overlapping. Software rendering is the reference path.
+  tasks:
+    - Complete Wave 1 in six independently reviewed lanes.
+    - Integrate operating host binaries after reviewed lane convergence.
+    - Qualify ARMv7/no-NEON and SL101 runtime evidence before target release claims.
   changelog:
-    - Initialized project scaffold.
+    - Initialized NuraLoumi architecture and six-lane implementation roadmap.
 
 commands:
-  build:
-    description: Build the Rust crate
+  check:
+    description: Check all Rust crates
     category: build
-    cwd: .
-    run: ["cargo", "build"]
-
+    run: ["cargo", "check", "--workspace"]
+  build:
+    description: Build all debug binaries
+    category: build
+    run: ["cargo", "build", "--workspace"]
+  build-release:
+    description: Build optimized runtime/tool binaries
+    category: build
+    run: ["cargo", "build", "--workspace", "--release"]
   test:
-    description: Run Rust tests
+    description: Run all workspace tests
     category: test
-    cwd: .
-    run: ["cargo", "test"]
+    run: ["cargo", "test", "--workspace"]
+  clippy:
+    description: Deny Rust warnings across all targets
+    category: lint
+    run: ["cargo", "clippy", "--workspace", "--all-targets", "--", "-D", "warnings"]
+  fmt:
+    description: Check rustfmt
+    category: format
+    run: ["cargo", "fmt", "--all", "--", "--check"]
+
+agent_workflow:
+  version: '1.0'
+  project:
+    id: nuraloumi
+    title: NuraLoumi
+    root: .
+    capacity:
+      max_active_workers: 6
+      max_reserved_packets: 10
+      max_reviewers: 2
+  defaults:
+    queue: managed
+    lease_policy: normal
+    mutation_policy: transactional
+    review_policy: independent-review
+    priority: 80
+  lease_policies:
+    normal: {}
+  mutation_policies:
+    transactional:
+      mode: transaction-required
+      stale_write_protection: sha256
+      capture_preimage: true
+      rollback_on_partial_failure: true
+  review_policies:
+    independent-review:
+      mode: required
+      reviewer:
+        independent: true
+        allow_author: false
+        allow_mutation: false
+      max_rounds: 2
+      on_timeout: blocked
+  queues:
+    managed:
+      title: Wave 1
+      capacity: 6
+  opportunities: []
+  governance:
+    strict_validation: true
+    reject_unknown_fields: true
+    overrides:
+      allow_less_restrictive_mutation_policy: false
+      allow_review_bypass: false
+      allow_scope_expansion_at_runtime: false
+    recovery:
+      allow_dirty_requeue: false
+    derived_opportunities:
+      promotion: operator_gate

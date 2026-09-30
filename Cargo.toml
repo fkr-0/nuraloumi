@@ -1,10 +1,22 @@
-[package]
-name = "nuraloumi"
+[workspace]
+resolver = "2"
+members = [
+  "crates/nuraloumi-core",
+  "crates/nuraloumi-render-cairo",
+  "crates/nuraloumi-wayland",
+  "crates/nuraloumi-providers",
+  "crates/nuraloumi-shell",
+  "crates/nuraloumi-xtask",
+]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2021"
-description = "Low-resource touch-first menu shell for ASUS SL101/Nura: DeskHalloumi semantics, Cairo software rendering, native Wayland shm/layer-shell, and graceful GPU acceleration."
 license = "MIT"
+repository = "https://github.com/fkr-0/nuraloumi"
 
-[dependencies]
-
-[dev-dependencies]
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1
+panic = "abort"

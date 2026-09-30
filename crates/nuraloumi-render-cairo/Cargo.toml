@@ -1,0 +1,8 @@
+[package]
+name="nuraloumi-render-cairo"
+version.workspace=true
+edition.workspace=true
+license.workspace=true
+
+[dependencies]
+nuraloumi-core={ path="../nuraloumi-core" }

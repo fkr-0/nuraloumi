@@ -1,0 +1,19 @@
+[package]
+name="nuraloumi-shell"
+version.workspace=true
+edition.workspace=true
+license.workspace=true
+
+[dependencies]
+nuraloumi-core={ path="../nuraloumi-core" }
+nuraloumi-render-cairo={ path="../nuraloumi-render-cairo" }
+nuraloumi-wayland={ path="../nuraloumi-wayland" }
+nuraloumi-providers={ path="../nuraloumi-providers" }
+
+[[bin]]
+name="nuraloumi-menu"
+path="src/bin/menu.rs"
+
+[[bin]]
+name="nuraloumi-panel"
+path="src/bin/panel.rs"

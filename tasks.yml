@@ -1,0 +1,38 @@
+version: 1
+project: nuraloumi
+release_target: 0.1.0
+wave_1:
+  - id: NURALOUMI-CORE-R1-20260930
+    lane: core
+    status: planned
+    owner_scope: crates/nuraloumi-core/**
+    outcome: renderer-neutral semantic core
+  - id: NURALOUMI-CAIRO-R1-20260930
+    lane: cairo
+    status: planned
+    owner_scope: crates/nuraloumi-render-cairo/**, tests/fixtures/render/**
+    outcome: deterministic software renderer and PNG fixture binary
+  - id: NURALOUMI-WAYLAND-R1-20260930
+    lane: wayland
+    status: planned
+    owner_scope: crates/nuraloumi-wayland/**, examples/wayland-*
+    outcome: native wl_shm/layer-shell/input backend
+  - id: NURALOUMI-SHELL-R1-20260930
+    lane: shell
+    status: planned
+    owner_scope: crates/nuraloumi-shell/**, examples/menu-fixtures/**
+    outcome: panel and generic menu binaries
+  - id: NURALOUMI-PROVIDERS-R1-20260930
+    lane: providers
+    status: planned
+    owner_scope: crates/nuraloumi-providers/**, tests/fixtures/providers/**
+    outcome: system snapshot/action providers and probe binary
+  - id: NURALOUMI-XTASK-R1-20260930
+    lane: qualification
+    status: planned
+    owner_scope: crates/nuraloumi-xtask/**, .cargo/**, packaging/**, scripts/**, docs/qualification/**
+    outcome: cross-build, package and target qualification tooling
+integration:
+  - id: NURALOUMI-INTEGRATE-R1
+    after: wave_1_review
+    outcome: reconcile landed APIs, build operating host binaries, run full gates
