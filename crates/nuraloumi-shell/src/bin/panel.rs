@@ -11,10 +11,11 @@ use nuraloumi_render_cairo::{
 };
 use nuraloumi_shell::{
     build_family, execute_window_command, launcher_search_input, load_config,
-    load_fixture_snapshot, panel_affordances, parse_family, parse_window_command, window_entries,
-    ActionReport, ApplicationEntry as ShellApplicationEntry, BluetoothDeviceEntry,
-    DesktopControlCapabilities, FixtureSnapshot, HitRegion as ShellHitRegion, MenuAction,
-    MenuFamily, OverviewMode, PanelAffordance, PanelController, PanelEdge as ShellPanelEdge,
+    load_fixture_snapshot, panel_affordances, parse_desktop_command, parse_family,
+    parse_window_command, window_entries, ActionReport, ApplicationEntry as ShellApplicationEntry,
+    BluetoothDeviceEntry, DesktopCommand, DesktopControlCapabilities, DesktopEntry,
+    FixtureSnapshot, HitRegion as ShellHitRegion, MenuAction, MenuFamily, OverviewMode,
+    PanelAffordance, PanelController, PanelEdge as ShellPanelEdge,
     PlatformEvent as ShellPlatformEvent, ProviderValue, SemanticInput, ShellConfig, ShellState,
     Theme as ShellTheme, ValueState, WifiNetworkEntry, WindowControlCapabilities,
 };
@@ -22,7 +23,7 @@ use nuraloumi_wayland::{
     BackendCapabilities as WaylandCapabilities, BackendError, Frame, Key as WaylandKey,
     MenuConfig as WaylandMenuConfig, PanelConfig as WaylandPanelConfig,
     PanelEdge as WaylandPanelEdge, PixelFormat, PlatformEvent as WaylandEvent, SurfaceId,
-    WaylandBackend,
+    WaylandBackend, WorkspaceId,
 };
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -63,6 +64,36 @@ struct Args {
     open: Option<String>,
     reduced_motion: bool,
     enable_power_actions: bool,
+}
+
+fn refresh_workspace_snapshot(snapshot: &mut FixtureSnapshot, backend: &WaylandBackend) {
+    let capabilities = backend.capabilities().workspace;
+    snapshot.desktop_capabilities = DesktopControlCapabilities {
+        list: capabilities.list,
+        switch: capabilities.activate,
+        window_membership: false,
+        move_window: false,
+        sticky_window: false,
+    };
+    snapshot.desktops = backend
+        .workspaces()
+        .into_iter()
+        .map(|workspace| DesktopEntry {
+            id: workspace.id.to_string(),
+            label: workspace.name,
+            active: workspace.state.active,
+            urgent: workspace.state.urgent,
+            hidden: workspace.state.hidden,
+            switchable: workspace.can_activate,
+            window_count: 0,
+        })
+        .collect();
+}
+
+fn parse_workspace_id(value: &str) -> Result<WorkspaceId, String> {
+    value
+        .parse::<WorkspaceId>()
+        .map_err(|error| format!("invalid opaque workspace id {value:?}: {error}"))
 }
 
 #[derive(Debug, Serialize)]
@@ -212,6 +243,7 @@ fn run_live(
     }
     if policy.execute_provider_actions {
         refresh_window_snapshot(&mut snapshot, &backend);
+        refresh_workspace_snapshot(&mut snapshot, &backend);
     }
 
     let output = backend.outputs().into_iter().next();
@@ -266,8 +298,14 @@ fn run_live(
                 .map_err(|error| format!("Wayland dispatch failed: {error}"))?;
         }
         let toplevel_changed = backend.drain_toplevel_events().count() > 0;
-        if policy.execute_provider_actions && toplevel_changed {
-            refresh_window_snapshot(&mut snapshot, &backend);
+        let workspace_changed = backend.drain_workspace_events().count() > 0;
+        if policy.execute_provider_actions && (toplevel_changed || workspace_changed) {
+            if toplevel_changed {
+                refresh_window_snapshot(&mut snapshot, &backend);
+            }
+            if workspace_changed {
+                refresh_workspace_snapshot(&mut snapshot, &backend);
+            }
             if let Some(menu) = active_menu.as_mut() {
                 menu.shell.refresh_family(menu.family, &snapshot)?;
                 if let Some(menu_geometry) = menu.geometry {
@@ -494,7 +532,24 @@ fn run_live(
                                 if kind == "menu.open" || kind == "overview.mode"
                         );
                         if !is_navigation {
-                            if let Some(command) = parse_window_command(action, &snapshot.windows)?
+                            if let Some(command) = parse_desktop_command(action, &snapshot)? {
+                                match command {
+                                    DesktopCommand::Switch { desktop_id } => {
+                                        let id = parse_workspace_id(&desktop_id)?;
+                                        backend
+                                            .activate_workspace(id)
+                                            .map_err(|error| error.to_string())?;
+                                        redraw = true;
+                                    }
+                                    DesktopCommand::MoveWindow { .. } => {
+                                        return Err(
+                                            "move-window-to-desktop is not exposed by the active Wayland protocols"
+                                                .into(),
+                                        );
+                                    }
+                                }
+                            } else if let Some(command) =
+                                parse_window_command(action, &snapshot.windows)?
                             {
                                 execute_window_command(&mut backend, command)?;
                                 redraw = true;
@@ -515,6 +570,7 @@ fn run_live(
                                                 &ProbeSnapshot::live(),
                                             );
                                             refresh_window_snapshot(&mut snapshot, &backend);
+                                            refresh_workspace_snapshot(&mut snapshot, &backend);
                                         }
                                         menu.shell.refresh_family(menu.family, &snapshot)?;
                                         panel_scene = None;
@@ -529,6 +585,7 @@ fn run_live(
                                                 &ProbeSnapshot::live(),
                                             );
                                             refresh_window_snapshot(&mut snapshot, &backend);
+                                            refresh_workspace_snapshot(&mut snapshot, &backend);
                                         }
                                         menu.shell.refresh_family(menu.family, &snapshot)?;
                                         panel_scene = None;
@@ -593,6 +650,7 @@ fn run_live(
             apply_application_snapshot(&mut snapshot, applications);
             if policy.execute_provider_actions {
                 refresh_window_snapshot(&mut snapshot, &backend);
+                refresh_workspace_snapshot(&mut snapshot, &backend);
             }
             if let Some(menu) = active_menu.as_mut() {
                 menu.shell.refresh_family(menu.family, &snapshot)?;

@@ -231,7 +231,17 @@ pub struct DesktopEntry {
     #[serde(default)]
     pub active: bool,
     #[serde(default)]
+    pub urgent: bool,
+    #[serde(default)]
+    pub hidden: bool,
+    #[serde(default = "default_desktop_switchable")]
+    pub switchable: bool,
+    #[serde(default)]
     pub window_count: usize,
+}
+
+const fn default_desktop_switchable() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -313,14 +323,13 @@ pub fn parse_desktop_command(
             if !snapshot.desktop_capabilities.switch {
                 return Err("compositor does not expose desktop switching".into());
             }
-            if !snapshot
+            let desktop = snapshot
                 .desktops
                 .iter()
-                .any(|desktop| desktop.id == *payload)
-            {
-                return Err(format!(
-                    "desktop {payload:?} is not in the current snapshot"
-                ));
+                .find(|desktop| desktop.id == *payload)
+                .ok_or_else(|| format!("desktop {payload:?} is not in the current snapshot"))?;
+            if !desktop.switchable {
+                return Err(format!("desktop {payload:?} is not activatable"));
             }
             Ok(Some(DesktopCommand::Switch {
                 desktop_id: payload.clone(),
@@ -535,12 +544,18 @@ impl Default for FixtureSnapshot {
                     id: "1".into(),
                     label: "Desktop 1".into(),
                     active: true,
+                    urgent: false,
+                    hidden: false,
+                    switchable: true,
                     window_count: 2,
                 },
                 DesktopEntry {
                     id: "2".into(),
                     label: "Desktop 2".into(),
                     active: false,
+                    urgent: false,
+                    hidden: false,
+                    switchable: true,
                     window_count: 0,
                 },
             ],
@@ -711,29 +726,54 @@ pub fn build_launcher_menu_for(snapshot: &FixtureSnapshot, mode: OverviewMode) -
                 "Compositor adapter has not exposed desktop/workspace listing",
             ));
         } else {
-            items.extend(snapshot.desktops.iter().take(16).map(|desktop| {
-                let subtitle = if desktop.active {
-                    format!("Active · {} windows", desktop.window_count)
-                } else {
-                    format!("{} windows", desktop.window_count)
-                };
-                if desktop.active {
-                    status(
-                        &format!("overview.desktop.{}", desktop.id),
-                        &desktop.label,
-                        &subtitle,
-                    )
-                } else {
-                    custom_action(
-                        &format!("overview.desktop.{}", desktop.id),
-                        &desktop.label,
-                        Some(&subtitle),
-                        "desktop.switch",
-                        &desktop.id,
-                        snapshot.desktop_capabilities.switch,
-                    )
-                }
-            }));
+            items.extend(
+                snapshot
+                    .desktops
+                    .iter()
+                    .filter(|desktop| !desktop.hidden)
+                    .take(16)
+                    .map(|desktop| {
+                        let subtitle = match (
+                            desktop.active,
+                            desktop.urgent,
+                            snapshot.desktop_capabilities.window_membership,
+                        ) {
+                            (true, true, true) => {
+                                format!(
+                                    "Active · needs attention · {} windows",
+                                    desktop.window_count
+                                )
+                            }
+                            (true, false, true) => {
+                                format!("Active · {} windows", desktop.window_count)
+                            }
+                            (false, true, true) => {
+                                format!("Needs attention · {} windows", desktop.window_count)
+                            }
+                            (false, false, true) => format!("{} windows", desktop.window_count),
+                            (true, true, false) => "Active · needs attention".to_owned(),
+                            (true, false, false) => "Active".to_owned(),
+                            (false, true, false) => "Needs attention".to_owned(),
+                            (false, false, false) => "Workspace".to_owned(),
+                        };
+                        if desktop.active {
+                            status(
+                                &format!("overview.desktop.{}", desktop.id),
+                                &desktop.label,
+                                &subtitle,
+                            )
+                        } else {
+                            custom_action(
+                                &format!("overview.desktop.{}", desktop.id),
+                                &desktop.label,
+                                Some(&subtitle),
+                                "desktop.switch",
+                                &desktop.id,
+                                snapshot.desktop_capabilities.switch && desktop.switchable,
+                            )
+                        }
+                    }),
+            );
         }
 
         if mode == OverviewMode::Desktops {
@@ -1962,6 +2002,16 @@ mod tests {
             })
         );
 
+        snapshot.desktops[1].switchable = false;
+        assert!(parse_desktop_command(&switch, &snapshot).is_err());
+        snapshot.desktops[1].switchable = true;
+
+        let display_name = MenuAction::Custom {
+            kind: "desktop.switch".into(),
+            payload: snapshot.desktops[1].label.clone(),
+        };
+        assert!(parse_desktop_command(&display_name, &snapshot).is_err());
+
         let move_window = MenuAction::Custom {
             kind: "desktop.move_window".into(),
             payload: serde_json::to_string(&DesktopMovePayload {
@@ -1979,6 +2029,36 @@ mod tests {
                 desktop_id: "2".into(),
             })
         );
+    }
+
+    #[test]
+    fn desktop_overview_hides_hidden_workspaces_without_claiming_membership() {
+        let mut snapshot = FixtureSnapshot::default();
+        snapshot.desktop_capabilities.list = true;
+        snapshot.desktop_capabilities.switch = true;
+        snapshot.desktop_capabilities.window_membership = false;
+        snapshot.desktops[0].hidden = true;
+        snapshot.desktops[1].urgent = true;
+
+        let menu = build_launcher_menu_for(&snapshot, OverviewMode::Desktops);
+        assert!(!menu
+            .items
+            .iter()
+            .any(|item| item.id == "overview.desktop.1"));
+
+        let second = menu
+            .items
+            .iter()
+            .find(|item| item.id == "overview.desktop.2")
+            .expect("visible workspace");
+        assert_eq!(second.subtitle.as_deref(), Some("Needs attention"));
+        assert!(matches!(
+            second.action,
+            Some(MenuAction::Custom {
+                ref kind,
+                ref payload
+            }) if kind == "desktop.switch" && payload == "2"
+        ));
     }
 
     #[test]

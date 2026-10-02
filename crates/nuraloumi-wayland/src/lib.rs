@@ -9,6 +9,7 @@ mod error;
 mod foreign_toplevel;
 mod shm;
 mod types;
+mod workspace;
 
 pub use backend::WaylandBackend;
 pub use error::{BackendError, Result};
@@ -19,4 +20,7 @@ pub use types::{
     normalize_output_point, BackendCapabilities, BackendEvent, Frame, Key, MenuConfig, OutputId,
     OutputInfo, OutputTransform, PanelConfig, PanelEdge, PixelFormat, PlatformEvent, Point,
     SurfaceId,
+};
+pub use workspace::{
+    WorkspaceCapabilities, WorkspaceEvent, WorkspaceId, WorkspaceInfo, WorkspaceState,
 };

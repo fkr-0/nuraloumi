@@ -15,6 +15,11 @@ use wayland_protocols::ext::foreign_toplevel_list::v1::client::{
     ext_foreign_toplevel_handle_v1::{self, ExtForeignToplevelHandleV1},
     ext_foreign_toplevel_list_v1::{self, ExtForeignToplevelListV1},
 };
+use wayland_protocols::ext::workspace::v1::client::{
+    ext_workspace_group_handle_v1::{self, ExtWorkspaceGroupHandleV1},
+    ext_workspace_handle_v1::{self, ExtWorkspaceHandleV1},
+    ext_workspace_manager_v1::{self, ExtWorkspaceManagerV1},
+};
 use wayland_protocols_wlr::foreign_toplevel::v1::client::{
     zwlr_foreign_toplevel_handle_v1::{self, ZwlrForeignToplevelHandleV1},
     zwlr_foreign_toplevel_manager_v1::{self, ZwlrForeignToplevelManagerV1},
@@ -28,9 +33,10 @@ use crate::{
     foreign_toplevel::{parse_wlr_state, ForeignToplevelStore},
     shm::{BufferKey, ShmBuffers},
     types::{semantic_key, sorted_touch_ids},
+    workspace::WorkspaceStore,
     BackendCapabilities, BackendError, BackendEvent, Frame, MenuConfig, OutputId, OutputInfo,
     OutputTransform, PanelConfig, PanelEdge, PlatformEvent, Result, SurfaceId, ToplevelEvent,
-    ToplevelId, ToplevelInfo, ToplevelSource,
+    ToplevelId, ToplevelInfo, ToplevelSource, WorkspaceEvent, WorkspaceId, WorkspaceInfo,
 };
 
 struct OutputRecord {
@@ -93,6 +99,7 @@ struct BackendState {
     active_touches: BTreeSet<i32>,
     shift_down: bool,
     foreign_toplevel: ForeignToplevelStore,
+    workspace: WorkspaceStore,
 }
 
 pub struct WaylandBackend {
@@ -144,6 +151,7 @@ impl WaylandBackend {
             argb8888: self.state.shm_argb8888,
             xrgb8888: self.state.shm_xrgb8888,
             toplevel: self.state.foreign_toplevel.capabilities(),
+            workspace: self.state.workspace.capabilities(),
         }
     }
 
@@ -153,6 +161,26 @@ impl WaylandBackend {
 
     pub fn drain_toplevel_events(&mut self) -> impl Iterator<Item = ToplevelEvent> + '_ {
         self.state.foreign_toplevel.drain_events()
+    }
+
+    pub fn workspaces(&self) -> Vec<WorkspaceInfo> {
+        self.state.workspace.workspaces()
+    }
+
+    pub fn drain_workspace_events(&mut self) -> impl Iterator<Item = WorkspaceEvent> + '_ {
+        self.state.workspace.drain_events()
+    }
+
+    pub fn activate_workspace(&mut self, id: WorkspaceId) -> Result<()> {
+        let handle = self.state.workspace.activatable_handle(id).ok_or_else(|| {
+            BackendError::Dispatch(format!("workspace {id} is unknown or not activatable"))
+        })?;
+        let manager = self.state.workspace.manager().ok_or_else(|| {
+            BackendError::Dispatch("ext-workspace manager is not available".to_owned())
+        })?;
+        handle.activate();
+        manager.commit();
+        self.flush()
     }
 
     pub fn activate_toplevel(&mut self, id: ToplevelId) -> Result<()> {
@@ -418,6 +446,19 @@ impl WaylandBackend {
         Ok(())
     }
 
+    fn refresh_workspace_binding(&mut self) -> Result<()> {
+        if self.state.workspace.has_binding() {
+            return Ok(());
+        }
+        if let Some((name, version)) = self.state.workspace.global() {
+            let manager: ExtWorkspaceManagerV1 =
+                self.registry.bind(name, version.min(1), &self.qh, ());
+            self.state.workspace.bind(manager);
+            self.flush()?;
+        }
+        Ok(())
+    }
+
     pub fn destroy_surface(&mut self, id: SurfaceId) -> Result<()> {
         let mut record = self
             .state
@@ -441,6 +482,7 @@ impl WaylandBackend {
             .blocking_dispatch(&mut self.state)
             .map_err(|error| BackendError::Dispatch(error.to_string()))?;
         self.refresh_foreign_toplevel_binding()?;
+        self.refresh_workspace_binding()?;
         Ok(dispatched)
     }
 
@@ -450,6 +492,7 @@ impl WaylandBackend {
             .dispatch_pending(&mut self.state)
             .map_err(|error| BackendError::Dispatch(error.to_string()))?;
         self.refresh_foreign_toplevel_binding()?;
+        self.refresh_workspace_binding()?;
         Ok(dispatched)
     }
 
@@ -459,6 +502,7 @@ impl WaylandBackend {
             .roundtrip(&mut self.state)
             .map_err(|error| BackendError::Dispatch(error.to_string()))?;
         self.refresh_foreign_toplevel_binding()?;
+        self.refresh_workspace_binding()?;
         Ok(dispatched)
     }
 
@@ -570,10 +614,14 @@ impl Dispatch<wl_registry::WlRegistry, ()> for BackendState {
                 "ext_foreign_toplevel_list_v1" => {
                     state.foreign_toplevel.record_ext_global(name, version);
                 }
+                "ext_workspace_manager_v1" => {
+                    state.workspace.record_global(name, version);
+                }
                 _ => {}
             },
             wl_registry::Event::GlobalRemove { name } => {
                 state.foreign_toplevel.remove_global(name);
+                state.workspace.remove_global(name);
                 let id = OutputId(name);
                 if let Some(output) = state.outputs.remove(&id) {
                     release_output(output.proxy);
@@ -746,6 +794,87 @@ impl Dispatch<ExtForeignToplevelHandleV1, ()> for BackendState {
                         handle.destroy();
                     }
                 }
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<ExtWorkspaceManagerV1, ()> for BackendState {
+    fn event(
+        state: &mut Self,
+        _proxy: &ExtWorkspaceManagerV1,
+        event: ext_workspace_manager_v1::Event,
+        _data: &(),
+        _connection: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        match event {
+            ext_workspace_manager_v1::Event::Workspace { workspace } => {
+                state.workspace.register(workspace);
+            }
+            ext_workspace_manager_v1::Event::Done => {
+                state.workspace.commit_done();
+            }
+            ext_workspace_manager_v1::Event::Finished => {
+                state.workspace.finish();
+            }
+            _ => {}
+        }
+    }
+
+    event_created_child!(BackendState, ExtWorkspaceManagerV1, [
+        ext_workspace_manager_v1::EVT_WORKSPACE_GROUP_OPCODE => (ExtWorkspaceGroupHandleV1, ()),
+        ext_workspace_manager_v1::EVT_WORKSPACE_OPCODE => (ExtWorkspaceHandleV1, ()),
+    ]);
+}
+
+impl Dispatch<ExtWorkspaceGroupHandleV1, ()> for BackendState {
+    fn event(
+        _state: &mut Self,
+        proxy: &ExtWorkspaceGroupHandleV1,
+        event: ext_workspace_group_handle_v1::Event,
+        _data: &(),
+        _connection: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        if matches!(event, ext_workspace_group_handle_v1::Event::Removed) && proxy.is_alive() {
+            proxy.destroy();
+        }
+    }
+}
+
+impl Dispatch<ExtWorkspaceHandleV1, ()> for BackendState {
+    fn event(
+        state: &mut Self,
+        proxy: &ExtWorkspaceHandleV1,
+        event: ext_workspace_handle_v1::Event,
+        _data: &(),
+        _connection: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        let object = proxy.id();
+        match event {
+            ext_workspace_handle_v1::Event::Id { id } => {
+                state.workspace.set_protocol_id(&object, id);
+            }
+            ext_workspace_handle_v1::Event::Name { name } => {
+                state.workspace.set_name(&object, name);
+            }
+            ext_workspace_handle_v1::Event::State {
+                state: WEnum::Value(flags),
+            } => {
+                state.workspace.set_state(&object, flags.bits());
+            }
+            ext_workspace_handle_v1::Event::Capabilities {
+                capabilities: WEnum::Value(capabilities),
+            } => {
+                state
+                    .workspace
+                    .set_capabilities(&object, capabilities.bits());
+            }
+            ext_workspace_handle_v1::Event::Removed => {
+                state.workspace.mark_removed(&object);
             }
             _ => {}
         }

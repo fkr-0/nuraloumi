@@ -121,6 +121,7 @@ pub struct BackendCapabilities {
     pub argb8888: bool,
     pub xrgb8888: bool,
     pub toplevel: ToplevelCapabilities,
+    pub workspace: crate::WorkspaceCapabilities,
 }
 
 impl BackendCapabilities {

@@ -8,17 +8,18 @@ use nuraloumi_providers::{
 use nuraloumi_render_cairo::{CairoRenderer, RenderOptions, Scene, Viewport};
 use nuraloumi_shell::{
     build_family, execute_window_command, launcher_search_input, load_config,
-    load_fixture_snapshot, load_menu, parse_family, parse_window_command, window_entries,
-    ActionReport, ApplicationEntry as ShellApplicationEntry, BluetoothDeviceEntry,
-    DesktopControlCapabilities, FixtureSnapshot, HitRegion as ShellHitRegion, MenuAction,
-    MenuFamily, OverviewMode, PlatformEvent as ShellPlatformEvent, ProviderValue, SemanticInput,
-    ShellConfig, ShellInput, ShellState, Theme as ShellTheme, ValueState, WifiNetworkEntry,
-    WindowControlCapabilities, WindowEntry,
+    load_fixture_snapshot, load_menu, parse_desktop_command, parse_family, parse_window_command,
+    window_entries, ActionReport, ApplicationEntry as ShellApplicationEntry, BluetoothDeviceEntry,
+    DesktopCommand, DesktopControlCapabilities, DesktopEntry, FixtureSnapshot,
+    HitRegion as ShellHitRegion, MenuAction, MenuFamily, OverviewMode,
+    PlatformEvent as ShellPlatformEvent, ProviderValue, SemanticInput, ShellConfig, ShellInput,
+    ShellState, Theme as ShellTheme, ValueState, WifiNetworkEntry, WindowControlCapabilities,
+    WindowEntry,
 };
 use nuraloumi_wayland::{
     BackendCapabilities as WaylandCapabilities, BackendError, Frame, Key as WaylandKey,
     MenuConfig as WaylandMenuConfig, PixelFormat, PlatformEvent as WaylandEvent, SurfaceId,
-    WaylandBackend,
+    WaylandBackend, WorkspaceId,
 };
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -35,6 +36,7 @@ OPTIONS:
     --headless                 Render no surface; print deterministic JSON (default)
     --live                     Open a native Wayland/Cairo software-rendered menu sheet
     --probe-toplevels          Print compositor toplevel capabilities/windows as JSON and exit
+    --probe-workspaces         Print compositor workspace capabilities/workspaces as JSON and exit
     --family <name>            launcher|wifi|bluetooth|display|audio|power|tasks|windows|system
     --fixture <path>           Load a JSON/TOML MenuModel instead of a built-in family
     --providers <path>         Load deterministic JSON/TOML provider snapshot
@@ -59,6 +61,7 @@ LIVE MODE:
 struct Args {
     live: bool,
     probe_toplevels: bool,
+    probe_workspaces: bool,
     family: Option<String>,
     fixture: Option<PathBuf>,
     providers: Option<PathBuf>,
@@ -67,6 +70,48 @@ struct Args {
     reduced_motion: bool,
     enable_power_actions: bool,
     enable_unsafe_suspend: bool,
+}
+
+fn refresh_probe_snapshot(snapshot: &mut FixtureSnapshot, probe: &ProbeSnapshot) {
+    let applications = std::mem::take(&mut snapshot.applications);
+    let windows = std::mem::take(&mut snapshot.windows);
+    let desktops = std::mem::take(&mut snapshot.desktops);
+    let desktop_capabilities = snapshot.desktop_capabilities;
+    *snapshot = fixture_snapshot_from_probe(probe);
+    snapshot.applications = applications;
+    snapshot.windows = windows;
+    snapshot.desktops = desktops;
+    snapshot.desktop_capabilities = desktop_capabilities;
+}
+
+fn refresh_workspace_snapshot(snapshot: &mut FixtureSnapshot, backend: &WaylandBackend) {
+    let capabilities = backend.capabilities().workspace;
+    snapshot.desktop_capabilities = DesktopControlCapabilities {
+        list: capabilities.list,
+        switch: capabilities.activate,
+        window_membership: false,
+        move_window: false,
+        sticky_window: false,
+    };
+    snapshot.desktops = backend
+        .workspaces()
+        .into_iter()
+        .map(|workspace| DesktopEntry {
+            id: workspace.id.to_string(),
+            label: workspace.name,
+            active: workspace.state.active,
+            urgent: workspace.state.urgent,
+            hidden: workspace.state.hidden,
+            switchable: workspace.can_activate,
+            window_count: 0,
+        })
+        .collect();
+}
+
+fn parse_workspace_id(value: &str) -> Result<WorkspaceId, String> {
+    value
+        .parse::<WorkspaceId>()
+        .map_err(|error| format!("invalid opaque workspace id {value:?}: {error}"))
 }
 
 #[derive(Clone, Copy)]
@@ -90,6 +135,12 @@ struct Output<'a> {
 struct ToplevelProbeOutput {
     capabilities: WindowControlCapabilities,
     windows: Vec<WindowEntry>,
+}
+
+#[derive(Debug, Serialize)]
+struct WorkspaceProbeOutput {
+    capabilities: DesktopControlCapabilities,
+    desktops: Vec<DesktopEntry>,
 }
 
 fn main() -> ExitCode {
@@ -120,6 +171,9 @@ fn run() -> Result<(), String> {
     }
     if args.probe_toplevels {
         return run_toplevel_probe();
+    }
+    if args.probe_workspaces {
+        return run_workspace_probe();
     }
     let mut config = if let Some(path) = args.config.as_ref() {
         load_config(path)?
@@ -205,6 +259,26 @@ fn run_toplevel_probe() -> Result<(), String> {
     Ok(())
 }
 
+fn run_workspace_probe() -> Result<(), String> {
+    let mut backend =
+        WaylandBackend::connect().map_err(|error| format!("Wayland connection failed: {error}"))?;
+    backend
+        .roundtrip()
+        .map_err(|error| format!("Wayland workspace roundtrip failed: {error}"))?;
+    let mut snapshot = FixtureSnapshot::default();
+    refresh_workspace_snapshot(&mut snapshot, &backend);
+    let output = WorkspaceProbeOutput {
+        capabilities: snapshot.desktop_capabilities,
+        desktops: snapshot.desktops,
+    };
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&output)
+            .map_err(|error| format!("failed to serialize workspace probe: {error}"))?
+    );
+    Ok(())
+}
+
 fn run_live(
     mut shell: ShellState,
     config: ShellConfig,
@@ -220,6 +294,7 @@ fn run_live(
     }
     if policy.execute_provider_actions {
         refresh_window_snapshot(&mut snapshot, &backend);
+        refresh_workspace_snapshot(&mut snapshot, &backend);
         refresh_builtin_menu(&mut shell, &snapshot)?;
     }
 
@@ -279,8 +354,14 @@ fn run_live(
             .blocking_dispatch()
             .map_err(|error| format!("Wayland dispatch failed: {error}"))?;
         let toplevel_changed = backend.drain_toplevel_events().count() > 0;
-        if policy.execute_provider_actions && toplevel_changed {
-            refresh_window_snapshot(&mut snapshot, &backend);
+        let workspace_changed = backend.drain_workspace_events().count() > 0;
+        if policy.execute_provider_actions && (toplevel_changed || workspace_changed) {
+            if toplevel_changed {
+                refresh_window_snapshot(&mut snapshot, &backend);
+            }
+            if workspace_changed {
+                refresh_workspace_snapshot(&mut snapshot, &backend);
+            }
             if refresh_builtin_menu(&mut shell, &snapshot)? {
                 if let Some(geometry) = geometry {
                     scene = Some(render_and_present(
@@ -508,6 +589,23 @@ fn handle_live_report(
 
     if policy.execute_provider_actions {
         if let ActionReport::Dispatched { action, .. } = report {
+            if let Some(command) = parse_desktop_command(action, snapshot)? {
+                match command {
+                    DesktopCommand::Switch { desktop_id } => {
+                        let id = parse_workspace_id(&desktop_id)?;
+                        backend
+                            .activate_workspace(id)
+                            .map_err(|error| error.to_string())?;
+                    }
+                    DesktopCommand::MoveWindow { .. } => {
+                        return Err(
+                            "move-window-to-desktop is not exposed by the active Wayland protocols"
+                                .into(),
+                        );
+                    }
+                }
+                return Ok(false);
+            }
             if let Some(command) = parse_window_command(action, &snapshot.windows)? {
                 execute_window_command(backend, command)?;
                 return Ok(false);
@@ -522,19 +620,17 @@ fn handle_live_report(
                         "nuraloumi-provider-result: executed={} dry_run={} message={}",
                         result.executed, result.dry_run, result.message
                     );
-                    let applications = std::mem::take(&mut snapshot.applications);
-                    *snapshot = fixture_snapshot_from_probe(&ProbeSnapshot::live());
-                    snapshot.applications = applications;
+                    refresh_probe_snapshot(snapshot, &ProbeSnapshot::live());
                     refresh_window_snapshot(snapshot, backend);
+                    refresh_workspace_snapshot(snapshot, backend);
                     refresh_builtin_menu(shell, snapshot)?;
                 }
                 Ok(None) => {}
                 Err(error) => {
                     eprintln!("nuraloumi-provider-error: {error}");
-                    let applications = std::mem::take(&mut snapshot.applications);
-                    *snapshot = fixture_snapshot_from_probe(&ProbeSnapshot::live());
-                    snapshot.applications = applications;
+                    refresh_probe_snapshot(snapshot, &ProbeSnapshot::live());
                     refresh_window_snapshot(snapshot, backend);
+                    refresh_workspace_snapshot(snapshot, backend);
                     refresh_builtin_menu(shell, snapshot)?;
                 }
             }
@@ -831,6 +927,7 @@ fn parse_args() -> Result<Args, String> {
             "--headless" => {}
             "--live" => parsed.live = true,
             "--probe-toplevels" => parsed.probe_toplevels = true,
+            "--probe-workspaces" => parsed.probe_workspaces = true,
             "--family" => parsed.family = Some(next_value(&mut args, "--family")?),
             "--fixture" => parsed.fixture = Some(next_value(&mut args, "--fixture")?.into()),
             "--providers" => parsed.providers = Some(next_value(&mut args, "--providers")?.into()),
