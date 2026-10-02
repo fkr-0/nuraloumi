@@ -348,6 +348,7 @@ impl WaylandBackend {
             .surfaces
             .remove(&id)
             .ok_or(BackendError::UnknownSurface(id.0))?;
+        clear_surface_input_routes(&mut self.state, id);
         if record.layer.is_alive() {
             record.layer.destroy();
         }
@@ -870,8 +871,10 @@ impl Dispatch<wl_pointer::WlPointer, ()> for BackendState {
                 state: button_state,
                 ..
             } => {
-                let pressed =
-                    matches!(button_state, WEnum::Value(wl_pointer::ButtonState::Pressed));
+                let WEnum::Value(button_state) = button_state else {
+                    return;
+                };
+                let pressed = matches!(button_state, wl_pointer::ButtonState::Pressed);
                 state.events.push_back(BackendEvent {
                     surface: state.pointer_surface,
                     event: PlatformEvent::PointerButton {
@@ -956,7 +959,10 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for BackendState {
                 state: key_state,
                 ..
             } => {
-                let pressed = matches!(key_state, WEnum::Value(wl_keyboard::KeyState::Pressed));
+                let WEnum::Value(key_state) = key_state else {
+                    return;
+                };
+                let pressed = matches!(key_state, wl_keyboard::KeyState::Pressed);
                 if key == 42 || key == 54 {
                     state.shift_down = pressed;
                 }
@@ -1013,6 +1019,25 @@ fn cancel_active_touches(state: &mut BackendState) {
             surface: None,
             event: PlatformEvent::TouchCancel { ids },
         });
+    }
+}
+
+fn clear_surface_input_routes(state: &mut BackendState, id: SurfaceId) {
+    if state.pointer_surface == Some(id) {
+        state.pointer_surface = None;
+    }
+    if state.keyboard_surface == Some(id) {
+        state.keyboard_surface = None;
+    }
+
+    let touch_ids: Vec<_> = state
+        .touch_surfaces
+        .iter()
+        .filter_map(|(touch_id, surface_id)| (*surface_id == id).then_some(*touch_id))
+        .collect();
+    for touch_id in touch_ids {
+        state.touch_surfaces.remove(&touch_id);
+        state.active_touches.remove(&touch_id);
     }
 }
 
@@ -1134,6 +1159,26 @@ mod tests {
         ));
         assert!(validate_panel_config(&PanelConfig::default()).is_ok());
         assert!(validate_menu_config(&MenuConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn destroying_surface_clears_only_its_input_routes() {
+        let dead = SurfaceId(7);
+        let live = SurfaceId(9);
+        let mut state = BackendState {
+            pointer_surface: Some(dead),
+            keyboard_surface: Some(dead),
+            touch_surfaces: HashMap::from([(3, dead), (8, live)]),
+            active_touches: BTreeSet::from([3, 8]),
+            ..BackendState::default()
+        };
+
+        clear_surface_input_routes(&mut state, dead);
+
+        assert_eq!(state.pointer_surface, None);
+        assert_eq!(state.keyboard_surface, None);
+        assert_eq!(state.touch_surfaces, HashMap::from([(8, live)]));
+        assert_eq!(state.active_touches, BTreeSet::from([8]));
     }
 
     #[test]
