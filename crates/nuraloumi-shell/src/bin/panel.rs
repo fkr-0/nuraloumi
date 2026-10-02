@@ -2,8 +2,9 @@ use nuraloumi_core::{DARK_THEME, LIGHT_THEME};
 use nuraloumi_providers::{
     ActionProvider, ActionResult, ApplicationAction, ApplicationProvider, ApplicationSnapshot,
     AudioAction, AudioProvider, BacklightAction, BacklightProvider, BluetoothAction,
-    BluetoothProvider, Health, NetworkAction, NetworkProvider, ProbeSnapshot, Provider,
-    SessionAction, SessionProvider, SnapshotMeta, SystemCommandRunner,
+    BluetoothProvider, Health, MediaAction, MediaProvider, NetworkAction, NetworkProvider,
+    NotificationAction, NotificationProvider, ProbeSnapshot, Provider, SessionAction,
+    SessionProvider, SnapshotMeta, SystemCommandRunner,
 };
 use nuraloumi_render_cairo::{
     CairoRenderer, Color, HitRegion as RenderHitRegion, PaintNode, Point, Rect, RenderOptions,
@@ -14,10 +15,12 @@ use nuraloumi_shell::{
     load_fixture_snapshot, panel_affordances, parse_desktop_command, parse_family,
     parse_window_command, window_entries, ActionReport, ApplicationEntry as ShellApplicationEntry,
     BluetoothDeviceEntry, ControlCenterTab, DesktopCommand, DesktopControlCapabilities,
-    DesktopEntry, FixtureSnapshot, HitRegion as ShellHitRegion, MenuAction, MenuFamily,
-    OverviewMode, PanelAffordance, PanelController, PanelEdge as ShellPanelEdge,
-    PlatformEvent as ShellPlatformEvent, ProviderValue, SemanticInput, ShellConfig, ShellState,
-    Theme as ShellTheme, ValueState, WifiNetworkEntry, WindowControlCapabilities,
+    DesktopEntry, FixtureSnapshot, HitRegion as ShellHitRegion,
+    MediaPlayerEntry as ShellMediaPlayerEntry, MenuAction, MenuFamily,
+    NotificationHistoryEntry as ShellNotificationHistoryEntry, OverviewMode, PanelAffordance,
+    PanelController, PanelEdge as ShellPanelEdge, PlatformEvent as ShellPlatformEvent,
+    ProviderValue, SemanticInput, ShellConfig, ShellState, Theme as ShellTheme, ValueState,
+    WifiNetworkEntry, WindowControlCapabilities,
 };
 use nuraloumi_wayland::{
     BackendCapabilities as WaylandCapabilities, BackendError, Frame, Key as WaylandKey,
@@ -25,7 +28,7 @@ use nuraloumi_wayland::{
     PanelEdge as WaylandPanelEdge, PixelFormat, PlatformEvent as WaylandEvent, SurfaceId,
     WaylandBackend, WorkspaceId,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::env;
 use std::path::PathBuf;
@@ -120,10 +123,23 @@ struct LivePolicy {
     enable_power_actions: bool,
 }
 
+#[derive(Debug, Deserialize)]
+struct NotificationInvokeRequest {
+    id: u32,
+    action: String,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PanelTarget {
     family: MenuFamily,
     focus_search: bool,
+    control_center_tab: Option<ControlCenterTab>,
+}
+
+#[derive(Clone, Copy)]
+struct PanelActivationContext<'a> {
+    output: Option<&'a nuraloumi_wayland::OutputInfo>,
+    policy: LivePolicy,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -307,6 +323,12 @@ fn run_live(
                 refresh_workspace_snapshot(&mut snapshot, &backend);
             }
             if let Some(menu) = active_menu.as_mut() {
+                if policy.execute_provider_actions && menu.family == MenuFamily::ControlCenter {
+                    refresh_control_center_tab_snapshot(
+                        &mut snapshot,
+                        menu.shell.control_center_tab,
+                    );
+                }
                 menu.shell.refresh_family(menu.family, &snapshot)?;
                 if let Some(menu_geometry) = menu.geometry {
                     menu.scene = Some(render_menu_and_present(
@@ -363,11 +385,14 @@ fn run_live(
                                     activate_panel_target(
                                         &mut backend,
                                         &config,
-                                        &snapshot,
-                                        output.as_ref(),
+                                        &mut snapshot,
                                         &mut panel,
                                         &mut active_menu,
                                         &id,
+                                        PanelActivationContext {
+                                            output: output.as_ref(),
+                                            policy,
+                                        },
                                     )?;
                                     panel_scene = None;
                                 }
@@ -386,11 +411,14 @@ fn run_live(
                             activate_panel_target(
                                 &mut backend,
                                 &config,
-                                &snapshot,
-                                output.as_ref(),
+                                &mut snapshot,
                                 &mut panel,
                                 &mut active_menu,
                                 &item_id,
+                                PanelActivationContext {
+                                    output: output.as_ref(),
+                                    policy,
+                                },
                             )?;
                             panel_scene = None;
                         }
@@ -522,8 +550,11 @@ fn run_live(
                         panel_scene = None;
                         redraw = true;
                     } else if kind == "control.tab" {
-                        menu.shell
-                            .set_control_center_tab(ControlCenterTab::parse(payload)?, &snapshot)?;
+                        let tab = ControlCenterTab::parse(payload)?;
+                        if policy.execute_provider_actions {
+                            refresh_control_center_tab_snapshot(&mut snapshot, tab);
+                        }
+                        menu.shell.set_control_center_tab(tab, &snapshot)?;
                         panel_scene = None;
                         redraw = true;
                     }
@@ -571,7 +602,9 @@ fn run_live(
                                         "nuraloumi-provider-result: executed={} dry_run={} message={}",
                                         result.executed, result.dry_run, result.message
                                     );
-                                        if !app_launch {
+                                        let lazy_control =
+                                            refresh_lazy_control_action(&mut snapshot, action);
+                                        if !lazy_control && !app_launch {
                                             refresh_probe_snapshot(
                                                 &mut snapshot,
                                                 &ProbeSnapshot::live(),
@@ -586,7 +619,9 @@ fn run_live(
                                     Ok(None) => {}
                                     Err(error) => {
                                         eprintln!("nuraloumi-provider-error: {error}");
-                                        if !app_launch {
+                                        let lazy_control =
+                                            refresh_lazy_control_action(&mut snapshot, action);
+                                        if !lazy_control && !app_launch {
                                             refresh_probe_snapshot(
                                                 &mut snapshot,
                                                 &ProbeSnapshot::live(),
@@ -617,6 +652,9 @@ fn run_live(
                 menu.family = family;
                 if family != MenuFamily::Launcher && menu.shell.search_focused {
                     let _ = menu.shell.focus_search(false);
+                }
+                if policy.execute_provider_actions && family == MenuFamily::ControlCenter {
+                    refresh_control_center_tab_snapshot(&mut snapshot, ControlCenterTab::Media);
                 }
                 menu.shell.refresh_family(family, &snapshot)?;
                 panel_scene = None;
@@ -660,6 +698,12 @@ fn run_live(
                 refresh_workspace_snapshot(&mut snapshot, &backend);
             }
             if let Some(menu) = active_menu.as_mut() {
+                if policy.execute_provider_actions && menu.family == MenuFamily::ControlCenter {
+                    refresh_control_center_tab_snapshot(
+                        &mut snapshot,
+                        menu.shell.control_center_tab,
+                    );
+                }
                 menu.shell.refresh_family(menu.family, &snapshot)?;
                 if let Some(menu_geometry) = menu.geometry {
                     menu.scene = Some(render_menu_and_present(
@@ -766,26 +810,34 @@ fn open_live_menu(
 fn activate_panel_target(
     backend: &mut WaylandBackend,
     config: &ShellConfig,
-    snapshot: &FixtureSnapshot,
-    output: Option<&nuraloumi_wayland::OutputInfo>,
+    snapshot: &mut FixtureSnapshot,
     panel: &mut PanelController,
     active_menu: &mut Option<LiveMenu>,
     item_id: &str,
+    context: PanelActivationContext<'_>,
 ) -> Result<(), String> {
     let Some(target) = panel_target_for_id(item_id) else {
         return Ok(());
     };
+    if context.policy.execute_provider_actions {
+        if let Some(tab) = target.control_center_tab {
+            refresh_control_center_tab_snapshot(snapshot, tab);
+        }
+    }
     replace_live_menu(
         backend,
         config,
         snapshot,
-        output,
+        context.output,
         panel,
         active_menu,
         target.family,
     )?;
-    if target.focus_search {
-        if let Some(menu) = active_menu.as_mut() {
+    if let Some(menu) = active_menu.as_mut() {
+        if let Some(tab) = target.control_center_tab {
+            menu.shell.set_control_center_tab(tab, snapshot)?;
+        }
+        if target.focus_search {
             let _ = menu.shell.apply_input(launcher_search_input());
         }
     }
@@ -1254,17 +1306,30 @@ fn state_color(state: ValueState, theme: RenderTheme) -> Color {
 }
 
 fn panel_target_for_id(id: &str) -> Option<PanelTarget> {
-    let (family, focus_search) = match id {
-        "apps" => (MenuFamily::Launcher, false),
-        "network" => (MenuFamily::Network, false),
-        "search" => (MenuFamily::Launcher, true),
-        "audio" => (MenuFamily::Audio, false),
-        "battery" | "clock" => (MenuFamily::ControlCenter, false),
+    let (family, focus_search, control_center_tab) = match id {
+        "apps" => (MenuFamily::Launcher, false, None),
+        "network" => (
+            MenuFamily::ControlCenter,
+            false,
+            Some(ControlCenterTab::Network),
+        ),
+        "search" => (MenuFamily::Launcher, true, None),
+        "audio" => (
+            MenuFamily::ControlCenter,
+            false,
+            Some(ControlCenterTab::Media),
+        ),
+        "battery" | "clock" => (
+            MenuFamily::ControlCenter,
+            false,
+            Some(ControlCenterTab::System),
+        ),
         _ => return None,
     };
     Some(PanelTarget {
         family,
         focus_search,
+        control_center_tab,
     })
 }
 
@@ -1383,6 +1448,18 @@ fn fixture_snapshot_from_probe(probe: &ProbeSnapshot) -> FixtureSnapshot {
             }),
             &probe.bluetooth.issues,
         ),
+        media: ProviderValue {
+            state: ValueState::Unavailable,
+            value: None,
+            message: Some("MPRIS provider not refreshed yet".into()),
+        },
+        media_player: None,
+        notifications: ProviderValue {
+            state: ValueState::Unavailable,
+            value: None,
+            message: Some("Notification history not refreshed yet".into()),
+        },
+        notification_history: Vec::new(),
         wifi_networks,
         bluetooth_devices: probe
             .bluetooth
@@ -1408,11 +1485,19 @@ fn refresh_probe_snapshot(snapshot: &mut FixtureSnapshot, probe: &ProbeSnapshot)
     let windows = std::mem::take(&mut snapshot.windows);
     let desktops = std::mem::take(&mut snapshot.desktops);
     let desktop_capabilities = snapshot.desktop_capabilities;
+    let media = snapshot.media.clone();
+    let media_player = snapshot.media_player.clone();
+    let notifications = snapshot.notifications.clone();
+    let notification_history = snapshot.notification_history.clone();
     *snapshot = fixture_snapshot_from_probe(probe);
     snapshot.applications = applications;
     snapshot.windows = windows;
     snapshot.desktops = desktops;
     snapshot.desktop_capabilities = desktop_capabilities;
+    snapshot.media = media;
+    snapshot.media_player = media_player;
+    snapshot.notifications = notifications;
+    snapshot.notification_history = notification_history;
 }
 
 fn apply_application_snapshot(
@@ -1440,6 +1525,98 @@ fn apply_application_snapshot(
     }
 }
 
+fn refresh_media_snapshot(snapshot: &mut FixtureSnapshot) {
+    let mut provider = MediaProvider::system();
+    match provider.snapshot() {
+        Ok(media) => {
+            let current = media.current().cloned();
+            let value = current.as_ref().map(|player| {
+                let label = player
+                    .title
+                    .as_deref()
+                    .filter(|title| !title.is_empty())
+                    .unwrap_or(&player.id);
+                format!("{} · {label}", player.status)
+            });
+            snapshot.media = probe_value(&media.meta, value, &media.issues);
+            snapshot.media_player = current.map(|player| ShellMediaPlayerEntry {
+                id: player.id,
+                status: player.status,
+                artist: player.artist,
+                title: player.title,
+            });
+        }
+        Err(error) => {
+            snapshot.media = ProviderValue {
+                state: ValueState::Unavailable,
+                value: None,
+                message: Some(error.diagnostic()),
+            };
+            snapshot.media_player = None;
+        }
+    }
+}
+
+fn refresh_notification_snapshot(snapshot: &mut FixtureSnapshot) {
+    let mut provider = NotificationProvider::system();
+    match provider.snapshot() {
+        Ok(notifications) => {
+            let value = Some(format!(
+                "{} saved notification{}",
+                notifications.notifications.len(),
+                if notifications.notifications.len() == 1 {
+                    ""
+                } else {
+                    "s"
+                }
+            ));
+            snapshot.notifications = probe_value(&notifications.meta, value, &notifications.issues);
+            snapshot.notification_history = notifications
+                .notifications
+                .into_iter()
+                .map(|notification| ShellNotificationHistoryEntry {
+                    id: notification.id,
+                    app: notification.app,
+                    summary: notification.summary,
+                    body: notification.body,
+                    actions: notification.actions,
+                    default_action: notification.default_action,
+                })
+                .collect();
+        }
+        Err(error) => {
+            snapshot.notifications = ProviderValue {
+                state: ValueState::Unavailable,
+                value: None,
+                message: Some(error.diagnostic()),
+            };
+            snapshot.notification_history.clear();
+        }
+    }
+}
+
+fn refresh_control_center_tab_snapshot(snapshot: &mut FixtureSnapshot, tab: ControlCenterTab) {
+    match tab {
+        ControlCenterTab::Media => refresh_media_snapshot(snapshot),
+        ControlCenterTab::Notifications => refresh_notification_snapshot(snapshot),
+        ControlCenterTab::Network | ControlCenterTab::Display | ControlCenterTab::System => {}
+    }
+}
+
+fn refresh_lazy_control_action(snapshot: &mut FixtureSnapshot, action: &MenuAction) -> bool {
+    match action {
+        MenuAction::Custom { kind, .. } if kind.starts_with("media.") => {
+            refresh_media_snapshot(snapshot);
+            true
+        }
+        MenuAction::Custom { kind, .. } if kind.starts_with("notification.") => {
+            refresh_notification_snapshot(snapshot);
+            true
+        }
+        _ => false,
+    }
+}
+
 fn refresh_window_snapshot(snapshot: &mut FixtureSnapshot, backend: &WaylandBackend) {
     let capabilities = window_control_capabilities(&backend.capabilities());
     snapshot.windows = window_entries(&backend.toplevels(), capabilities);
@@ -1460,6 +1637,54 @@ fn execute_live_action(
             ApplicationProvider::system()
                 .execute(ApplicationAction::Launch {
                     id: payload.clone(),
+                })
+                .map_err(|error| error.to_string())?
+        }
+        MenuAction::Custom { kind, payload } if kind == "media.previous" => MediaProvider::system()
+            .execute(MediaAction::Previous {
+                player: payload.clone(),
+            })
+            .map_err(|error| error.to_string())?,
+        MenuAction::Custom { kind, payload } if kind == "media.play_pause" => {
+            MediaProvider::system()
+                .execute(MediaAction::PlayPause {
+                    player: payload.clone(),
+                })
+                .map_err(|error| error.to_string())?
+        }
+        MenuAction::Custom { kind, payload } if kind == "media.next" => MediaProvider::system()
+            .execute(MediaAction::Next {
+                player: payload.clone(),
+            })
+            .map_err(|error| error.to_string())?,
+        MenuAction::Custom { kind, payload } if kind == "notification.redisplay" => {
+            let id = payload
+                .parse::<u32>()
+                .map_err(|_| format!("invalid notification id {payload:?}"))?;
+            NotificationProvider::system()
+                .execute(NotificationAction::Redisplay { id })
+                .map_err(|error| error.to_string())?
+        }
+        MenuAction::Custom { kind, payload } if kind == "notification.remove" => {
+            let id = payload
+                .parse::<u32>()
+                .map_err(|_| format!("invalid notification id {payload:?}"))?;
+            NotificationProvider::system()
+                .execute(NotificationAction::Remove { id })
+                .map_err(|error| error.to_string())?
+        }
+        MenuAction::Custom { kind, .. } if kind == "notification.clear" => {
+            NotificationProvider::system()
+                .execute(NotificationAction::Clear)
+                .map_err(|error| error.to_string())?
+        }
+        MenuAction::Custom { kind, payload } if kind == "notification.invoke" => {
+            let request: NotificationInvokeRequest = serde_json::from_str(payload)
+                .map_err(|error| format!("invalid notification action payload: {error}"))?;
+            NotificationProvider::system()
+                .execute(NotificationAction::Invoke {
+                    id: request.id,
+                    action: request.action,
                 })
                 .map_err(|error| error.to_string())?
         }
@@ -1618,13 +1843,15 @@ mod tests {
             Some(PanelTarget {
                 family: MenuFamily::Launcher,
                 focus_search: false,
+                control_center_tab: None,
             })
         );
         assert_eq!(
             panel_target_for_id("network"),
             Some(PanelTarget {
-                family: MenuFamily::Network,
+                family: MenuFamily::ControlCenter,
                 focus_search: false,
+                control_center_tab: Some(ControlCenterTab::Network),
             })
         );
         assert_eq!(
@@ -1632,13 +1859,15 @@ mod tests {
             Some(PanelTarget {
                 family: MenuFamily::Launcher,
                 focus_search: true,
+                control_center_tab: None,
             })
         );
         assert_eq!(
             panel_target_for_id("audio"),
             Some(PanelTarget {
-                family: MenuFamily::Audio,
+                family: MenuFamily::ControlCenter,
                 focus_search: false,
+                control_center_tab: Some(ControlCenterTab::Media),
             })
         );
         assert_eq!(
@@ -1646,6 +1875,7 @@ mod tests {
             Some(PanelTarget {
                 family: MenuFamily::ControlCenter,
                 focus_search: false,
+                control_center_tab: Some(ControlCenterTab::System),
             })
         );
         assert_eq!(
@@ -1653,6 +1883,7 @@ mod tests {
             Some(PanelTarget {
                 family: MenuFamily::ControlCenter,
                 focus_search: false,
+                control_center_tab: Some(ControlCenterTab::System),
             })
         );
     }

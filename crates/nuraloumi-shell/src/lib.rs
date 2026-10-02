@@ -225,6 +225,37 @@ pub struct ApplicationEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MediaPlayerEntry {
+    pub id: String,
+    pub status: String,
+    #[serde(default)]
+    pub artist: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotificationHistoryEntry {
+    pub id: u32,
+    #[serde(default)]
+    pub app: String,
+    #[serde(default)]
+    pub summary: String,
+    #[serde(default)]
+    pub body: String,
+    #[serde(default)]
+    pub actions: Vec<String>,
+    #[serde(default)]
+    pub default_action: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct NotificationInvokePayload {
+    id: u32,
+    action: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DesktopEntry {
     pub id: String,
     pub label: String,
@@ -378,6 +409,22 @@ fn default_bluetooth_value() -> ProviderValue {
     }
 }
 
+fn default_media_value() -> ProviderValue {
+    ProviderValue {
+        state: ValueState::Unavailable,
+        value: None,
+        message: Some("MPRIS provider not connected".into()),
+    }
+}
+
+fn default_notifications_value() -> ProviderValue {
+    ProviderValue {
+        state: ValueState::Unavailable,
+        value: None,
+        message: Some("Notification history provider not connected".into()),
+    }
+}
+
 const fn default_brightness_writable() -> bool {
     true
 }
@@ -393,6 +440,14 @@ pub struct FixtureSnapshot {
     pub brightness_writable: bool,
     #[serde(default = "default_bluetooth_value")]
     pub bluetooth: ProviderValue,
+    #[serde(default = "default_media_value")]
+    pub media: ProviderValue,
+    #[serde(default)]
+    pub media_player: Option<MediaPlayerEntry>,
+    #[serde(default = "default_notifications_value")]
+    pub notifications: ProviderValue,
+    #[serde(default)]
+    pub notification_history: Vec<NotificationHistoryEntry>,
     #[serde(default)]
     pub wifi_networks: Vec<WifiNetworkEntry>,
     #[serde(default)]
@@ -443,6 +498,10 @@ impl Default for FixtureSnapshot {
                 value: Some("On · 1 connected".into()),
                 message: None,
             },
+            media: default_media_value(),
+            media_player: None,
+            notifications: default_notifications_value(),
+            notification_history: Vec::new(),
             wifi_networks: vec![
                 WifiNetworkEntry {
                     ssid: "Lab Wi-Fi".into(),
@@ -892,13 +951,57 @@ pub fn build_control_center_menu(snapshot: &FixtureSnapshot, tab: ControlCenterT
     match tab {
         ControlCenterTab::Media => {
             let available = snapshot.audio.available();
-            items.extend([
-                section("control.media.now-playing", "Now playing"),
-                status(
+            items.push(section("control.media.now-playing", "Now playing"));
+            if let Some(player) = &snapshot.media_player {
+                let label = player
+                    .title
+                    .as_deref()
+                    .filter(|title| !title.is_empty())
+                    .unwrap_or("Untitled media");
+                let mut detail = Vec::new();
+                if let Some(artist) = player.artist.as_deref().filter(|artist| !artist.is_empty()) {
+                    detail.push(artist.to_owned());
+                }
+                detail.push(player.status.clone());
+                items.extend([
+                    status("control.media.player", label, &detail.join(" · ")),
+                    custom_action(
+                        "control.media.previous",
+                        "Previous",
+                        Some(label),
+                        "media.previous",
+                        &player.id,
+                        true,
+                    ),
+                    custom_action(
+                        "control.media.play-pause",
+                        if player.status.eq_ignore_ascii_case("playing") {
+                            "Pause"
+                        } else {
+                            "Play"
+                        },
+                        Some(label),
+                        "media.play_pause",
+                        &player.id,
+                        true,
+                    ),
+                    custom_action(
+                        "control.media.next",
+                        "Next",
+                        Some(label),
+                        "media.next",
+                        &player.id,
+                        true,
+                    ),
+                ]);
+            } else {
+                items.push(provider_status(
                     "control.media.player",
                     "Media player",
-                    "MPRIS provider not connected yet",
-                ),
+                    &snapshot.media,
+                ));
+            }
+            items.extend([
                 section("control.media.audio", "Audio"),
                 provider_status("control.media.volume", "Speaker volume", &snapshot.audio),
                 toggle_action(
@@ -1023,19 +1126,39 @@ pub fn build_control_center_menu(snapshot: &FixtureSnapshot, tab: ControlCenterT
             ]);
         }
         ControlCenterTab::Notifications => {
-            items.extend([
-                section("control.notifications.center", "Notifications"),
-                status(
-                    "control.notifications.unavailable",
-                    "No notification center provider",
-                    "History and actions will appear here when notification integration is connected",
-                ),
-                status(
+            items.push(section("control.notifications.center", "Notifications"));
+            items.push(provider_status(
+                "control.notifications.provider",
+                "Notification history",
+                &snapshot.notifications,
+            ));
+            if snapshot.notification_history.is_empty() {
+                items.push(status(
                     "control.notifications.empty",
                     "No notifications",
-                    "Stable empty state",
-                ),
-            ]);
+                    if snapshot.notifications.available() {
+                        "History is empty"
+                    } else {
+                        "Notification history is unavailable"
+                    },
+                ));
+            } else {
+                items.push(custom_action(
+                    "control.notifications.clear",
+                    "Clear history…",
+                    Some("Remove every saved notification"),
+                    "notification.clear",
+                    "",
+                    true,
+                ));
+                items.extend(
+                    snapshot
+                        .notification_history
+                        .iter()
+                        .take(24)
+                        .map(notification_history_item),
+                );
+            }
         }
     }
 
@@ -1044,6 +1167,63 @@ pub fn build_control_center_menu(snapshot: &FixtureSnapshot, tab: ControlCenterT
         title: "Control Center".into(),
         items,
     }
+}
+
+fn notification_history_item(notification: &NotificationHistoryEntry) -> MenuItem {
+    let label = if notification.summary.trim().is_empty() {
+        format!("Notification {}", notification.id)
+    } else {
+        notification.summary.clone()
+    };
+    let mut children = vec![
+        custom_action(
+            &format!("notification.{}.redisplay", notification.id),
+            "Show again",
+            Some("Redisplay this history item"),
+            "notification.redisplay",
+            &notification.id.to_string(),
+            true,
+        ),
+        custom_action(
+            &format!("notification.{}.remove", notification.id),
+            "Dismiss from history",
+            Some("Remove this saved notification"),
+            "notification.remove",
+            &notification.id.to_string(),
+            true,
+        ),
+    ];
+
+    for (index, action) in notification.actions.iter().take(4).enumerate() {
+        let payload = serde_json::to_string(&NotificationInvokePayload {
+            id: notification.id,
+            action: action.clone(),
+        })
+        .expect("notification action payload is serializable");
+        children.push(custom_action(
+            &format!("notification.{}.action.{index}", notification.id),
+            if notification.default_action.as_deref() == Some(action.as_str()) {
+                "Open"
+            } else {
+                action
+            },
+            Some("Invoke notification action"),
+            "notification.invoke",
+            &payload,
+            true,
+        ));
+    }
+
+    let mut item = MenuItem::submenu(format!("notification.{}", notification.id), label, children);
+    let mut subtitle = Vec::new();
+    if !notification.app.trim().is_empty() {
+        subtitle.push(notification.app.clone());
+    }
+    if !notification.body.trim().is_empty() {
+        subtitle.push(notification.body.clone());
+    }
+    item.subtitle = (!subtitle.is_empty()).then(|| subtitle.join(" · "));
+    item
 }
 
 pub fn build_network_menu(snapshot: &FixtureSnapshot) -> MenuModel {
@@ -2595,7 +2775,7 @@ mod tests {
                 && item
                     .subtitle
                     .as_deref()
-                    .is_some_and(|subtitle| subtitle.contains("MPRIS"))
+                    .is_some_and(|subtitle| subtitle.contains("Unavailable"))
         }));
 
         let network = build_control_center_menu(&snapshot, ControlCenterTab::Network);
@@ -2616,7 +2796,7 @@ mod tests {
         assert!(notifications
             .items
             .iter()
-            .any(|item| item.id == "control.notifications.unavailable"));
+            .any(|item| item.id == "control.notifications.provider"));
 
         for tab in [
             ControlCenterTab::Media,
@@ -2629,6 +2809,75 @@ mod tests {
                 .validate()
                 .expect("control-center tab validates");
         }
+    }
+
+    #[test]
+    fn control_center_renders_real_media_and_notification_actions() {
+        let mut snapshot = FixtureSnapshot {
+            media: ProviderValue {
+                state: ValueState::Ready,
+                value: Some("Playing · Night Drive".into()),
+                message: None,
+            },
+            media_player: Some(MediaPlayerEntry {
+                id: "mpv".into(),
+                status: "Playing".into(),
+                artist: Some("Artist".into()),
+                title: Some("Night Drive".into()),
+            }),
+            ..FixtureSnapshot::default()
+        };
+
+        let media = build_control_center_menu(&snapshot, ControlCenterTab::Media);
+        media.validate().expect("real media menu validates");
+        assert!(media.items.iter().any(|item| {
+            matches!(
+                item.action,
+                Some(MenuAction::Custom {
+                    ref kind,
+                    ref payload
+                }) if kind == "media.play_pause" && payload == "mpv"
+            )
+        }));
+
+        snapshot.notifications = ProviderValue {
+            state: ValueState::Ready,
+            value: Some("1 saved notification".into()),
+            message: None,
+        };
+        snapshot.notification_history = vec![NotificationHistoryEntry {
+            id: 42,
+            app: "Chat".into(),
+            summary: "Message".into(),
+            body: "Hello".into(),
+            actions: vec!["default".into(), "reply".into()],
+            default_action: Some("default".into()),
+        }];
+
+        let notifications = build_control_center_menu(&snapshot, ControlCenterTab::Notifications);
+        notifications
+            .validate()
+            .expect("notification history menu validates");
+        let entry = notifications
+            .items
+            .iter()
+            .find(|item| item.id == "notification.42")
+            .expect("history submenu");
+        assert!(entry.children.iter().any(|item| {
+            matches!(
+                item.action,
+                Some(MenuAction::Custom {
+                    ref kind,
+                    ref payload
+                }) if kind == "notification.remove" && payload == "42"
+            )
+        }));
+        assert!(entry.children.iter().any(|item| {
+            matches!(
+                item.action,
+                Some(MenuAction::Custom { ref kind, .. }) if kind == "notification.invoke"
+            )
+        }));
     }
 
     #[test]

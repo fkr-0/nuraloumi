@@ -12,7 +12,9 @@ pub mod clock;
 pub mod command;
 pub mod common;
 pub mod error;
+pub mod media;
 pub mod network;
+pub mod notifications;
 pub mod probe;
 pub mod session;
 
@@ -30,7 +32,11 @@ pub use command::{
 };
 pub use common::{ActionProvider, ActionResult, Health, Provider, SnapshotMeta};
 pub use error::{ProviderError, ProviderErrorCategory};
+pub use media::{MediaAction, MediaPlayer, MediaProvider, MediaSnapshot};
 pub use network::{NetworkAction, NetworkProvider, NetworkSnapshot, WifiNetwork};
+pub use notifications::{
+    NotificationAction, NotificationEntry, NotificationProvider, NotificationSnapshot,
+};
 pub use probe::ProbeSnapshot;
 pub use session::{SessionAction, SessionProvider, SessionSnapshot};
 

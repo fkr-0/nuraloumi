@@ -2,8 +2,9 @@ use nuraloumi_core::{DARK_THEME, LIGHT_THEME};
 use nuraloumi_providers::{
     ActionProvider, ActionResult, ApplicationAction, ApplicationProvider, AudioAction,
     AudioProvider, BacklightAction, BacklightProvider, BluetoothAction, BluetoothProvider, Health,
-    NetworkAction, NetworkProvider, ProbeSnapshot, Provider, SessionAction, SessionProvider,
-    SnapshotMeta, SystemCommandRunner,
+    MediaAction, MediaProvider, NetworkAction, NetworkProvider, NotificationAction,
+    NotificationProvider, ProbeSnapshot, Provider, SessionAction, SessionProvider, SnapshotMeta,
+    SystemCommandRunner,
 };
 use nuraloumi_render_cairo::{CairoRenderer, RenderOptions, Scene, Viewport};
 use nuraloumi_shell::{
@@ -11,7 +12,8 @@ use nuraloumi_shell::{
     load_fixture_snapshot, load_menu, parse_desktop_command, parse_family, parse_window_command,
     window_entries, ActionReport, ApplicationEntry as ShellApplicationEntry, BluetoothDeviceEntry,
     ControlCenterTab, DesktopCommand, DesktopControlCapabilities, DesktopEntry, FixtureSnapshot,
-    HitRegion as ShellHitRegion, MenuAction, MenuFamily, OverviewMode,
+    HitRegion as ShellHitRegion, MediaPlayerEntry as ShellMediaPlayerEntry, MenuAction, MenuFamily,
+    NotificationHistoryEntry as ShellNotificationHistoryEntry, OverviewMode,
     PlatformEvent as ShellPlatformEvent, ProviderValue, SemanticInput, ShellConfig, ShellInput,
     ShellState, Theme as ShellTheme, ValueState, WifiNetworkEntry, WindowControlCapabilities,
     WindowEntry,
@@ -21,7 +23,7 @@ use nuraloumi_wayland::{
     MenuConfig as WaylandMenuConfig, PixelFormat, PlatformEvent as WaylandEvent, SurfaceId,
     WaylandBackend, WorkspaceId,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::env;
 use std::path::PathBuf;
@@ -77,11 +79,19 @@ fn refresh_probe_snapshot(snapshot: &mut FixtureSnapshot, probe: &ProbeSnapshot)
     let windows = std::mem::take(&mut snapshot.windows);
     let desktops = std::mem::take(&mut snapshot.desktops);
     let desktop_capabilities = snapshot.desktop_capabilities;
+    let media = snapshot.media.clone();
+    let media_player = snapshot.media_player.clone();
+    let notifications = snapshot.notifications.clone();
+    let notification_history = snapshot.notification_history.clone();
     *snapshot = fixture_snapshot_from_probe(probe);
     snapshot.applications = applications;
     snapshot.windows = windows;
     snapshot.desktops = desktops;
     snapshot.desktop_capabilities = desktop_capabilities;
+    snapshot.media = media;
+    snapshot.media_player = media_player;
+    snapshot.notifications = notifications;
+    snapshot.notification_history = notification_history;
 }
 
 fn refresh_workspace_snapshot(snapshot: &mut FixtureSnapshot, backend: &WaylandBackend) {
@@ -119,6 +129,12 @@ struct LivePolicy {
     execute_provider_actions: bool,
     enable_power_actions: bool,
     enable_unsafe_suspend: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct NotificationInvokeRequest {
+    id: u32,
+    action: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -348,6 +364,8 @@ fn run_live(
     let mut geometry: Option<(u32, u32, i32)> = None;
     let mut scene: Option<Scene> = None;
     let mut touch_regions: BTreeMap<i32, Option<ShellHitRegion>> = BTreeMap::new();
+    let mut initial_control_refresh_pending =
+        policy.execute_provider_actions && shell.menu.id == "control-center";
 
     loop {
         backend
@@ -486,6 +504,22 @@ fn run_live(
                         &shell,
                         geometry,
                     )?);
+                    if initial_control_refresh_pending {
+                        initial_control_refresh_pending = false;
+                        refresh_control_center_tab_snapshot(
+                            &mut snapshot,
+                            shell.control_center_tab,
+                        );
+                        shell.refresh_family(MenuFamily::ControlCenter, &snapshot)?;
+                        scene = Some(render_and_present(
+                            &mut backend,
+                            surface,
+                            &renderer,
+                            theme_tokens,
+                            &shell,
+                            geometry,
+                        )?);
+                    }
                 }
             }
         }
@@ -578,6 +612,9 @@ fn handle_live_report(
     {
         if kind == "menu.open" {
             let family = parse_family(payload)?;
+            if policy.execute_provider_actions && family == MenuFamily::ControlCenter {
+                refresh_control_center_tab_snapshot(snapshot, ControlCenterTab::Media);
+            }
             shell.refresh_family(family, snapshot)?;
             return Ok(false);
         }
@@ -586,7 +623,11 @@ fn handle_live_report(
             return Ok(false);
         }
         if kind == "control.tab" {
-            shell.set_control_center_tab(ControlCenterTab::parse(payload)?, snapshot)?;
+            let tab = ControlCenterTab::parse(payload)?;
+            if policy.execute_provider_actions {
+                refresh_control_center_tab_snapshot(snapshot, tab);
+            }
+            shell.set_control_center_tab(tab, snapshot)?;
             return Ok(false);
         }
     }
@@ -624,18 +665,26 @@ fn handle_live_report(
                         "nuraloumi-provider-result: executed={} dry_run={} message={}",
                         result.executed, result.dry_run, result.message
                     );
-                    refresh_probe_snapshot(snapshot, &ProbeSnapshot::live());
-                    refresh_window_snapshot(snapshot, backend);
-                    refresh_workspace_snapshot(snapshot, backend);
-                    refresh_builtin_menu(shell, snapshot)?;
+                    if refresh_lazy_control_action(snapshot, action) {
+                        refresh_builtin_menu(shell, snapshot)?;
+                    } else {
+                        refresh_probe_snapshot(snapshot, &ProbeSnapshot::live());
+                        refresh_window_snapshot(snapshot, backend);
+                        refresh_workspace_snapshot(snapshot, backend);
+                        refresh_builtin_menu(shell, snapshot)?;
+                    }
                 }
                 Ok(None) => {}
                 Err(error) => {
                     eprintln!("nuraloumi-provider-error: {error}");
-                    refresh_probe_snapshot(snapshot, &ProbeSnapshot::live());
-                    refresh_window_snapshot(snapshot, backend);
-                    refresh_workspace_snapshot(snapshot, backend);
-                    refresh_builtin_menu(shell, snapshot)?;
+                    if refresh_lazy_control_action(snapshot, action) {
+                        refresh_builtin_menu(shell, snapshot)?;
+                    } else {
+                        refresh_probe_snapshot(snapshot, &ProbeSnapshot::live());
+                        refresh_window_snapshot(snapshot, backend);
+                        refresh_workspace_snapshot(snapshot, backend);
+                        refresh_builtin_menu(shell, snapshot)?;
+                    }
                 }
             }
         }
@@ -679,6 +728,54 @@ fn execute_live_action(
             ApplicationProvider::system()
                 .execute(ApplicationAction::Launch {
                     id: payload.clone(),
+                })
+                .map_err(|error| error.to_string())?
+        }
+        MenuAction::Custom { kind, payload } if kind == "media.previous" => MediaProvider::system()
+            .execute(MediaAction::Previous {
+                player: payload.clone(),
+            })
+            .map_err(|error| error.to_string())?,
+        MenuAction::Custom { kind, payload } if kind == "media.play_pause" => {
+            MediaProvider::system()
+                .execute(MediaAction::PlayPause {
+                    player: payload.clone(),
+                })
+                .map_err(|error| error.to_string())?
+        }
+        MenuAction::Custom { kind, payload } if kind == "media.next" => MediaProvider::system()
+            .execute(MediaAction::Next {
+                player: payload.clone(),
+            })
+            .map_err(|error| error.to_string())?,
+        MenuAction::Custom { kind, payload } if kind == "notification.redisplay" => {
+            let id = payload
+                .parse::<u32>()
+                .map_err(|_| format!("invalid notification id {payload:?}"))?;
+            NotificationProvider::system()
+                .execute(NotificationAction::Redisplay { id })
+                .map_err(|error| error.to_string())?
+        }
+        MenuAction::Custom { kind, payload } if kind == "notification.remove" => {
+            let id = payload
+                .parse::<u32>()
+                .map_err(|_| format!("invalid notification id {payload:?}"))?;
+            NotificationProvider::system()
+                .execute(NotificationAction::Remove { id })
+                .map_err(|error| error.to_string())?
+        }
+        MenuAction::Custom { kind, .. } if kind == "notification.clear" => {
+            NotificationProvider::system()
+                .execute(NotificationAction::Clear)
+                .map_err(|error| error.to_string())?
+        }
+        MenuAction::Custom { kind, payload } if kind == "notification.invoke" => {
+            let request: NotificationInvokeRequest = serde_json::from_str(payload)
+                .map_err(|error| format!("invalid notification action payload: {error}"))?;
+            NotificationProvider::system()
+                .execute(NotificationAction::Invoke {
+                    id: request.id,
+                    action: request.action,
                 })
                 .map_err(|error| error.to_string())?
         }
@@ -864,6 +961,18 @@ fn fixture_snapshot_from_probe(probe: &ProbeSnapshot) -> FixtureSnapshot {
             }),
             &probe.bluetooth.issues,
         ),
+        media: ProviderValue {
+            state: ValueState::Unavailable,
+            value: None,
+            message: Some("MPRIS provider not refreshed yet".into()),
+        },
+        media_player: None,
+        notifications: ProviderValue {
+            state: ValueState::Unavailable,
+            value: None,
+            message: Some("Notification history not refreshed yet".into()),
+        },
+        notification_history: Vec::new(),
         wifi_networks,
         bluetooth_devices: probe
             .bluetooth
@@ -903,6 +1012,98 @@ fn refresh_application_snapshot(snapshot: &mut FixtureSnapshot) {
             eprintln!("nuraloumi-application-provider-error: {error}");
             snapshot.applications.clear();
         }
+    }
+}
+
+fn refresh_media_snapshot(snapshot: &mut FixtureSnapshot) {
+    let mut provider = MediaProvider::system();
+    match provider.snapshot() {
+        Ok(media) => {
+            let current = media.current().cloned();
+            let value = current.as_ref().map(|player| {
+                let label = player
+                    .title
+                    .as_deref()
+                    .filter(|title| !title.is_empty())
+                    .unwrap_or(&player.id);
+                format!("{} · {label}", player.status)
+            });
+            snapshot.media = probe_value(&media.meta, value, &media.issues);
+            snapshot.media_player = current.map(|player| ShellMediaPlayerEntry {
+                id: player.id,
+                status: player.status,
+                artist: player.artist,
+                title: player.title,
+            });
+        }
+        Err(error) => {
+            snapshot.media = ProviderValue {
+                state: ValueState::Unavailable,
+                value: None,
+                message: Some(error.diagnostic()),
+            };
+            snapshot.media_player = None;
+        }
+    }
+}
+
+fn refresh_notification_snapshot(snapshot: &mut FixtureSnapshot) {
+    let mut provider = NotificationProvider::system();
+    match provider.snapshot() {
+        Ok(notifications) => {
+            let value = Some(format!(
+                "{} saved notification{}",
+                notifications.notifications.len(),
+                if notifications.notifications.len() == 1 {
+                    ""
+                } else {
+                    "s"
+                }
+            ));
+            snapshot.notifications = probe_value(&notifications.meta, value, &notifications.issues);
+            snapshot.notification_history = notifications
+                .notifications
+                .into_iter()
+                .map(|notification| ShellNotificationHistoryEntry {
+                    id: notification.id,
+                    app: notification.app,
+                    summary: notification.summary,
+                    body: notification.body,
+                    actions: notification.actions,
+                    default_action: notification.default_action,
+                })
+                .collect();
+        }
+        Err(error) => {
+            snapshot.notifications = ProviderValue {
+                state: ValueState::Unavailable,
+                value: None,
+                message: Some(error.diagnostic()),
+            };
+            snapshot.notification_history.clear();
+        }
+    }
+}
+
+fn refresh_control_center_tab_snapshot(snapshot: &mut FixtureSnapshot, tab: ControlCenterTab) {
+    match tab {
+        ControlCenterTab::Media => refresh_media_snapshot(snapshot),
+        ControlCenterTab::Notifications => refresh_notification_snapshot(snapshot),
+        ControlCenterTab::Network | ControlCenterTab::Display | ControlCenterTab::System => {}
+    }
+}
+
+fn refresh_lazy_control_action(snapshot: &mut FixtureSnapshot, action: &MenuAction) -> bool {
+    match action {
+        MenuAction::Custom { kind, .. } if kind.starts_with("media.") => {
+            refresh_media_snapshot(snapshot);
+            true
+        }
+        MenuAction::Custom { kind, .. } if kind.starts_with("notification.") => {
+            refresh_notification_snapshot(snapshot);
+            true
+        }
+        _ => false,
     }
 }
 
