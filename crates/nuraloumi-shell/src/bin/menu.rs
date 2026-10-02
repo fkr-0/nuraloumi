@@ -837,10 +837,11 @@ fn refresh_window_snapshot(snapshot: &mut FixtureSnapshot, backend: &WaylandBack
 fn start_window_thumbnail_probe(
     backend: &WaylandBackend,
 ) -> Option<std::thread::JoinHandle<Result<ToplevelThumbnailReport, String>>> {
-    let requests = backend
-        .toplevels()
+    let mut windows = backend.toplevels();
+    windows.sort_by_key(|window| !window.state.activated);
+    let requests = windows
         .into_iter()
-        .take(6)
+        .take(4)
         .map(|window| ToplevelThumbnailRequest {
             key: window.id.to_string(),
             title: window.title,

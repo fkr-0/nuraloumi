@@ -32,7 +32,8 @@ use wayland_protocols::ext::{
 };
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_millis(900);
-const MAX_SOURCE_PIXELS: u64 = 4096 * 4096;
+const BYTES_PER_PIXEL: u64 = 4;
+const MAX_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_THUMBNAIL_EDGE: u32 = 224;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -86,6 +87,23 @@ struct ListedToplevel {
     closed: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PresentationIdentity {
+    title: String,
+    app_id: Option<String>,
+    identifier: Option<String>,
+}
+
+impl From<&ListedToplevel> for PresentationIdentity {
+    fn from(value: &ListedToplevel) -> Self {
+        Self {
+            title: value.title.clone(),
+            app_id: value.app_id.clone(),
+            identifier: value.identifier.clone(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 struct CaptureProgress {
     width: u32,
@@ -137,6 +155,9 @@ pub fn capture_toplevel_thumbnails_with_timeout(
         return Ok(ToplevelThumbnailReport::default());
     }
 
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| "Wayland thumbnail timeout overflow".to_owned())?;
     let connection = Connection::connect_to_env()
         .map_err(|error| format!("Wayland thumbnail connect failed: {error}"))?;
     let mut queue = connection.new_event_queue::<CaptureState>();
@@ -144,8 +165,8 @@ pub fn capture_toplevel_thumbnails_with_timeout(
     let _registry = connection.display().get_registry(&qh, ());
     let mut state = CaptureState::default();
 
-    timed_roundtrip(&connection, &mut queue, &mut state, timeout)?;
-    timed_roundtrip(&connection, &mut queue, &mut state, timeout)?;
+    timed_roundtrip(&connection, &mut queue, &mut state, deadline)?;
+    timed_roundtrip(&connection, &mut queue, &mut state, deadline)?;
 
     let capabilities = state.capabilities();
     if !capabilities.available() {
@@ -167,6 +188,11 @@ pub fn capture_toplevel_thumbnails_with_timeout(
     let mut thumbnails = Vec::new();
 
     for (request, handle) in matches {
+        if budget_exhausted(deadline, Instant::now()) {
+            issues
+                .push("thumbnail capture budget exhausted; remaining previews skipped".to_owned());
+            break;
+        }
         match capture_one(
             &connection,
             &mut queue,
@@ -174,7 +200,7 @@ pub fn capture_toplevel_thumbnails_with_timeout(
             &mut state,
             &handle,
             &request.key,
-            timeout,
+            deadline,
         ) {
             Ok(thumbnail) => thumbnails.push(thumbnail),
             Err(error) => issues.push(format!("{}: {error}", request.key)),
@@ -188,6 +214,30 @@ pub fn capture_toplevel_thumbnails_with_timeout(
     })
 }
 
+fn resolve_presentation_index(
+    listed: &[PresentationIdentity],
+    request: &ToplevelThumbnailRequest,
+) -> Result<usize, &'static str> {
+    let matches = listed
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| {
+            if let Some(identifier) = request.protocol_identifier.as_deref() {
+                entry.identifier.as_deref() == Some(identifier)
+            } else {
+                entry.title == request.title && entry.app_id == request.app_id
+            }
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+
+    match matches.as_slice() {
+        [index] => Ok(*index),
+        [] => Err("no exact presentation match"),
+        _ => Err("ambiguous presentation match; thumbnail suppressed"),
+    }
+}
+
 fn resolve_requests(
     state: &CaptureState,
     requests: &[ToplevelThumbnailRequest],
@@ -199,30 +249,16 @@ fn resolve_requests(
         .filter(|entry| entry.committed && !entry.closed)
         .filter_map(|entry| entry.handle.as_ref().map(|handle| (entry, handle)))
         .collect::<Vec<_>>();
+    let identities = listed
+        .iter()
+        .map(|(entry, _)| PresentationIdentity::from(*entry))
+        .collect::<Vec<_>>();
 
     let mut resolved = Vec::new();
     for request in requests {
-        let matches = if let Some(identifier) = request.protocol_identifier.as_deref() {
-            listed
-                .iter()
-                .filter(|(entry, _)| entry.identifier.as_deref() == Some(identifier))
-                .copied()
-                .collect::<Vec<_>>()
-        } else {
-            listed
-                .iter()
-                .filter(|(entry, _)| entry.title == request.title && entry.app_id == request.app_id)
-                .copied()
-                .collect::<Vec<_>>()
-        };
-
-        match matches.as_slice() {
-            [(_, handle)] => resolved.push((request.clone(), (*handle).clone())),
-            [] => issues.push(format!("{}: no exact presentation match", request.key)),
-            _ => issues.push(format!(
-                "{}: ambiguous presentation match; thumbnail suppressed",
-                request.key
-            )),
+        match resolve_presentation_index(&identities, request) {
+            Ok(index) => resolved.push((request.clone(), listed[index].1.clone())),
+            Err(reason) => issues.push(format!("{}: {reason}", request.key)),
         }
     }
     resolved
@@ -235,7 +271,7 @@ fn capture_one(
     state: &mut CaptureState,
     handle: &ExtForeignToplevelHandleV1,
     key: &str,
-    timeout: Duration,
+    deadline: Instant,
 ) -> Result<ToplevelThumbnail, String> {
     state.reset_progress();
     let source_manager = state
@@ -257,7 +293,7 @@ fn capture_one(
     let source = source_manager.create_source(handle, qh, ());
     let session = capture_manager.create_session(&source, Options::empty(), qh, ());
 
-    dispatch_until(connection, queue, state, timeout, |state| {
+    dispatch_until(connection, queue, state, deadline, |state| {
         state.progress.constraints_done || state.progress.stopped
     })?;
 
@@ -285,7 +321,7 @@ fn capture_one(
         .flush()
         .map_err(|error| format!("thumbnail capture flush failed: {error}"))?;
 
-    dispatch_until(connection, queue, state, timeout, |state| {
+    dispatch_until(connection, queue, state, deadline, |state| {
         state.progress.frame_done || state.progress.stopped
     })?;
 
@@ -310,7 +346,6 @@ fn capture_one(
             pixel[3] = 0xff;
         }
     }
-    buffer.map.flush().ok();
     let (thumb_width, thumb_height, pixels) =
         downsample_argb32(&buffer.map, width, height, MAX_THUMBNAIL_EDGE)?;
 
@@ -338,19 +373,26 @@ fn choose_shm_format(formats: &[wl_shm::Format]) -> Option<wl_shm::Format> {
         })
 }
 
-fn validate_source_size(width: u32, height: u32) -> Result<(), String> {
+fn source_byte_len(width: u32, height: u32) -> Result<u64, String> {
     if width == 0 || height == 0 {
         return Err("capture source has zero extent".to_owned());
     }
     let pixels = u64::from(width)
         .checked_mul(u64::from(height))
         .ok_or_else(|| "capture source size overflow".to_owned())?;
-    if pixels > MAX_SOURCE_PIXELS {
+    let bytes = pixels
+        .checked_mul(BYTES_PER_PIXEL)
+        .ok_or_else(|| "capture source byte length overflow".to_owned())?;
+    if bytes > MAX_SOURCE_BYTES {
         return Err(format!(
-            "capture source {width}x{height} exceeds bounded pixel budget"
+            "capture source {width}x{height} requires {bytes} bytes, exceeding the {MAX_SOURCE_BYTES}-byte budget"
         ));
     }
-    Ok(())
+    Ok(bytes)
+}
+
+fn validate_source_size(width: u32, height: u32) -> Result<(), String> {
+    source_byte_len(width, height).map(|_| ())
 }
 
 fn downsample_argb32(
@@ -419,16 +461,13 @@ impl CaptureBuffer {
         let stride = width
             .checked_mul(4)
             .ok_or_else(|| "capture stride overflow".to_owned())?;
-        let byte_len = stride
-            .checked_mul(height)
-            .ok_or_else(|| "capture buffer length overflow".to_owned())?;
+        let byte_len = source_byte_len(width, height)?;
         let byte_len_i32 =
             i32::try_from(byte_len).map_err(|_| "capture buffer exceeds i32 protocol limit")?;
 
         let fd = memfd_create("nuraloumi-thumbnail", MemfdFlags::CLOEXEC)
             .map_err(|error| format!("thumbnail memfd_create failed: {error}"))?;
-        ftruncate(&fd, u64::from(byte_len))
-            .map_err(|error| format!("thumbnail ftruncate failed: {error}"))?;
+        ftruncate(&fd, byte_len).map_err(|error| format!("thumbnail ftruncate failed: {error}"))?;
         let file = File::from(fd);
         let map = unsafe {
             MmapOptions::new()
@@ -483,20 +522,29 @@ fn destroy_capture_objects(
     }
 }
 
+fn budget_exhausted(deadline: Instant, now: Instant) -> bool {
+    now >= deadline
+}
+
+fn remaining_budget(deadline: Instant, now: Instant) -> Option<Duration> {
+    deadline
+        .checked_duration_since(now)
+        .filter(|remaining| !remaining.is_zero())
+}
+
 fn timed_roundtrip(
     connection: &Connection,
     queue: &mut EventQueue<CaptureState>,
     state: &mut CaptureState,
-    timeout: Duration,
+    deadline: Instant,
 ) -> Result<(), String> {
     let callback = connection.display().sync(&queue.handle(), ());
     connection
         .flush()
         .map_err(|error| format!("Wayland thumbnail flush failed: {error}"))?;
-    let deadline = Instant::now() + timeout;
     while callback.is_alive() {
         dispatch_one(connection, queue, state, deadline)?;
-        if Instant::now() >= deadline {
+        if callback.is_alive() && budget_exhausted(deadline, Instant::now()) {
             return Err("Wayland thumbnail roundtrip timed out".to_owned());
         }
     }
@@ -507,10 +555,9 @@ fn dispatch_until(
     connection: &Connection,
     queue: &mut EventQueue<CaptureState>,
     state: &mut CaptureState,
-    timeout: Duration,
+    deadline: Instant,
     done: impl Fn(&CaptureState) -> bool,
 ) -> Result<(), String> {
-    let deadline = Instant::now() + timeout;
     loop {
         queue
             .dispatch_pending(state)
@@ -519,7 +566,7 @@ fn dispatch_until(
             return Ok(());
         }
         dispatch_one(connection, queue, state, deadline)?;
-        if Instant::now() >= deadline {
+        if budget_exhausted(deadline, Instant::now()) {
             return Err("Wayland thumbnail operation timed out".to_owned());
         }
     }
@@ -542,11 +589,10 @@ fn dispatch_one(
         return Ok(());
     };
 
-    let remaining = deadline.saturating_duration_since(Instant::now());
-    if remaining.is_zero() {
+    let Some(remaining) = remaining_budget(deadline, Instant::now()) else {
         drop(read);
         return Err("Wayland thumbnail operation timed out".to_owned());
-    }
+    };
     let timespec = Timespec {
         tv_sec: i64::try_from(remaining.as_secs()).unwrap_or(i64::MAX),
         tv_nsec: i64::from(remaining.subsec_nanos()),
@@ -748,11 +794,113 @@ mod tests {
         assert_eq!(&pixels[4..8], &[2, 2, 2, 0xff]);
     }
 
+    fn identity(
+        title: &str,
+        app_id: Option<&str>,
+        identifier: Option<&str>,
+    ) -> PresentationIdentity {
+        PresentationIdentity {
+            title: title.into(),
+            app_id: app_id.map(str::to_owned),
+            identifier: identifier.map(str::to_owned),
+        }
+    }
+
+    fn request(
+        title: &str,
+        app_id: Option<&str>,
+        identifier: Option<&str>,
+    ) -> ToplevelThumbnailRequest {
+        ToplevelThumbnailRequest {
+            key: "window".into(),
+            title: title.into(),
+            app_id: app_id.map(str::to_owned),
+            protocol_identifier: identifier.map(str::to_owned),
+        }
+    }
+
     #[test]
     fn source_size_budget_rejects_unbounded_capture() {
-        assert!(validate_source_size(1280, 800).is_ok());
+        assert_eq!(source_byte_len(1280, 800), Ok(4_096_000));
+        assert_eq!(source_byte_len(2560, 1600), Ok(16_384_000));
         assert!(validate_source_size(0, 800).is_err());
-        assert!(validate_source_size(8192, 8192).is_err());
+        assert!(validate_source_size(4096, 4096).is_err());
+    }
+
+    #[test]
+    fn protocol_identifier_takes_precedence_over_titles() {
+        let listed = vec![
+            identity("Same title", Some("app"), Some("stable-a")),
+            identity("Same title", Some("app"), Some("stable-b")),
+        ];
+        let request = request("Wrong transient title", Some("other"), Some("stable-b"));
+        assert_eq!(resolve_presentation_index(&listed, &request), Ok(1));
+    }
+
+    #[test]
+    fn duplicate_protocol_identifier_fails_closed() {
+        let listed = vec![
+            identity("One", Some("app.one"), Some("duplicate-id")),
+            identity("Two", Some("app.two"), Some("duplicate-id")),
+        ];
+        assert_eq!(
+            resolve_presentation_index(
+                &listed,
+                &request("ignored", Some("ignored"), Some("duplicate-id"))
+            ),
+            Err("ambiguous presentation match; thumbnail suppressed")
+        );
+    }
+
+    #[test]
+    fn unique_title_app_fallback_is_allowed_without_identifier() {
+        let listed = vec![
+            identity("Terminal", Some("foot"), None),
+            identity("Files", Some("thunar"), None),
+        ];
+        assert_eq!(
+            resolve_presentation_index(&listed, &request("Files", Some("thunar"), None)),
+            Ok(1)
+        );
+    }
+
+    #[test]
+    fn duplicate_title_app_fallback_fails_closed() {
+        let listed = vec![
+            identity("Terminal", Some("foot"), None),
+            identity("Terminal", Some("foot"), None),
+        ];
+        assert_eq!(
+            resolve_presentation_index(&listed, &request("Terminal", Some("foot"), None)),
+            Err("ambiguous presentation match; thumbnail suppressed")
+        );
+    }
+
+    #[test]
+    fn missing_presentation_match_fails_closed() {
+        let listed = vec![identity("Terminal", Some("foot"), Some("stable-a"))];
+        assert_eq!(
+            resolve_presentation_index(
+                &listed,
+                &request("Terminal", Some("foot"), Some("stable-missing"))
+            ),
+            Err("no exact presentation match")
+        );
+    }
+
+    #[test]
+    fn total_budget_helpers_do_not_reset_between_stages() {
+        let start = Instant::now();
+        let deadline = start + Duration::from_millis(350);
+        assert_eq!(
+            remaining_budget(deadline, start + Duration::from_millis(100)),
+            Some(Duration::from_millis(250))
+        );
+        assert_eq!(remaining_budget(deadline, deadline), None);
+        assert!(budget_exhausted(
+            deadline,
+            deadline + Duration::from_millis(1)
+        ));
     }
 
     #[test]
