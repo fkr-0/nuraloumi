@@ -737,31 +737,7 @@ pub fn build_windows_menu(snapshot: &FixtureSnapshot) -> MenuModel {
             "Compositor reported no mapped toplevels or no supported protocol is available",
         ));
     } else {
-        items.extend(snapshot.windows.iter().take(32).map(|window| {
-            let mut detail = Vec::new();
-            if window.focused {
-                detail.push("Focused");
-            }
-            if window.fullscreen {
-                detail.push("Fullscreen");
-            }
-            if let Some(app_id) = window.app_id.as_deref() {
-                detail.push(app_id);
-            }
-            let subtitle = if detail.is_empty() {
-                "Open".to_owned()
-            } else {
-                detail.join(" · ")
-            };
-            custom_action(
-                &format!("windows.item.{}", window.id),
-                &window.title,
-                Some(&subtitle),
-                "window.focus",
-                &window.id,
-                window.focusable,
-            )
-        }));
+        items.extend(snapshot.windows.iter().take(32).map(window_list_item));
     }
 
     MenuModel {
@@ -769,6 +745,78 @@ pub fn build_windows_menu(snapshot: &FixtureSnapshot) -> MenuModel {
         title: "Windows".into(),
         items,
     }
+}
+
+fn window_list_item(window: &WindowEntry) -> MenuItem {
+    let mut detail = Vec::new();
+    if window.focused {
+        detail.push("Focused");
+    }
+    if window.fullscreen {
+        detail.push("Fullscreen");
+    }
+    if let Some(app_id) = window.app_id.as_deref() {
+        detail.push(app_id);
+    }
+    let subtitle = if detail.is_empty() {
+        "Open".to_owned()
+    } else {
+        detail.join(" · ")
+    };
+    let item_id = format!("windows.item.{}", window.id);
+    let has_actionable_control =
+        (!window.focused && window.focusable) || window.fullscreen_controllable || window.closable;
+
+    if !has_actionable_control {
+        return status(
+            &item_id,
+            &window.title,
+            &format!("{subtitle} · controls unavailable"),
+        );
+    }
+
+    let focus_id = format!("{item_id}.focus");
+    let fullscreen_id = format!("{item_id}.fullscreen");
+    let close_id = format!("{item_id}.close");
+    let mut children = Vec::with_capacity(3);
+
+    if window.focused {
+        children.push(status(&focus_id, "Focus", "Focused"));
+    } else {
+        children.push(custom_action(
+            &focus_id,
+            "Focus",
+            Some("Activate this window"),
+            "window.focus",
+            &window.id,
+            window.focusable,
+        ));
+    }
+
+    children.push(toggle_action(
+        &fullscreen_id,
+        "Fullscreen",
+        &format!("window.fullscreen:{}", window.id),
+        window.fullscreen_controllable,
+        Some(window.fullscreen),
+        Some(if window.fullscreen {
+            "Currently fullscreen"
+        } else {
+            "Currently windowed"
+        }),
+    ));
+    children.push(confirm_custom_action(
+        &close_id,
+        "Close…",
+        Some(&window.title),
+        "window.close",
+        &window.id,
+        window.closable,
+    ));
+
+    let mut item = MenuItem::submenu(item_id, &window.title, children);
+    item.subtitle = Some(subtitle);
+    item
 }
 
 pub fn build_system_menu(snapshot: &FixtureSnapshot) -> MenuModel {
@@ -1799,6 +1847,54 @@ mod tests {
             .expect("fullscreen row");
         assert!(!fullscreen.enabled);
         assert!(fullscreen.action.is_none());
+    }
+
+    #[test]
+    fn unfocused_window_submenu_exposes_bounded_controls() {
+        let snapshot = FixtureSnapshot {
+            windows: vec![WindowEntry {
+                id: "tl:0000000000000001".into(),
+                title: "Test window".into(),
+                app_id: Some("test.app".into()),
+                focused: false,
+                fullscreen: false,
+                focusable: true,
+                fullscreen_controllable: true,
+                closable: true,
+            }],
+            ..FixtureSnapshot::default()
+        };
+
+        let mut shell = shell_with(build_windows_menu(&snapshot));
+        assert_eq!(
+            shell.state.selected_id.as_deref(),
+            Some("windows.item.tl:0000000000000001")
+        );
+        assert!(matches!(
+            shell.apply_semantic(SemanticInput::Activate),
+            ActionReport::NavigationChanged { .. }
+        ));
+        assert_eq!(
+            shell.state.selected_id.as_deref(),
+            Some("windows.item.tl:0000000000000001.focus")
+        );
+        let _ = shell.apply_semantic(SemanticInput::Down);
+        assert_eq!(
+            shell.state.selected_id.as_deref(),
+            Some("windows.item.tl:0000000000000001.fullscreen")
+        );
+        let _ = shell.apply_semantic(SemanticInput::Down);
+        assert_eq!(
+            shell.state.selected_id.as_deref(),
+            Some("windows.item.tl:0000000000000001.close")
+        );
+        assert!(matches!(
+            shell.apply_semantic(SemanticInput::Activate),
+            ActionReport::ConfirmationRequired {
+                action: MenuAction::Custom { ref kind, ref payload },
+                ..
+            } if kind == "window.close" && payload == "tl:0000000000000001"
+        ));
     }
 
     #[test]

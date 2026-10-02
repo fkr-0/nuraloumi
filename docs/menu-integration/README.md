@@ -54,10 +54,14 @@ poweroff. It has no effect outside live mode.
 
 Task rows emit only `task.inspect`; there is intentionally no process-kill
 action. In normal live mode, window focus/fullscreen/close are translated by the
-shell into typed `nuraloumi-wayland` foreign-toplevel requests. Window close
-still requires confirmation and the row is not removed until the compositor
-emits its `closed` event. Supplying `--providers` keeps window actions fixture-
-only and never mutates real compositor state.
+shell into typed `nuraloumi-wayland` foreign-toplevel requests. Every listed
+window with control capability opens a per-window submenu containing bounded
+Focus, Fullscreen and Close… actions, so control does not depend on the
+compositor currently reporting an activated toplevel. The focused window also
+keeps quick Fullscreen/Close rows. Window close always requires confirmation
+and the row is not removed until the compositor emits its `closed` event.
+Supplying `--providers` keeps window actions fixture-only and never mutates
+real compositor state.
 
 ## Fixture schema additions
 
