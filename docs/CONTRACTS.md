@@ -80,6 +80,10 @@ pub trait ActionProvider<A> {
 }
 ```
 
+The provider crate is deliberately below the semantic menu layer and has no
+runtime dependency on `nuraloumi-core`. Mapping `MenuAction` values to
+provider-specific action enums is a shell responsibility.
+
 Do not let shell/render code construct shell commands.
 
 ## nuraloumi-shell

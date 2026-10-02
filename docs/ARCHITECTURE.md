@@ -10,7 +10,7 @@ nuraloumi-shell
    └── nuraloumi-providers
 
 nuraloumi-render-cairo ──> nuraloumi-core
-nuraloumi-providers      ──> nuraloumi-core (typed action/result types only)
+nuraloumi-providers      ──> no runtime crate dependency
 nuraloumi-wayland        ──> no provider dependency
 nuraloumi-xtask          ──> build/test/package tooling; not linked into runtime
 ```
@@ -25,7 +25,8 @@ Cycles are forbidden.
 4. Cairo rasterizes Scene into an ARGB buffer.
 5. Wayland backend copies/renders into wl_shm buffers and commits damage.
 6. Wayland input becomes PlatformEvent; shell converts it into semantic navigation/action messages.
-7. provider actions are invoked only after semantic action validation.
+7. shell translates validated semantic actions into provider-specific actions;
+   providers never import menu/core semantics.
 
 ## Recovery path
 
