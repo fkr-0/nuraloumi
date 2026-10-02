@@ -16,11 +16,12 @@ use nuraloumi_shell::{
     NotificationHistoryEntry as ShellNotificationHistoryEntry, OverviewMode,
     PlatformEvent as ShellPlatformEvent, ProviderValue, SceneTransitionClock, SemanticInput,
     ShellConfig, ShellInput, ShellState, Theme as ShellTheme, ValueState, WifiNetworkEntry,
-    WindowControlCapabilities, WindowEntry,
+    WindowControlCapabilities, WindowEntry, WindowThumbnailEntry,
 };
 use nuraloumi_wayland::{
-    BackendCapabilities as WaylandCapabilities, BackendError, Frame, Key as WaylandKey,
-    MenuConfig as WaylandMenuConfig, PixelFormat, PlatformEvent as WaylandEvent, SurfaceId,
+    capture_toplevel_thumbnails_with_timeout, BackendCapabilities as WaylandCapabilities,
+    BackendError, Frame, Key as WaylandKey, MenuConfig as WaylandMenuConfig, PixelFormat,
+    PlatformEvent as WaylandEvent, SurfaceId, ToplevelThumbnailReport, ToplevelThumbnailRequest,
     WaylandBackend, WorkspaceId,
 };
 use serde::{Deserialize, Serialize};
@@ -77,6 +78,9 @@ struct Args {
 fn refresh_probe_snapshot(snapshot: &mut FixtureSnapshot, probe: &ProbeSnapshot) {
     let applications = std::mem::take(&mut snapshot.applications);
     let windows = std::mem::take(&mut snapshot.windows);
+    let window_thumbnails = std::mem::take(&mut snapshot.window_thumbnails);
+    let window_thumbnails_available = snapshot.window_thumbnails_available;
+    let window_thumbnail_issue = snapshot.window_thumbnail_issue.clone();
     let desktops = std::mem::take(&mut snapshot.desktops);
     let desktop_capabilities = snapshot.desktop_capabilities;
     let media = snapshot.media.clone();
@@ -86,6 +90,9 @@ fn refresh_probe_snapshot(snapshot: &mut FixtureSnapshot, probe: &ProbeSnapshot)
     *snapshot = fixture_snapshot_from_probe(probe);
     snapshot.applications = applications;
     snapshot.windows = windows;
+    snapshot.window_thumbnails = window_thumbnails;
+    snapshot.window_thumbnails_available = window_thumbnails_available;
+    snapshot.window_thumbnail_issue = window_thumbnail_issue;
     snapshot.desktops = desktops;
     snapshot.desktop_capabilities = desktop_capabilities;
     snapshot.media = media;
@@ -367,9 +374,23 @@ fn run_live(
     let mut initial_control_refresh_pending =
         policy.execute_provider_actions && shell.menu.id == "control-center";
     let mut motion = (!config.reduced_motion).then(|| SceneTransitionClock::new(false));
+    let mut thumbnail_probe: Option<
+        std::thread::JoinHandle<Result<ToplevelThumbnailReport, String>>,
+    > = None;
+    let mut thumbnail_probe_started = false;
 
     loop {
-        if motion.is_some() {
+        if policy.execute_provider_actions
+            && shell.menu.id == "launcher"
+            && !thumbnail_probe_started
+        {
+            thumbnail_probe = start_window_thumbnail_probe(&backend);
+            thumbnail_probe_started = true;
+        } else if shell.menu.id != "launcher" {
+            thumbnail_probe_started = false;
+        }
+
+        if motion.is_some() || thumbnail_probe.is_some() {
             std::thread::sleep(SceneTransitionClock::frame_interval());
             backend
                 .roundtrip()
@@ -384,6 +405,7 @@ fn run_live(
         if policy.execute_provider_actions && (toplevel_changed || workspace_changed) {
             if toplevel_changed {
                 refresh_window_snapshot(&mut snapshot, &backend);
+                thumbnail_probe_started = false;
             }
             if workspace_changed {
                 refresh_workspace_snapshot(&mut snapshot, &backend);
@@ -396,8 +418,11 @@ fn run_live(
                         &renderer,
                         theme_tokens,
                         &shell,
-                        geometry,
-                        motion.as_ref().map(|clock| clock.sample().transition),
+                        &snapshot,
+                        (
+                            geometry,
+                            motion.as_ref().map(|clock| clock.sample().transition),
+                        ),
                     )?);
                 }
             }
@@ -542,8 +567,11 @@ fn run_live(
                         &renderer,
                         theme_tokens,
                         &shell,
-                        geometry,
-                        motion.as_ref().map(|clock| clock.sample().transition),
+                        &snapshot,
+                        (
+                            geometry,
+                            motion.as_ref().map(|clock| clock.sample().transition),
+                        ),
                     )?);
                     if initial_control_refresh_pending {
                         initial_control_refresh_pending = false;
@@ -558,8 +586,11 @@ fn run_live(
                             &renderer,
                             theme_tokens,
                             &shell,
-                            geometry,
-                            motion.as_ref().map(|clock| clock.sample().transition),
+                            &snapshot,
+                            (
+                                geometry,
+                                motion.as_ref().map(|clock| clock.sample().transition),
+                            ),
                         )?);
                     }
                 }
@@ -574,11 +605,40 @@ fn run_live(
                 &renderer,
                 theme_tokens,
                 &shell,
-                geometry,
-                Some(sample.transition),
+                &snapshot,
+                (geometry, Some(sample.transition)),
             )?);
             if sample.complete {
                 motion = None;
+            }
+        }
+
+        if thumbnail_probe
+            .as_ref()
+            .is_some_and(|probe| probe.is_finished())
+        {
+            let result = thumbnail_probe
+                .take()
+                .expect("finished thumbnail probe must exist")
+                .join()
+                .map_err(|_| "window thumbnail probe panicked".to_owned())?;
+            if shell.menu.id == "launcher" {
+                apply_window_thumbnail_report(&mut snapshot, result);
+                shell.refresh_family(MenuFamily::Launcher, &snapshot)?;
+                if let Some(geometry) = geometry {
+                    scene = Some(render_and_present(
+                        &mut backend,
+                        surface,
+                        &renderer,
+                        theme_tokens,
+                        &shell,
+                        &snapshot,
+                        (
+                            geometry,
+                            motion.as_ref().map(|clock| clock.sample().transition),
+                        ),
+                    )?);
+                }
             }
         }
     }
@@ -590,9 +650,10 @@ fn render_and_present(
     renderer: &CairoRenderer,
     tokens: &nuraloumi_core::ThemeTokens,
     shell: &ShellState,
-    geometry: (u32, u32, i32),
-    transition: Option<nuraloumi_core::Transition>,
+    snapshot: &FixtureSnapshot,
+    presentation: ((u32, u32, i32), Option<nuraloumi_core::Transition>),
 ) -> Result<Scene, String> {
+    let (geometry, transition) = presentation;
     let (logical_width, logical_height, scale) = geometry;
     let viewport = Viewport::new(
         f64::from(logical_width),
@@ -617,6 +678,7 @@ fn render_and_present(
         ),
     };
     let (scene, mut buffer) = rendered.map_err(|error| format!("Cairo render failed: {error}"))?;
+    paint_window_thumbnail_overlays(&scene, &mut buffer, snapshot)?;
 
     let info = buffer.info();
     let width = u32::try_from(info.width).map_err(|_| "negative rendered width".to_owned())?;
@@ -764,6 +826,100 @@ fn handle_live_report(
 fn refresh_window_snapshot(snapshot: &mut FixtureSnapshot, backend: &WaylandBackend) {
     let capabilities = window_control_capabilities(&backend.capabilities());
     snapshot.windows = window_entries(&backend.toplevels(), capabilities);
+    snapshot.window_thumbnails.retain(|thumbnail| {
+        snapshot
+            .windows
+            .iter()
+            .any(|window| window.id == thumbnail.window_id)
+    });
+}
+
+fn start_window_thumbnail_probe(
+    backend: &WaylandBackend,
+) -> Option<std::thread::JoinHandle<Result<ToplevelThumbnailReport, String>>> {
+    let requests = backend
+        .toplevels()
+        .into_iter()
+        .take(6)
+        .map(|window| ToplevelThumbnailRequest {
+            key: window.id.to_string(),
+            title: window.title,
+            app_id: window.app_id,
+            protocol_identifier: window.protocol_identifier,
+        })
+        .collect::<Vec<_>>();
+    (!requests.is_empty()).then(|| {
+        std::thread::spawn(move || {
+            capture_toplevel_thumbnails_with_timeout(
+                &requests,
+                std::time::Duration::from_millis(350),
+            )
+        })
+    })
+}
+
+fn apply_window_thumbnail_report(
+    snapshot: &mut FixtureSnapshot,
+    result: Result<ToplevelThumbnailReport, String>,
+) {
+    match result {
+        Ok(report) => {
+            snapshot.window_thumbnails_available = report.capabilities.available();
+            snapshot.window_thumbnail_issue = report.issues.first().cloned();
+            for issue in &report.issues {
+                eprintln!("nuraloumi-thumbnail: {issue}");
+            }
+            snapshot.window_thumbnails = report
+                .thumbnails
+                .into_iter()
+                .map(|thumbnail| WindowThumbnailEntry {
+                    window_id: thumbnail.key,
+                    width: thumbnail.width,
+                    height: thumbnail.height,
+                    pixels: thumbnail.pixels,
+                })
+                .collect();
+        }
+        Err(error) => {
+            eprintln!("nuraloumi-thumbnail: {error}");
+            snapshot.window_thumbnails_available = false;
+            snapshot.window_thumbnail_issue = Some(error);
+            snapshot.window_thumbnails.clear();
+        }
+    }
+}
+
+fn paint_window_thumbnail_overlays(
+    scene: &Scene,
+    buffer: &mut nuraloumi_render_cairo::RenderedBuffer,
+    snapshot: &FixtureSnapshot,
+) -> Result<(), String> {
+    if scene.menu_id != "launcher" || snapshot.window_thumbnails.is_empty() {
+        return Ok(());
+    }
+    for thumbnail in &snapshot.window_thumbnails {
+        let row_id = format!("overview.window.{}", thumbnail.window_id);
+        let Some(hit) = scene.hits.iter().find(|hit| hit.item_id == row_id) else {
+            continue;
+        };
+        let preview_width = 72.0_f64.min(hit.rect.width * 0.28);
+        let preview = nuraloumi_render_cairo::Rect {
+            x: hit.rect.right() - preview_width - 8.0,
+            y: hit.rect.y + 4.0,
+            width: preview_width,
+            height: (hit.rect.height - 8.0).max(1.0),
+        };
+        buffer
+            .paint_argb32_preview(
+                preview,
+                scene.viewport.scale,
+                thumbnail.width,
+                thumbnail.height,
+                &thumbnail.pixels,
+            )
+            .map_err(|_| "failed to paint window thumbnail preview".to_owned())?;
+    }
+    Ok(())
 }
 
 fn window_control_capabilities(backend: &WaylandCapabilities) -> WindowControlCapabilities {
@@ -1055,6 +1211,9 @@ fn fixture_snapshot_from_probe(probe: &ProbeSnapshot) -> FixtureSnapshot {
             .collect(),
         tasks: Vec::new(),
         windows: Vec::new(),
+        window_thumbnails: Vec::new(),
+        window_thumbnails_available: false,
+        window_thumbnail_issue: None,
         applications: Vec::new(),
         desktops: Vec::new(),
         desktop_capabilities: DesktopControlCapabilities::unavailable(),

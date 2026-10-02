@@ -269,6 +269,15 @@ pub struct WindowEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowThumbnailEntry {
+    pub window_id: String,
+    pub width: u32,
+    pub height: u32,
+    #[serde(default)]
+    pub pixels: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApplicationEntry {
     pub id: String,
     pub label: String,
@@ -513,6 +522,12 @@ pub struct FixtureSnapshot {
     #[serde(default)]
     pub windows: Vec<WindowEntry>,
     #[serde(default)]
+    pub window_thumbnails: Vec<WindowThumbnailEntry>,
+    #[serde(default)]
+    pub window_thumbnails_available: bool,
+    #[serde(default)]
+    pub window_thumbnail_issue: Option<String>,
+    #[serde(default)]
     pub applications: Vec<ApplicationEntry>,
     #[serde(default)]
     pub desktops: Vec<DesktopEntry>,
@@ -609,6 +624,9 @@ impl Default for FixtureSnapshot {
                     memory_mib: Some(15),
                 },
             ],
+            window_thumbnails: Vec::new(),
+            window_thumbnails_available: false,
+            window_thumbnail_issue: None,
             windows: vec![
                 WindowEntry {
                     id: "terminal".into(),
@@ -822,6 +840,16 @@ pub fn build_launcher_menu_for(snapshot: &FixtureSnapshot, mode: OverviewMode) -
                 "Compositor reported no mapped toplevels",
             ));
         } else {
+            if !snapshot.window_thumbnails_available {
+                items.push(status(
+                    "launcher.windows.previews",
+                    "Window previews unavailable",
+                    snapshot
+                        .window_thumbnail_issue
+                        .as_deref()
+                        .unwrap_or("Compositor does not advertise per-toplevel image capture"),
+                ));
+            }
             items.extend(snapshot.windows.iter().take(16).map(|window| {
                 let subtitle = match (&window.app_id, window.focused) {
                     (Some(app_id), true) => format!("Focused · {app_id}"),
@@ -946,6 +974,13 @@ pub fn build_launcher_menu_for(snapshot: &FixtureSnapshot, mode: OverviewMode) -
         if mode == OverviewMode::Desktops {
             if let Some(window) = snapshot.windows.iter().find(|window| window.focused) {
                 items.push(section("launcher.desktop.move", "Move active window"));
+                if !snapshot.desktop_capabilities.move_window {
+                    items.push(status(
+                        "launcher.desktop.move.unavailable",
+                        "Window move unavailable",
+                        "Current standard Wayland protocols do not expose window-to-workspace membership/control",
+                    ));
+                }
                 for desktop in snapshot.desktops.iter().take(16) {
                     let payload = serde_json::to_string(&DesktopMovePayload {
                         window_id: window.id.clone(),

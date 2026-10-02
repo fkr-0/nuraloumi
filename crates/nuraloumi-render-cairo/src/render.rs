@@ -638,6 +638,60 @@ impl RenderedBuffer {
         self.with_argb32_bytes(|bytes, _| bytes.to_vec())
     }
 
+    /// Paint a packed native-endian ARGB32 preview into a logical rectangle.
+    ///
+    /// This is deliberately a presentation-only overlay: it does not alter
+    /// scene hit regions or semantic menu identity.
+    pub fn paint_argb32_preview(
+        &mut self,
+        rect: Rect,
+        logical_scale: f64,
+        source_width: u32,
+        source_height: u32,
+        source: &[u8],
+    ) -> Result<(), BufferAccessError> {
+        if source_width == 0 || source_height == 0 || logical_scale <= 0.0 {
+            return Ok(());
+        }
+        let source_stride = source_width as usize * 4;
+        if source.len() < source_stride.saturating_mul(source_height as usize) {
+            return Ok(());
+        }
+
+        self.surface.flush();
+        let stride = self.info.stride.max(0) as usize;
+        let width = self.info.width.max(0) as usize;
+        let height = self.info.height.max(0) as usize;
+        let mut target = self.surface.data().map_err(|_| BufferAccessError)?;
+
+        let x0 = (rect.x * logical_scale).round().max(0.0) as usize;
+        let y0 = (rect.y * logical_scale).round().max(0.0) as usize;
+        let x1 = ((rect.x + rect.width) * logical_scale).round().max(0.0) as usize;
+        let y1 = ((rect.y + rect.height) * logical_scale).round().max(0.0) as usize;
+        let x1 = x1.min(width);
+        let y1 = y1.min(height);
+        if x0 >= x1 || y0 >= y1 {
+            return Ok(());
+        }
+
+        let dest_width = x1 - x0;
+        let dest_height = y1 - y0;
+        for dy in 0..dest_height {
+            let sy = dy * source_height as usize / dest_height;
+            for dx in 0..dest_width {
+                let sx = dx * source_width as usize / dest_width;
+                let src = sy * source_stride + sx * 4;
+                let dst = (y0 + dy) * stride + (x0 + dx) * 4;
+                if dst + 4 <= target.len() {
+                    target[dst..dst + 4].copy_from_slice(&source[src..src + 4]);
+                }
+            }
+        }
+        drop(target);
+        self.surface.mark_dirty();
+        Ok(())
+    }
+
     pub fn write_png(&self, path: impl AsRef<Path>) -> Result<(), Box<dyn StdError>> {
         if let Some(parent) = path.as_ref().parent() {
             std::fs::create_dir_all(parent)?;

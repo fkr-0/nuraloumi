@@ -8,6 +8,7 @@ mod backend;
 mod error;
 mod foreign_toplevel;
 mod shm;
+mod thumbnail;
 mod types;
 mod workspace;
 
@@ -15,6 +16,10 @@ pub use backend::WaylandBackend;
 pub use error::{BackendError, Result};
 pub use foreign_toplevel::{
     ToplevelCapabilities, ToplevelEvent, ToplevelId, ToplevelInfo, ToplevelSource, ToplevelState,
+};
+pub use thumbnail::{
+    capture_toplevel_thumbnails, capture_toplevel_thumbnails_with_timeout, ToplevelThumbnail,
+    ToplevelThumbnailCapabilities, ToplevelThumbnailReport, ToplevelThumbnailRequest,
 };
 pub use types::{
     normalize_output_point, BackendCapabilities, BackendEvent, Frame, Key, MenuConfig, OutputId,

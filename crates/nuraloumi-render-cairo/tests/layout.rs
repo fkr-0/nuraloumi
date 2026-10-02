@@ -1,6 +1,6 @@
 use nuraloumi_render_cairo::{
-    layout_menu, InteractionState, MenuItemView, MenuView, RenderOptions, RowKind, TextMeasurer,
-    TextMetrics, TextStyle, Theme, ToyText, Viewport,
+    layout_menu, InteractionState, MenuItemView, MenuView, Rect, RenderOptions, RowKind,
+    TextMeasurer, TextMetrics, TextStyle, Theme, ToyText, Viewport,
 };
 
 fn item(id: &str, kind: RowKind, enabled: bool) -> MenuItemView {
@@ -113,6 +113,38 @@ fn transitioned_raster_preserves_settled_semantic_geometry() {
         ),
         Some("action")
     );
+}
+
+#[test]
+fn argb_preview_overlay_changes_pixels_without_scene_mutation() {
+    let renderer = nuraloumi_render_cairo::CairoRenderer::default();
+    let scene = renderer.build_scene(
+        &mixed_menu(),
+        &InteractionState::default(),
+        Viewport::new(320.0, 240.0, 1.0),
+        &Theme::dark(),
+        RenderOptions::default(),
+    );
+    let original_hits = scene.hits.clone();
+    let mut buffer = renderer.render_scene(&scene).expect("base raster");
+    let marker = [0x12, 0x34, 0x56, 0x78];
+    buffer
+        .paint_argb32_preview(
+            Rect {
+                x: 8.0,
+                y: 8.0,
+                width: 12.0,
+                height: 12.0,
+            },
+            1.0,
+            1,
+            1,
+            &marker,
+        )
+        .expect("preview overlay");
+    let pixels = buffer.copy_argb32_bytes().expect("read raster");
+    assert!(pixels.chunks_exact(4).any(|pixel| pixel == marker));
+    assert_eq!(scene.hits, original_hits);
 }
 
 #[test]
