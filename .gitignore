@@ -5,3 +5,10 @@ target/
 *~
 *.swp
 *.swo
+
+# Local Workspace Bridge coordination/runtime state.
+.ws-bridge/
+
+# Generated Cairo qualification output; source fixtures live in code.
+tests/fixtures/render/launcher.png
+tests/fixtures/render/system.png
