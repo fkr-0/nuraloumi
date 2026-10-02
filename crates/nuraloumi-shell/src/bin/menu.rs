@@ -39,7 +39,8 @@ OPTIONS:
     --config <path>            Load JSON/TOML shell geometry/theme config
     --input <steps>            Initial semantic input, e.g. down,enter,search,text:term
     --reduced-motion           Force reduced-motion state
-    --enable-power-actions     Allow confirmed suspend/reboot/poweroff in live mode
+    --enable-power-actions     Allow confirmed reboot/poweroff in live mode
+    --enable-unsafe-suspend    Also allow confirmed suspend; requires --enable-power-actions
     -h, --help                 Show this help
 
 HEADLESS OUTPUT:
@@ -47,8 +48,9 @@ HEADLESS OUTPUT:
 
 LIVE MODE:
     Uses wl_shm + layer-shell + Cairo only; no EGL/XWayland. Without --providers,
-    status values and ordinary controls use bounded provider adapters. Power actions
+    status values and ordinary controls use bounded provider adapters. Reboot/poweroff
     remain dry-run unless --enable-power-actions is supplied after UI confirmation.
+    Suspend remains dry-run unless --enable-unsafe-suspend is supplied as a second opt-in.
 "#;
 
 #[derive(Debug, Default)]
@@ -62,12 +64,14 @@ struct Args {
     input: Option<String>,
     reduced_motion: bool,
     enable_power_actions: bool,
+    enable_unsafe_suspend: bool,
 }
 
 #[derive(Clone, Copy)]
 struct LivePolicy {
     execute_provider_actions: bool,
     enable_power_actions: bool,
+    enable_unsafe_suspend: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -109,6 +113,9 @@ fn run() -> Result<(), String> {
     if args.enable_power_actions && !args.live {
         return Err("--enable-power-actions requires --live".into());
     }
+    if args.enable_unsafe_suspend && (!args.live || !args.enable_power_actions) {
+        return Err("--enable-unsafe-suspend requires --live and --enable-power-actions".into());
+    }
     if args.probe_toplevels {
         return run_toplevel_probe();
     }
@@ -145,6 +152,7 @@ fn run() -> Result<(), String> {
             LivePolicy {
                 execute_provider_actions: args.providers.is_none(),
                 enable_power_actions: args.enable_power_actions,
+                enable_unsafe_suspend: args.enable_unsafe_suspend,
             },
             args.input.as_deref(),
         );
@@ -495,7 +503,11 @@ fn handle_live_report(
                 execute_window_command(backend, command)?;
                 return Ok(false);
             }
-            match execute_live_action(action, policy.enable_power_actions) {
+            match execute_live_action(
+                action,
+                policy.enable_power_actions,
+                policy.enable_unsafe_suspend,
+            ) {
                 Ok(Some(result)) => {
                     eprintln!(
                         "nuraloumi-provider-result: executed={} dry_run={} message={}",
@@ -547,6 +559,7 @@ fn refresh_builtin_menu(
 fn execute_live_action(
     action: &MenuAction,
     enable_power_actions: bool,
+    enable_unsafe_suspend: bool,
 ) -> Result<Option<ActionResult>, String> {
     let result = match action {
         MenuAction::Toggle { id } if id == "network.wifi" => {
@@ -615,6 +628,7 @@ fn execute_live_action(
         MenuAction::Activate { id } if id == "system.suspend" => {
             SessionProvider::new(SystemCommandRunner)
                 .with_destructive_actions(enable_power_actions)
+                .with_suspend_actions(enable_unsafe_suspend)
                 .execute(SessionAction::Suspend)
                 .map_err(|error| error.to_string())?
         }
@@ -779,6 +793,7 @@ fn parse_args() -> Result<Args, String> {
             "--input" => parsed.input = Some(next_value(&mut args, "--input")?),
             "--reduced-motion" => parsed.reduced_motion = true,
             "--enable-power-actions" => parsed.enable_power_actions = true,
+            "--enable-unsafe-suspend" => parsed.enable_unsafe_suspend = true,
             other => return Err(format!("unknown argument {other:?}; use --help")),
         }
     }

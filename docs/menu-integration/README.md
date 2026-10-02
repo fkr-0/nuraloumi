@@ -45,12 +45,24 @@ their provider adapters. No shell command interpolation is used.
 
 Power rows use the existing two-step confirmation state machine. Even after
 confirmation, live power operations are provider dry-runs unless explicitly
-enabled:
+enabled.
+
+Reboot and poweroff require:
 
     nuraloumi-menu --live --family power --enable-power-actions
 
-That flag permits the SessionProvider to execute confirmed suspend/reboot/
-poweroff. It has no effect outside live mode.
+Suspend is deliberately stricter. It remains a provider dry-run unless a second
+explicit opt-in is supplied:
+
+    nuraloumi-menu --live --family power       --enable-power-actions --enable-unsafe-suspend
+
+The SessionProvider submits enabled actions through `loginctl`, not
+`systemctl` or direct writes to `/sys/power/state`. This works with
+systemd-logind and elogind and, critically, leaves sleep inhibitors in the
+control path. NuraLoumi never invokes `rtcwake` or passes
+`--ignore-inhibitors`. On SL101, suspend should remain disabled until the
+kernel/DTB combination has independently passed resume, network, panel and
+physical-input qualification.
 
 Task rows emit only `task.inspect`; there is intentionally no process-kill
 action. In normal live mode, window focus/fullscreen/close are translated by the

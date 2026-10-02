@@ -22,6 +22,7 @@ pub enum SessionAction {
 pub struct SessionProvider<R> {
     runner: R,
     destructive_actions_enabled: bool,
+    suspend_actions_enabled: bool,
     timestamp_override: Option<u64>,
 }
 
@@ -30,12 +31,18 @@ impl<R> SessionProvider<R> {
         Self {
             runner,
             destructive_actions_enabled: false,
+            suspend_actions_enabled: false,
             timestamp_override: None,
         }
     }
 
     pub fn with_destructive_actions(mut self, enabled: bool) -> Self {
         self.destructive_actions_enabled = enabled;
+        self
+    }
+
+    pub fn with_suspend_actions(mut self, enabled: bool) -> Self {
+        self.suspend_actions_enabled = enabled;
         self
     }
 
@@ -49,19 +56,23 @@ impl<R> Provider for SessionProvider<R> {
     type Snapshot = SessionSnapshot;
 
     fn snapshot(&mut self) -> Result<Self::Snapshot, ProviderError> {
+        let mut issues = Vec::new();
+        if !self.destructive_actions_enabled {
+            issues.push("destructive session actions disabled by caller capability".to_owned());
+        }
+        if !self.suspend_actions_enabled {
+            issues.push("suspend action disabled by separate caller capability".to_owned());
+        }
+
         Ok(SessionSnapshot {
             meta: SnapshotMeta::new(
                 timestamp_ms(self.timestamp_override),
                 Health::Healthy,
                 false,
-                "systemd-session",
+                "logind-session",
             ),
             destructive_actions_enabled: self.destructive_actions_enabled,
-            issues: if self.destructive_actions_enabled {
-                Vec::new()
-            } else {
-                vec!["destructive session actions disabled by caller capability".to_owned()]
-            },
+            issues,
         })
     }
 }
@@ -74,16 +85,22 @@ impl<R: CommandRunner> ActionProvider<SessionAction> for SessionProvider<R> {
             ));
         }
 
+        if action == SessionAction::Suspend && !self.suspend_actions_enabled {
+            return Ok(ActionResult::dry_run(
+                "suspend action disabled by separate caller capability",
+            ));
+        }
+
         let verb = match action {
             SessionAction::Suspend => "suspend",
             SessionAction::Reboot => "reboot",
             SessionAction::PowerOff => "poweroff",
         };
-        let spec = CommandSpec::new("systemctl").arg(verb);
+        let spec = CommandSpec::new("loginctl").arg(verb);
         let output = self.runner.run(&spec, ACTION_LIMITS)?;
         if output.status != 0 {
             return Err(ProviderError::backend(format!(
-                "systemctl action exited with status {}",
+                "loginctl action exited with status {}",
                 output.status
             )));
         }
@@ -100,7 +117,7 @@ mod tests {
     fn destructive_action_is_dry_run_by_default() {
         let mut runner = FixtureCommandRunner::default();
         runner.insert(
-            CommandSpec::new("systemctl").arg("reboot"),
+            CommandSpec::new("loginctl").arg("reboot"),
             CommandOutput {
                 status: 0,
                 stdout: String::new(),
@@ -114,10 +131,36 @@ mod tests {
     }
 
     #[test]
-    fn enabled_fixture_action_uses_exact_backend_command() {
+    fn destructive_enablement_does_not_enable_suspend() {
+        let runner = FixtureCommandRunner::default();
+        let mut provider = SessionProvider::new(runner).with_destructive_actions(true);
+        let result = provider.execute(SessionAction::Suspend).unwrap();
+        assert!(!result.executed);
+        assert!(result.dry_run);
+    }
+
+    #[test]
+    fn explicitly_enabled_suspend_uses_loginctl() {
         let mut runner = FixtureCommandRunner::default();
         runner.insert(
-            CommandSpec::new("systemctl").arg("suspend"),
+            CommandSpec::new("loginctl").arg("suspend"),
+            CommandOutput {
+                status: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        );
+        let mut provider = SessionProvider::new(runner)
+            .with_destructive_actions(true)
+            .with_suspend_actions(true);
+        assert!(provider.execute(SessionAction::Suspend).unwrap().executed);
+    }
+
+    #[test]
+    fn enabled_reboot_uses_loginctl_without_suspend_opt_in() {
+        let mut runner = FixtureCommandRunner::default();
+        runner.insert(
+            CommandSpec::new("loginctl").arg("reboot"),
             CommandOutput {
                 status: 0,
                 stdout: String::new(),
@@ -125,6 +168,6 @@ mod tests {
             },
         );
         let mut provider = SessionProvider::new(runner).with_destructive_actions(true);
-        assert!(provider.execute(SessionAction::Suspend).unwrap().executed);
+        assert!(provider.execute(SessionAction::Reboot).unwrap().executed);
     }
 }

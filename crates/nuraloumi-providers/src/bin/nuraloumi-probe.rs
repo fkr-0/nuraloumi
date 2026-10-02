@@ -19,7 +19,11 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), String> {
-    let (args, fixture, destructive_enabled) = parse_globals(std::env::args().skip(1).collect())?;
+    let (args, fixture, destructive_enabled, unsafe_suspend_enabled) =
+        parse_globals(std::env::args().skip(1).collect())?;
+    if unsafe_suspend_enabled && !destructive_enabled {
+        return Err("--enable-unsafe-suspend requires --enable-destructive".to_owned());
+    }
     if args.is_empty() || args == ["snapshot"] {
         let snapshot = match fixture {
             Some(root) => ProbeSnapshot::fixture(root),
@@ -36,16 +40,22 @@ fn run() -> Result<(), String> {
         return Err("expected 'snapshot' or explicit 'action' subcommand".to_owned());
     }
 
-    let result = execute_action(&args[1..], fixture.as_deref(), destructive_enabled)
-        .map_err(|error| format!("provider action failed: {error}"))?;
+    let result = execute_action(
+        &args[1..],
+        fixture.as_deref(),
+        destructive_enabled,
+        unsafe_suspend_enabled,
+    )
+    .map_err(|error| format!("provider action failed: {error}"))?;
     print!("{}", action_result_json(&result));
     Ok(())
 }
 
-fn parse_globals(args: Vec<String>) -> Result<(Vec<String>, Option<PathBuf>, bool), String> {
+fn parse_globals(args: Vec<String>) -> Result<(Vec<String>, Option<PathBuf>, bool, bool), String> {
     let mut retained = Vec::new();
     let mut fixture = None;
     let mut destructive_enabled = false;
+    let mut unsafe_suspend_enabled = false;
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
@@ -60,13 +70,22 @@ fn parse_globals(args: Vec<String>) -> Result<(Vec<String>, Option<PathBuf>, boo
                 destructive_enabled = true;
                 index += 1;
             }
+            "--enable-unsafe-suspend" => {
+                unsafe_suspend_enabled = true;
+                index += 1;
+            }
             other => {
                 retained.push(other.to_owned());
                 index += 1;
             }
         }
     }
-    Ok((retained, fixture, destructive_enabled))
+    Ok((
+        retained,
+        fixture,
+        destructive_enabled,
+        unsafe_suspend_enabled,
+    ))
 }
 
 fn command_runner(fixture: Option<&Path>) -> Result<Box<dyn CommandRunner>, ProviderError> {
@@ -82,6 +101,7 @@ fn execute_action(
     args: &[String],
     fixture: Option<&Path>,
     destructive_enabled: bool,
+    unsafe_suspend_enabled: bool,
 ) -> Result<nuraloumi_providers::ActionResult, ProviderError> {
     match args {
         [provider, operation, device, value]
@@ -198,6 +218,7 @@ fn execute_action(
             };
             SessionProvider::new(command_runner(fixture)?)
                 .with_destructive_actions(destructive_enabled)
+                .with_suspend_actions(unsafe_suspend_enabled)
                 .execute(action)
         }
         _ => Err(ProviderError::parse(
@@ -229,8 +250,10 @@ fn print_help() {
          nuraloumi-probe [--fixture DIR] action audio set PERCENT\n\
          nuraloumi-probe [--fixture DIR] action audio adjust DELTA\n\
          nuraloumi-probe [--fixture DIR] action audio mute on|off|toggle\n\
-         nuraloumi-probe [--fixture DIR] [--enable-destructive] action session suspend|reboot|poweroff\n\n\
+         nuraloumi-probe [--fixture DIR] [--enable-destructive] action session reboot|poweroff\n\
+         nuraloumi-probe [--fixture DIR] [--enable-destructive] [--enable-unsafe-suspend] action session suspend\n\n\
          Session actions are dry-run/disabled unless --enable-destructive is supplied.\n\
+         Suspend remains dry-run unless --enable-unsafe-suspend is also supplied; that flag requires --enable-destructive.\n\
          Network connect intentionally accepts no password in Wave 1; credential provisioning stays external."
     );
 }
