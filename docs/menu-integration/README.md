@@ -98,16 +98,12 @@ the same semantic/confirmation/control path as keyboard or touch input. The live
 menu can render without enabling system mutation. Real power actions require the
 separate flag described above.
 
-## Review findings / next wiring
+## Integration state
 
-Two integration details should stay explicit while the runtime convergence work
-lands:
-
-- live Wi-Fi should copy the complete `NetworkSnapshot.networks` scan list into
-  the menu snapshot rather than reconstructing a one-row list from only the
-  active SSID;
-- the brightness value displayed by the menu should come from the same writable
-  backlight device that the adjustment action will change.
+The provider-to-menu wiring now preserves the complete live Wi-Fi scan list in
+the menu snapshot rather than reconstructing only the active SSID. Brightness
+display and adjustment also use the same selected writable backlight device, so
+the value shown to the user corresponds to the device the action will change.
 
 Window control now follows the bounded compositor adapter: wlr foreign-toplevel
 management provides list/state/focus/fullscreen/close, while ext foreign-
