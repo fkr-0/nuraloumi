@@ -1,0 +1,19 @@
+id = "demo-network"
+title = "Network"
+
+[[items]]
+id = "summary"
+label = "Wi-Fi"
+subtitle = "Stale — Lab Wi-Fi"
+kind = "status"
+enabled = false
+
+[[items]]
+id = "toggle"
+label = "Toggle Wi-Fi"
+kind = "checkable"
+enabled = true
+
+[items.action]
+type = "toggle"
+id = "network.wifi"

@@ -1,0 +1,43 @@
+{
+  "id": "demo-launcher",
+  "title": "Apps",
+  "items": [
+    {
+      "id": "search",
+      "label": "Search applications…",
+      "subtitle": "Fixture search row",
+      "kind": "status",
+      "enabled": false
+    },
+    {
+      "id": "terminal",
+      "label": "Terminal",
+      "kind": "action",
+      "enabled": true,
+      "action": {"type": "activate", "id": "app.launch.terminal"}
+    },
+    {
+      "id": "browser",
+      "label": "Browser",
+      "subtitle": "Unavailable — browser provider not connected",
+      "kind": "status",
+      "enabled": false
+    },
+    {
+      "id": "power",
+      "label": "Power off…",
+      "subtitle": "Requires confirmation",
+      "kind": "action",
+      "enabled": true,
+      "action": {
+        "type": "confirm",
+        "confirmation": {
+          "title": "Power off…",
+          "body": "Requires confirmation",
+          "kind": "destructive"
+        },
+        "action": {"type": "activate", "id": "system.poweroff"}
+      }
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+panel_edge = "top"
+panel_height = 48
+menu_width = 480
+row_height = 52
+theme = "dark"
+reduced_motion = true

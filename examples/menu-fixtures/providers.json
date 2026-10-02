@@ -1,0 +1,27 @@
+{
+  "network": {"state": "ready", "value": "Nura Lab · 82%", "message": null},
+  "audio": {"state": "ready", "value": "46% · speaker", "message": null},
+  "battery": {"state": "stale", "value": "73%", "message": "sample age 3s"},
+  "clock": {"state": "ready", "value": "23:42", "message": null},
+  "brightness": {"state": "ready", "value": "62%", "message": null},
+  "bluetooth": {"state": "ready", "value": "On · 1 connected", "message": null},
+  "wifi_networks": [
+    {"ssid": "Nura Lab", "signal_percent": 82, "secured": true, "connected": true},
+    {"ssid": "Workshop", "signal_percent": 61, "secured": true, "connected": false},
+    {"ssid": "Guest", "signal_percent": 38, "secured": false, "connected": false}
+  ],
+  "bluetooth_devices": [
+    {"id": "AA:BB:CC:DD:EE:FF", "label": "Headphones", "paired": true, "connected": true},
+    {"id": "10:20:30:40:50:60", "label": "Phone", "paired": true, "connected": false}
+  ],
+  "tasks": [
+    {"id": "labwc", "label": "labwc", "state": "Running", "cpu_percent": 2, "memory_mib": 18},
+    {"id": "nuraloumi-panel", "label": "NuraLoumi panel", "state": "Running", "cpu_percent": 1, "memory_mib": 24},
+    {"id": "foot", "label": "Terminal", "state": "Sleeping", "cpu_percent": 0, "memory_mib": 15}
+  ],
+  "windows": [
+    {"id": "terminal", "title": "Terminal — foot", "app_id": "foot", "focused": true, "fullscreen": false},
+    {"id": "files", "title": "Files", "app_id": "thunar", "focused": false, "fullscreen": false},
+    {"id": "browser", "title": "Browser", "app_id": "browser", "focused": false, "fullscreen": true}
+  ]
+}
