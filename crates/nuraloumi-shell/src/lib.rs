@@ -581,6 +581,7 @@ pub fn load_fixture_snapshot(path: impl AsRef<Path>) -> Result<FixtureSnapshot, 
 #[serde(rename_all = "snake_case")]
 pub enum MenuFamily {
     Launcher,
+    ControlCenter,
     Network,
     Bluetooth,
     Display,
@@ -591,9 +592,46 @@ pub enum MenuFamily {
     System,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlCenterTab {
+    #[default]
+    Media,
+    Network,
+    Display,
+    System,
+    Notifications,
+}
+
+impl ControlCenterTab {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Media => "media",
+            Self::Network => "network",
+            Self::Display => "display",
+            Self::System => "system",
+            Self::Notifications => "notifications",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "media" | "audio" => Ok(Self::Media),
+            "network" | "wifi" | "bluetooth" => Ok(Self::Network),
+            "display" | "brightness" => Ok(Self::Display),
+            "system" | "power" => Ok(Self::System),
+            "notifications" | "notification" | "notices" => Ok(Self::Notifications),
+            other => Err(format!("unknown control-center tab {other:?}")),
+        }
+    }
+}
+
 pub fn build_family(family: MenuFamily, snapshot: &FixtureSnapshot) -> MenuModel {
     match family {
         MenuFamily::Launcher => build_launcher_menu_for(snapshot, OverviewMode::All),
+        MenuFamily::ControlCenter => {
+            build_control_center_menu(snapshot, ControlCenterTab::default())
+        }
         MenuFamily::Network => build_network_menu(snapshot),
         MenuFamily::Bluetooth => build_bluetooth_menu(snapshot),
         MenuFamily::Display => build_display_menu(snapshot),
@@ -644,6 +682,20 @@ pub fn build_launcher_menu_for(snapshot: &FixtureSnapshot, mode: OverviewMode) -
             candidate.as_str(),
             !selected,
         ));
+    }
+
+    if mode == OverviewMode::All {
+        items.extend([
+            section("launcher.controls", "Desktop"),
+            custom_action(
+                "launcher.control-center",
+                "Control Center",
+                Some("Media · network · display · system · notifications"),
+                "menu.open",
+                "control-center",
+                true,
+            ),
+        ]);
     }
 
     if matches!(mode, OverviewMode::All | OverviewMode::Windows) {
@@ -801,6 +853,195 @@ pub fn build_launcher_menu_for(snapshot: &FixtureSnapshot, mode: OverviewMode) -
     MenuModel {
         id: "launcher".into(),
         title: "Overview".into(),
+        items,
+    }
+}
+
+pub fn build_control_center_menu(snapshot: &FixtureSnapshot, tab: ControlCenterTab) -> MenuModel {
+    let mut items = vec![section("control.tabs", "Control Center")];
+
+    for candidate in [
+        ControlCenterTab::Media,
+        ControlCenterTab::Network,
+        ControlCenterTab::Display,
+        ControlCenterTab::System,
+        ControlCenterTab::Notifications,
+    ] {
+        let selected = candidate == tab;
+        let label = match candidate {
+            ControlCenterTab::Media => "Media",
+            ControlCenterTab::Network => "Network",
+            ControlCenterTab::Display => "Display",
+            ControlCenterTab::System => "System",
+            ControlCenterTab::Notifications => "Notifications",
+        };
+        items.push(custom_action(
+            &format!("control.tab.{}", candidate.as_str()),
+            label,
+            Some(if selected {
+                "Selected tab"
+            } else {
+                "Switch tab"
+            }),
+            "control.tab",
+            candidate.as_str(),
+            !selected,
+        ));
+    }
+
+    match tab {
+        ControlCenterTab::Media => {
+            let available = snapshot.audio.available();
+            items.extend([
+                section("control.media.now-playing", "Now playing"),
+                status(
+                    "control.media.player",
+                    "Media player",
+                    "MPRIS provider not connected yet",
+                ),
+                section("control.media.audio", "Audio"),
+                provider_status("control.media.volume", "Speaker volume", &snapshot.audio),
+                toggle_action(
+                    "control.media.mute",
+                    "Mute",
+                    "audio.mute",
+                    available,
+                    snapshot
+                        .audio
+                        .value
+                        .as_deref()
+                        .map(|value| value.to_ascii_lowercase().contains("muted")),
+                    available.then_some("Toggle default speaker mute"),
+                ),
+                adjustable(
+                    "control.media.down",
+                    "Volume −5%",
+                    "audio.volume",
+                    -5,
+                    available,
+                ),
+                adjustable(
+                    "control.media.up",
+                    "Volume +5%",
+                    "audio.volume",
+                    5,
+                    available,
+                ),
+            ]);
+        }
+        ControlCenterTab::Network => {
+            let wifi_available = snapshot.network.available();
+            let bluetooth_available = snapshot.bluetooth.available();
+            items.extend([
+                section("control.network.status", "Connectivity"),
+                provider_status("control.network.wifi.state", "Wi-Fi", &snapshot.network),
+                toggle_action(
+                    "control.network.wifi.toggle",
+                    "Wi-Fi radio",
+                    "network.wifi",
+                    wifi_available,
+                    None,
+                    wifi_available.then_some("Toggle radio through the network provider"),
+                ),
+                custom_action(
+                    "control.network.wifi.details",
+                    "Wi-Fi networks…",
+                    Some("Open scan results and connection controls"),
+                    "menu.open",
+                    "wifi",
+                    true,
+                ),
+                provider_status(
+                    "control.network.bluetooth.state",
+                    "Bluetooth",
+                    &snapshot.bluetooth,
+                ),
+                toggle_action(
+                    "control.network.bluetooth.toggle",
+                    "Bluetooth radio",
+                    "bluetooth.radio",
+                    bluetooth_available,
+                    snapshot
+                        .bluetooth
+                        .value
+                        .as_deref()
+                        .map(|value| value.trim_start().starts_with("On")),
+                    bluetooth_available.then_some("Toggle adapter power"),
+                ),
+                custom_action(
+                    "control.network.bluetooth.details",
+                    "Bluetooth devices…",
+                    Some("Open paired and known device controls"),
+                    "menu.open",
+                    "bluetooth",
+                    true,
+                ),
+            ]);
+        }
+        ControlCenterTab::Display => {
+            let available = snapshot.brightness.available() && snapshot.brightness_writable;
+            items.extend([
+                section("control.display.brightness", "Display"),
+                provider_status(
+                    "control.display.brightness.state",
+                    "Brightness",
+                    &snapshot.brightness,
+                ),
+                adjustable(
+                    "control.display.brightness.down",
+                    "Brightness −10%",
+                    "system.brightness",
+                    -10,
+                    available,
+                ),
+                adjustable(
+                    "control.display.brightness.up",
+                    "Brightness +10%",
+                    "system.brightness",
+                    10,
+                    available,
+                ),
+                custom_action(
+                    "control.display.details",
+                    "Display controls…",
+                    Some("Brightness and active-window fullscreen"),
+                    "menu.open",
+                    "display",
+                    true,
+                ),
+            ]);
+        }
+        ControlCenterTab::System => {
+            items.extend([
+                section("control.system.status", "System"),
+                provider_status("control.system.battery", "Battery", &snapshot.battery),
+                provider_status("control.system.clock", "Clock", &snapshot.clock),
+                section("control.system.session", "Session"),
+                confirm_action("control.system.suspend", "Suspend", "system.suspend"),
+                confirm_action("control.system.restart", "Restart…", "system.restart"),
+                confirm_action("control.system.poweroff", "Power off…", "system.poweroff"),
+            ]);
+        }
+        ControlCenterTab::Notifications => {
+            items.extend([
+                section("control.notifications.center", "Notifications"),
+                status(
+                    "control.notifications.unavailable",
+                    "No notification center provider",
+                    "History and actions will appear here when notification integration is connected",
+                ),
+                status(
+                    "control.notifications.empty",
+                    "No notifications",
+                    "Stable empty state",
+                ),
+            ]);
+        }
+    }
+
+    MenuModel {
+        id: "control-center".into(),
+        title: "Control Center".into(),
         items,
     }
 }
@@ -1536,6 +1777,8 @@ pub struct ShellState {
     pub pending_confirmation: Option<String>,
     #[serde(default)]
     pub overview_mode: OverviewMode,
+    #[serde(default)]
+    pub control_center_tab: ControlCenterTab,
     #[serde(skip)]
     pointer_pressed_region: Option<HitRegion>,
     #[serde(skip)]
@@ -1554,6 +1797,7 @@ impl ShellState {
             closed: false,
             pending_confirmation: None,
             overview_mode: OverviewMode::All,
+            control_center_tab: ControlCenterTab::Media,
             pointer_pressed_region: None,
             touch_pressed_regions: BTreeMap::new(),
         })
@@ -1573,10 +1817,12 @@ impl ShellState {
         family: MenuFamily,
         snapshot: &FixtureSnapshot,
     ) -> Result<(), String> {
-        let menu = if family == MenuFamily::Launcher {
-            build_launcher_menu_for(snapshot, self.overview_mode)
-        } else {
-            build_family(family, snapshot)
+        let menu = match family {
+            MenuFamily::Launcher => build_launcher_menu_for(snapshot, self.overview_mode),
+            MenuFamily::ControlCenter => {
+                build_control_center_menu(snapshot, self.control_center_tab)
+            }
+            _ => build_family(family, snapshot),
         };
         self.refresh_menu(menu)
     }
@@ -1591,6 +1837,18 @@ impl ShellState {
         }
         self.overview_mode = mode;
         self.refresh_menu(build_launcher_menu_for(snapshot, mode))
+    }
+
+    pub fn set_control_center_tab(
+        &mut self,
+        tab: ControlCenterTab,
+        snapshot: &FixtureSnapshot,
+    ) -> Result<(), String> {
+        if self.menu.id != "control-center" {
+            return Err("control-center tab is only valid for the Control Center surface".into());
+        }
+        self.control_center_tab = tab;
+        self.refresh_menu(build_control_center_menu(snapshot, tab))
     }
 
     pub fn focus_search(&mut self, focused: bool) -> ActionReport {
@@ -1847,7 +2105,10 @@ impl PanelController {
 
 pub fn parse_family(value: &str) -> Result<MenuFamily, String> {
     match value {
-        "launcher" | "apps" => Ok(MenuFamily::Launcher),
+        "launcher" | "apps" | "overview" | "super-menu" => Ok(MenuFamily::Launcher),
+        "control-center" | "control-center-menu" | "quick-settings" => {
+            Ok(MenuFamily::ControlCenter)
+        }
         "network" | "net" | "wifi" | "wi-fi" => Ok(MenuFamily::Network),
         "bluetooth" | "bt" => Ok(MenuFamily::Bluetooth),
         "display" | "brightness" | "fullscreen" | "full-screen" => Ok(MenuFamily::Display),
@@ -1857,7 +2118,7 @@ pub fn parse_family(value: &str) -> Result<MenuFamily, String> {
         "windows" | "window" | "window-list" => Ok(MenuFamily::Windows),
         "system" | "battery" | "clock" | "controls" => Ok(MenuFamily::System),
         other => Err(format!(
-            "unknown menu family {other:?}; expected launcher, wifi, bluetooth, display, audio, power, tasks, windows, or system"
+            "unknown menu family {other:?}; expected launcher, control-center, wifi, bluetooth, display, audio, power, tasks, windows, or system"
         )),
     }
 }
@@ -2293,6 +2554,8 @@ mod tests {
     fn control_family_aliases_parse_and_builtins_validate() {
         let snapshot = FixtureSnapshot::default();
         let cases = [
+            ("super-menu", MenuFamily::Launcher),
+            ("quick-settings", MenuFamily::ControlCenter),
             ("wifi", MenuFamily::Network),
             ("bt", MenuFamily::Bluetooth),
             ("brightness", MenuFamily::Display),
@@ -2310,6 +2573,81 @@ mod tests {
                 .validate()
                 .expect("built-in family validates");
         }
+    }
+
+    #[test]
+    fn control_center_tabs_reuse_existing_provider_actions_and_degrade_cleanly() {
+        let snapshot = FixtureSnapshot::default();
+
+        let media = build_control_center_menu(&snapshot, ControlCenterTab::Media);
+        assert_eq!(media.id, "control-center");
+        assert!(media.items.iter().any(|item| {
+            matches!(
+                item.action,
+                Some(MenuAction::Adjust {
+                    ref id,
+                    delta: 5
+                }) if id == "audio.volume"
+            )
+        }));
+        assert!(media.items.iter().any(|item| {
+            item.id == "control.media.player"
+                && item
+                    .subtitle
+                    .as_deref()
+                    .is_some_and(|subtitle| subtitle.contains("MPRIS"))
+        }));
+
+        let network = build_control_center_menu(&snapshot, ControlCenterTab::Network);
+        assert!(network.items.iter().any(|item| {
+            matches!(
+                item.action,
+                Some(MenuAction::Toggle { ref id }) if id == "network.wifi"
+            )
+        }));
+        assert!(network.items.iter().any(|item| {
+            matches!(
+                item.action,
+                Some(MenuAction::Toggle { ref id }) if id == "bluetooth.radio"
+            )
+        }));
+
+        let notifications = build_control_center_menu(&snapshot, ControlCenterTab::Notifications);
+        assert!(notifications
+            .items
+            .iter()
+            .any(|item| item.id == "control.notifications.unavailable"));
+
+        for tab in [
+            ControlCenterTab::Media,
+            ControlCenterTab::Network,
+            ControlCenterTab::Display,
+            ControlCenterTab::System,
+            ControlCenterTab::Notifications,
+        ] {
+            build_control_center_menu(&snapshot, tab)
+                .validate()
+                .expect("control-center tab validates");
+        }
+    }
+
+    #[test]
+    fn control_center_tab_switch_rebuilds_without_parallel_action_path() {
+        let snapshot = FixtureSnapshot::default();
+        let mut shell = shell_with(build_control_center_menu(
+            &snapshot,
+            ControlCenterTab::Media,
+        ));
+        shell
+            .set_control_center_tab(ControlCenterTab::Display, &snapshot)
+            .expect("switch control-center tab");
+        assert_eq!(shell.control_center_tab, ControlCenterTab::Display);
+        assert_eq!(shell.menu.id, "control-center");
+        assert!(shell
+            .menu
+            .items
+            .iter()
+            .any(|item| item.id == "control.display.brightness.up"));
     }
 
     #[test]

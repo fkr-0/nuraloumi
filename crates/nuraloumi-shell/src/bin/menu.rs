@@ -10,7 +10,7 @@ use nuraloumi_shell::{
     build_family, execute_window_command, launcher_search_input, load_config,
     load_fixture_snapshot, load_menu, parse_desktop_command, parse_family, parse_window_command,
     window_entries, ActionReport, ApplicationEntry as ShellApplicationEntry, BluetoothDeviceEntry,
-    DesktopCommand, DesktopControlCapabilities, DesktopEntry, FixtureSnapshot,
+    ControlCenterTab, DesktopCommand, DesktopControlCapabilities, DesktopEntry, FixtureSnapshot,
     HitRegion as ShellHitRegion, MenuAction, MenuFamily, OverviewMode,
     PlatformEvent as ShellPlatformEvent, ProviderValue, SemanticInput, ShellConfig, ShellInput,
     ShellState, Theme as ShellTheme, ValueState, WifiNetworkEntry, WindowControlCapabilities,
@@ -37,7 +37,7 @@ OPTIONS:
     --live                     Open a native Wayland/Cairo software-rendered menu sheet
     --probe-toplevels          Print compositor toplevel capabilities/windows as JSON and exit
     --probe-workspaces         Print compositor workspace capabilities/workspaces as JSON and exit
-    --family <name>            launcher|wifi|bluetooth|display|audio|power|tasks|windows|system
+    --family <name>            launcher|control-center|wifi|bluetooth|display|audio|power|tasks|windows|system
     --fixture <path>           Load a JSON/TOML MenuModel instead of a built-in family
     --providers <path>         Load deterministic JSON/TOML provider snapshot
     --config <path>            Load JSON/TOML shell geometry/theme config
@@ -583,6 +583,10 @@ fn handle_live_report(
         }
         if kind == "overview.mode" {
             shell.set_overview_mode(OverviewMode::parse(payload)?, snapshot)?;
+            return Ok(false);
+        }
+        if kind == "control.tab" {
+            shell.set_control_center_tab(ControlCenterTab::parse(payload)?, snapshot)?;
             return Ok(false);
         }
     }

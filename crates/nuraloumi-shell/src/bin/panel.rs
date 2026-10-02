@@ -13,9 +13,9 @@ use nuraloumi_shell::{
     build_family, execute_window_command, launcher_search_input, load_config,
     load_fixture_snapshot, panel_affordances, parse_desktop_command, parse_family,
     parse_window_command, window_entries, ActionReport, ApplicationEntry as ShellApplicationEntry,
-    BluetoothDeviceEntry, DesktopCommand, DesktopControlCapabilities, DesktopEntry,
-    FixtureSnapshot, HitRegion as ShellHitRegion, MenuAction, MenuFamily, OverviewMode,
-    PanelAffordance, PanelController, PanelEdge as ShellPanelEdge,
+    BluetoothDeviceEntry, ControlCenterTab, DesktopCommand, DesktopControlCapabilities,
+    DesktopEntry, FixtureSnapshot, HitRegion as ShellHitRegion, MenuAction, MenuFamily,
+    OverviewMode, PanelAffordance, PanelController, PanelEdge as ShellPanelEdge,
     PlatformEvent as ShellPlatformEvent, ProviderValue, SemanticInput, ShellConfig, ShellState,
     Theme as ShellTheme, ValueState, WifiNetworkEntry, WindowControlCapabilities,
 };
@@ -43,7 +43,7 @@ OPTIONS:
     --live                     Open a native Wayland/Cairo wl_shm panel
     --providers <path>         Load deterministic JSON/TOML provider snapshot
     --config <path>            Load JSON/TOML shell geometry/theme config
-    --open <family>            Open launcher|network|audio|system initially
+    --open <family>            Open launcher|control-center|network|audio|system initially
     --reduced-motion           Force reduced-motion state
     --enable-power-actions     Allow confirmed suspend/reboot/poweroff in live mode
     -h, --help                 Show this help
@@ -521,6 +521,11 @@ fn run_live(
                             .set_overview_mode(OverviewMode::parse(payload)?, &snapshot)?;
                         panel_scene = None;
                         redraw = true;
+                    } else if kind == "control.tab" {
+                        menu.shell
+                            .set_control_center_tab(ControlCenterTab::parse(payload)?, &snapshot)?;
+                        panel_scene = None;
+                        redraw = true;
                     }
                 }
 
@@ -529,7 +534,9 @@ fn run_live(
                         let is_navigation = matches!(
                             action,
                             MenuAction::Custom { kind, .. }
-                                if kind == "menu.open" || kind == "overview.mode"
+                                if kind == "menu.open"
+                                    || kind == "overview.mode"
+                                    || kind == "control.tab"
                         );
                         if !is_navigation {
                             if let Some(command) = parse_desktop_command(action, &snapshot)? {
@@ -1252,7 +1259,7 @@ fn panel_target_for_id(id: &str) -> Option<PanelTarget> {
         "network" => (MenuFamily::Network, false),
         "search" => (MenuFamily::Launcher, true),
         "audio" => (MenuFamily::Audio, false),
-        "battery" | "clock" => (MenuFamily::System, false),
+        "battery" | "clock" => (MenuFamily::ControlCenter, false),
         _ => return None,
     };
     Some(PanelTarget {
@@ -1637,7 +1644,14 @@ mod tests {
         assert_eq!(
             panel_target_for_id("battery"),
             Some(PanelTarget {
-                family: MenuFamily::System,
+                family: MenuFamily::ControlCenter,
+                focus_search: false,
+            })
+        );
+        assert_eq!(
+            panel_target_for_id("clock"),
+            Some(PanelTarget {
+                family: MenuFamily::ControlCenter,
                 focus_search: false,
             })
         );
