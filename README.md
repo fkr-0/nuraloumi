@@ -11,7 +11,7 @@ It combines the strongest parts of two existing projects without importing eithe
 ## North-star stack
 
 ```text
-providers ──> semantic menu model ──> scene/layout ──> Cairo ImageSurface
+providers ──> shell adapters ──> semantic menu model ──> scene/layout ──> Cairo ImageSurface
                                                        │
                                                 Wayland wl_shm
                                                        │
@@ -48,10 +48,10 @@ tasks.yml
 
 ```sh
 cargo fmt --all -- --check
-cargo check --workspace
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
-cargo build --workspace --release
+cargo check --workspace --locked
+cargo test --workspace --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo build --workspace --release --locked
 ```
 
 See **ROADMAP.md** for release sequencing and **docs/AGENT-LANES.md** for the parallel implementation wave.
