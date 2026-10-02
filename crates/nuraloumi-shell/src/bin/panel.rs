@@ -1,24 +1,28 @@
 use nuraloumi_core::{DARK_THEME, LIGHT_THEME};
 use nuraloumi_providers::{
-    ActionProvider, ActionResult, AudioAction, AudioProvider, BacklightAction, BacklightProvider,
-    BluetoothAction, BluetoothProvider, Health, NetworkAction, NetworkProvider, ProbeSnapshot,
-    Provider, SessionAction, SessionProvider, SnapshotMeta, SystemCommandRunner,
+    ActionProvider, ActionResult, ApplicationAction, ApplicationProvider, ApplicationSnapshot,
+    AudioAction, AudioProvider, BacklightAction, BacklightProvider, BluetoothAction,
+    BluetoothProvider, Health, NetworkAction, NetworkProvider, ProbeSnapshot, Provider,
+    SessionAction, SessionProvider, SnapshotMeta, SystemCommandRunner,
 };
 use nuraloumi_render_cairo::{
     CairoRenderer, Color, HitRegion as RenderHitRegion, PaintNode, Point, Rect, RenderOptions,
     RowKind, Scene, ScrollWindow, TextStyle, Theme as RenderTheme, Viewport,
 };
 use nuraloumi_shell::{
-    build_family, launcher_search_input, load_config, load_fixture_snapshot, panel_affordances,
-    parse_family, BluetoothDeviceEntry, FixtureSnapshot, HitRegion as ShellHitRegion, MenuAction,
-    MenuFamily, PanelAffordance, PanelController, PanelEdge as ShellPanelEdge,
+    build_family, execute_window_command, launcher_search_input, load_config,
+    load_fixture_snapshot, panel_affordances, parse_family, parse_window_command, window_entries,
+    ActionReport, ApplicationEntry as ShellApplicationEntry, BluetoothDeviceEntry,
+    DesktopControlCapabilities, FixtureSnapshot, HitRegion as ShellHitRegion, MenuAction,
+    MenuFamily, OverviewMode, PanelAffordance, PanelController, PanelEdge as ShellPanelEdge,
     PlatformEvent as ShellPlatformEvent, ProviderValue, SemanticInput, ShellConfig, ShellState,
-    Theme as ShellTheme, ValueState, WifiNetworkEntry,
+    Theme as ShellTheme, ValueState, WifiNetworkEntry, WindowControlCapabilities,
 };
 use nuraloumi_wayland::{
-    BackendError, Frame, Key as WaylandKey, MenuConfig as WaylandMenuConfig,
-    PanelConfig as WaylandPanelConfig, PanelEdge as WaylandPanelEdge, PixelFormat,
-    PlatformEvent as WaylandEvent, SurfaceId, WaylandBackend,
+    BackendCapabilities as WaylandCapabilities, BackendError, Frame, Key as WaylandKey,
+    MenuConfig as WaylandMenuConfig, PanelConfig as WaylandPanelConfig,
+    PanelEdge as WaylandPanelEdge, PixelFormat, PlatformEvent as WaylandEvent, SurfaceId,
+    WaylandBackend,
 };
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -206,6 +210,9 @@ fn run_live(
     if !capabilities.argb8888 {
         return Err("compositor does not advertise wl_shm ARGB8888".into());
     }
+    if policy.execute_provider_actions {
+        refresh_window_snapshot(&mut snapshot, &backend);
+    }
 
     let output = backend.outputs().into_iter().next();
     let panel_surface = backend
@@ -229,8 +236,13 @@ fn run_live(
     let mut panel_touch_press: BTreeMap<i32, Option<String>> = BTreeMap::new();
     let mut active_menu: Option<LiveMenu> = None;
     let mut panel_first_frame_presented = false;
-    let mut live_provider_probe =
-        defer_live_provider_refresh.then(|| std::thread::spawn(ProbeSnapshot::live));
+    let mut live_provider_probe = defer_live_provider_refresh.then(|| {
+        std::thread::spawn(|| {
+            let probe = ProbeSnapshot::live();
+            let applications = ApplicationProvider::system().snapshot();
+            (probe, applications)
+        })
+    });
 
     if let Some(family) = initial_family {
         active_menu = Some(open_live_menu(
@@ -252,6 +264,26 @@ fn run_live(
             backend
                 .blocking_dispatch()
                 .map_err(|error| format!("Wayland dispatch failed: {error}"))?;
+        }
+        let toplevel_changed = backend.drain_toplevel_events().count() > 0;
+        if policy.execute_provider_actions && toplevel_changed {
+            refresh_window_snapshot(&mut snapshot, &backend);
+            if let Some(menu) = active_menu.as_mut() {
+                menu.shell.refresh_family(menu.family, &snapshot)?;
+                if let Some(menu_geometry) = menu.geometry {
+                    menu.scene = Some(render_menu_and_present(
+                        &mut backend,
+                        menu.surface,
+                        &renderer,
+                        &menu.shell,
+                        &config,
+                        menu_geometry,
+                    )?);
+                } else {
+                    menu.scene = None;
+                }
+            }
+            panel_scene = None;
         }
         let events: Vec<_> = backend.drain_events().collect();
 
@@ -446,37 +478,62 @@ fn run_live(
                 {
                     if kind == "menu.open" {
                         switch_family = Some(parse_family(payload)?);
+                    } else if kind == "overview.mode" {
+                        menu.shell
+                            .set_overview_mode(OverviewMode::parse(payload)?, &snapshot)?;
+                        panel_scene = None;
+                        redraw = true;
                     }
                 }
 
                 if policy.execute_provider_actions {
-                    if let nuraloumi_shell::ActionReport::Dispatched { action, .. } = &action_report
-                    {
+                    if let ActionReport::Dispatched { action, .. } = &action_report {
                         let is_navigation = matches!(
                             action,
-                            MenuAction::Custom { kind, .. } if kind == "menu.open"
+                            MenuAction::Custom { kind, .. }
+                                if kind == "menu.open" || kind == "overview.mode"
                         );
                         if !is_navigation {
-                            match execute_live_action(action, policy.enable_power_actions) {
-                                Ok(Some(result)) => {
-                                    eprintln!(
+                            if let Some(command) = parse_window_command(action, &snapshot.windows)?
+                            {
+                                execute_window_command(&mut backend, command)?;
+                                redraw = true;
+                            } else {
+                                let app_launch = matches!(
+                                    action,
+                                    MenuAction::Custom { kind, .. } if kind == "app.launch"
+                                );
+                                match execute_live_action(action, policy.enable_power_actions) {
+                                    Ok(Some(result)) => {
+                                        eprintln!(
                                         "nuraloumi-provider-result: executed={} dry_run={} message={}",
                                         result.executed, result.dry_run, result.message
                                     );
-                                    snapshot = fixture_snapshot_from_probe(&ProbeSnapshot::live());
-                                    menu.shell
-                                        .refresh_menu(build_family(menu.family, &snapshot))?;
-                                    panel_scene = None;
-                                    redraw = true;
-                                }
-                                Ok(None) => {}
-                                Err(error) => {
-                                    eprintln!("nuraloumi-provider-error: {error}");
-                                    snapshot = fixture_snapshot_from_probe(&ProbeSnapshot::live());
-                                    menu.shell
-                                        .refresh_menu(build_family(menu.family, &snapshot))?;
-                                    panel_scene = None;
-                                    redraw = true;
+                                        if !app_launch {
+                                            refresh_probe_snapshot(
+                                                &mut snapshot,
+                                                &ProbeSnapshot::live(),
+                                            );
+                                            refresh_window_snapshot(&mut snapshot, &backend);
+                                        }
+                                        menu.shell.refresh_family(menu.family, &snapshot)?;
+                                        panel_scene = None;
+                                        redraw = true;
+                                    }
+                                    Ok(None) => {}
+                                    Err(error) => {
+                                        eprintln!("nuraloumi-provider-error: {error}");
+                                        if !app_launch {
+                                            refresh_probe_snapshot(
+                                                &mut snapshot,
+                                                &ProbeSnapshot::live(),
+                                            );
+                                            refresh_window_snapshot(&mut snapshot, &backend);
+                                        }
+                                        menu.shell.refresh_family(menu.family, &snapshot)?;
+                                        panel_scene = None;
+                                        redraw = true;
+                                    }
                                 }
                             }
                         }
@@ -497,7 +554,7 @@ fn run_live(
                 if family != MenuFamily::Launcher && menu.shell.search_focused {
                     let _ = menu.shell.focus_search(false);
                 }
-                menu.shell.refresh_menu(build_family(family, &snapshot))?;
+                menu.shell.refresh_family(family, &snapshot)?;
                 panel_scene = None;
                 redraw = true;
             }
@@ -527,15 +584,18 @@ fn run_live(
                 .as_ref()
                 .is_some_and(|probe| probe.is_finished())
         {
-            let probe = live_provider_probe
+            let (probe, applications) = live_provider_probe
                 .take()
                 .expect("finished live provider probe must exist")
                 .join()
                 .map_err(|_| "initial live provider probe panicked".to_owned())?;
-            snapshot = fixture_snapshot_from_probe(&probe);
+            refresh_probe_snapshot(&mut snapshot, &probe);
+            apply_application_snapshot(&mut snapshot, applications);
+            if policy.execute_provider_actions {
+                refresh_window_snapshot(&mut snapshot, &backend);
+            }
             if let Some(menu) = active_menu.as_mut() {
-                menu.shell
-                    .refresh_menu(build_family(menu.family, &snapshot))?;
+                menu.shell.refresh_family(menu.family, &snapshot)?;
                 if let Some(menu_geometry) = menu.geometry {
                     menu.scene = Some(render_menu_and_present(
                         &mut backend,
@@ -1272,7 +1332,58 @@ fn fixture_snapshot_from_probe(probe: &ProbeSnapshot) -> FixtureSnapshot {
             .collect(),
         tasks: Vec::new(),
         windows: Vec::new(),
+        applications: Vec::new(),
+        desktops: Vec::new(),
+        desktop_capabilities: DesktopControlCapabilities::unavailable(),
     }
+}
+
+fn refresh_probe_snapshot(snapshot: &mut FixtureSnapshot, probe: &ProbeSnapshot) {
+    let applications = std::mem::take(&mut snapshot.applications);
+    let windows = std::mem::take(&mut snapshot.windows);
+    let desktops = std::mem::take(&mut snapshot.desktops);
+    let desktop_capabilities = snapshot.desktop_capabilities;
+    *snapshot = fixture_snapshot_from_probe(probe);
+    snapshot.applications = applications;
+    snapshot.windows = windows;
+    snapshot.desktops = desktops;
+    snapshot.desktop_capabilities = desktop_capabilities;
+}
+
+fn apply_application_snapshot(
+    snapshot: &mut FixtureSnapshot,
+    applications: Result<ApplicationSnapshot, nuraloumi_providers::ProviderError>,
+) {
+    match applications {
+        Ok(applications) => {
+            snapshot.applications = applications
+                .applications
+                .into_iter()
+                .map(|application| ShellApplicationEntry {
+                    id: application.id,
+                    label: application.name,
+                    generic_name: application.generic_name,
+                    keywords: application.keywords,
+                    launchable: application.launchable,
+                })
+                .collect();
+        }
+        Err(error) => {
+            eprintln!("nuraloumi-application-provider-error: {error}");
+            snapshot.applications.clear();
+        }
+    }
+}
+
+fn refresh_window_snapshot(snapshot: &mut FixtureSnapshot, backend: &WaylandBackend) {
+    let capabilities = window_control_capabilities(&backend.capabilities());
+    snapshot.windows = window_entries(&backend.toplevels(), capabilities);
+}
+
+fn window_control_capabilities(backend: &WaylandCapabilities) -> WindowControlCapabilities {
+    let mut capabilities: WindowControlCapabilities = backend.toplevel.into();
+    capabilities.focus &= backend.seat;
+    capabilities
 }
 
 fn execute_live_action(
@@ -1280,6 +1391,13 @@ fn execute_live_action(
     enable_power_actions: bool,
 ) -> Result<Option<ActionResult>, String> {
     let result = match action {
+        MenuAction::Custom { kind, payload } if kind == "app.launch" => {
+            ApplicationProvider::system()
+                .execute(ApplicationAction::Launch {
+                    id: payload.clone(),
+                })
+                .map_err(|error| error.to_string())?
+        }
         MenuAction::Toggle { id } if id == "network.wifi" => {
             NetworkProvider::new(SystemCommandRunner)
                 .execute(NetworkAction::ToggleRadio)

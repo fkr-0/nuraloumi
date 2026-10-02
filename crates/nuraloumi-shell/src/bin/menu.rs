@@ -1,16 +1,18 @@
 use nuraloumi_core::{DARK_THEME, LIGHT_THEME};
 use nuraloumi_providers::{
-    ActionProvider, ActionResult, AudioAction, AudioProvider, BacklightAction, BacklightProvider,
-    BluetoothAction, BluetoothProvider, Health, NetworkAction, NetworkProvider, ProbeSnapshot,
-    Provider, SessionAction, SessionProvider, SnapshotMeta, SystemCommandRunner,
+    ActionProvider, ActionResult, ApplicationAction, ApplicationProvider, AudioAction,
+    AudioProvider, BacklightAction, BacklightProvider, BluetoothAction, BluetoothProvider, Health,
+    NetworkAction, NetworkProvider, ProbeSnapshot, Provider, SessionAction, SessionProvider,
+    SnapshotMeta, SystemCommandRunner,
 };
 use nuraloumi_render_cairo::{CairoRenderer, RenderOptions, Scene, Viewport};
 use nuraloumi_shell::{
     build_family, execute_window_command, launcher_search_input, load_config,
     load_fixture_snapshot, load_menu, parse_family, parse_window_command, window_entries,
-    ActionReport, BluetoothDeviceEntry, FixtureSnapshot, HitRegion as ShellHitRegion, MenuAction,
-    MenuFamily, PlatformEvent as ShellPlatformEvent, ProviderValue, SemanticInput, ShellConfig,
-    ShellInput, ShellState, Theme as ShellTheme, ValueState, WifiNetworkEntry,
+    ActionReport, ApplicationEntry as ShellApplicationEntry, BluetoothDeviceEntry,
+    DesktopControlCapabilities, FixtureSnapshot, HitRegion as ShellHitRegion, MenuAction,
+    MenuFamily, OverviewMode, PlatformEvent as ShellPlatformEvent, ProviderValue, SemanticInput,
+    ShellConfig, ShellInput, ShellState, Theme as ShellTheme, ValueState, WifiNetworkEntry,
     WindowControlCapabilities, WindowEntry,
 };
 use nuraloumi_wayland::{
@@ -129,13 +131,16 @@ fn run() -> Result<(), String> {
     }
     config.validate()?;
 
-    let snapshot = if let Some(path) = args.providers.as_ref() {
+    let mut snapshot = if let Some(path) = args.providers.as_ref() {
         load_fixture_snapshot(path)?
     } else if args.live {
         fixture_snapshot_from_probe(&ProbeSnapshot::live())
     } else {
         FixtureSnapshot::default()
     };
+    if args.live && args.providers.is_none() {
+        refresh_application_snapshot(&mut snapshot);
+    }
     let family = parse_family(args.family.as_deref().unwrap_or("launcher"))?;
     let menu = if let Some(path) = args.fixture.as_ref() {
         load_menu(path)?
@@ -492,7 +497,11 @@ fn handle_live_report(
     {
         if kind == "menu.open" {
             let family = parse_family(payload)?;
-            shell.refresh_menu(build_family(family, snapshot))?;
+            shell.refresh_family(family, snapshot)?;
+            return Ok(false);
+        }
+        if kind == "overview.mode" {
+            shell.set_overview_mode(OverviewMode::parse(payload)?, snapshot)?;
             return Ok(false);
         }
     }
@@ -513,14 +522,18 @@ fn handle_live_report(
                         "nuraloumi-provider-result: executed={} dry_run={} message={}",
                         result.executed, result.dry_run, result.message
                     );
+                    let applications = std::mem::take(&mut snapshot.applications);
                     *snapshot = fixture_snapshot_from_probe(&ProbeSnapshot::live());
+                    snapshot.applications = applications;
                     refresh_window_snapshot(snapshot, backend);
                     refresh_builtin_menu(shell, snapshot)?;
                 }
                 Ok(None) => {}
                 Err(error) => {
                     eprintln!("nuraloumi-provider-error: {error}");
+                    let applications = std::mem::take(&mut snapshot.applications);
                     *snapshot = fixture_snapshot_from_probe(&ProbeSnapshot::live());
+                    snapshot.applications = applications;
                     refresh_window_snapshot(snapshot, backend);
                     refresh_builtin_menu(shell, snapshot)?;
                 }
@@ -552,7 +565,7 @@ fn refresh_builtin_menu(
     let Ok(family) = parse_family(&shell.menu.id) else {
         return Ok(false);
     };
-    shell.refresh_menu(build_family(family, snapshot))?;
+    shell.refresh_family(family, snapshot)?;
     Ok(true)
 }
 
@@ -562,6 +575,13 @@ fn execute_live_action(
     enable_unsafe_suspend: bool,
 ) -> Result<Option<ActionResult>, String> {
     let result = match action {
+        MenuAction::Custom { kind, payload } if kind == "app.launch" => {
+            ApplicationProvider::system()
+                .execute(ApplicationAction::Launch {
+                    id: payload.clone(),
+                })
+                .map_err(|error| error.to_string())?
+        }
         MenuAction::Toggle { id } if id == "network.wifi" => {
             NetworkProvider::new(SystemCommandRunner)
                 .execute(NetworkAction::ToggleRadio)
@@ -758,6 +778,31 @@ fn fixture_snapshot_from_probe(probe: &ProbeSnapshot) -> FixtureSnapshot {
             .collect(),
         tasks: Vec::new(),
         windows: Vec::new(),
+        applications: Vec::new(),
+        desktops: Vec::new(),
+        desktop_capabilities: DesktopControlCapabilities::unavailable(),
+    }
+}
+
+fn refresh_application_snapshot(snapshot: &mut FixtureSnapshot) {
+    match ApplicationProvider::system().snapshot() {
+        Ok(applications) => {
+            snapshot.applications = applications
+                .applications
+                .into_iter()
+                .map(|application| ShellApplicationEntry {
+                    id: application.id,
+                    label: application.name,
+                    generic_name: application.generic_name,
+                    keywords: application.keywords,
+                    launchable: application.launchable,
+                })
+                .collect();
+        }
+        Err(error) => {
+            eprintln!("nuraloumi-application-provider-error: {error}");
+            snapshot.applications.clear();
+        }
     }
 }
 

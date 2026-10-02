@@ -3,6 +3,7 @@
 //! Snapshot calls are mutation-free. Any state change is represented by an
 //! explicit action and routed through a bounded backend.
 
+pub mod applications;
 pub mod audio;
 pub mod backlight;
 pub mod battery;
@@ -15,6 +16,9 @@ pub mod network;
 pub mod probe;
 pub mod session;
 
+pub use applications::{
+    ApplicationAction, ApplicationEntry, ApplicationProvider, ApplicationSnapshot,
+};
 pub use audio::{AudioAction, AudioProvider, AudioSnapshot};
 pub use backlight::{BacklightAction, BacklightProvider, BacklightSnapshot};
 pub use battery::{BatteryProvider, BatterySnapshot};

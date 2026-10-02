@@ -212,6 +212,155 @@ pub struct WindowEntry {
     pub closable: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApplicationEntry {
+    pub id: String,
+    pub label: String,
+    #[serde(default)]
+    pub generic_name: Option<String>,
+    #[serde(default)]
+    pub keywords: Vec<String>,
+    #[serde(default)]
+    pub launchable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DesktopEntry {
+    pub id: String,
+    pub label: String,
+    #[serde(default)]
+    pub active: bool,
+    #[serde(default)]
+    pub window_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DesktopControlCapabilities {
+    pub list: bool,
+    pub switch: bool,
+    pub window_membership: bool,
+    pub move_window: bool,
+    pub sticky_window: bool,
+}
+
+impl DesktopControlCapabilities {
+    pub const fn unavailable() -> Self {
+        Self {
+            list: false,
+            switch: false,
+            window_membership: false,
+            move_window: false,
+            sticky_window: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OverviewMode {
+    #[default]
+    All,
+    Windows,
+    Apps,
+    Desktops,
+}
+
+impl OverviewMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Windows => "windows",
+            Self::Apps => "apps",
+            Self::Desktops => "desktops",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "all" => Ok(Self::All),
+            "windows" | "window" => Ok(Self::Windows),
+            "apps" | "applications" => Ok(Self::Apps),
+            "desktops" | "desktop" | "workspaces" | "workspace" => Ok(Self::Desktops),
+            other => Err(format!("unknown overview mode {other:?}")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct DesktopMovePayload {
+    window_id: String,
+    desktop_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DesktopCommand {
+    Switch {
+        desktop_id: String,
+    },
+    MoveWindow {
+        window_id: String,
+        desktop_id: String,
+    },
+}
+
+pub fn parse_desktop_command(
+    action: &MenuAction,
+    snapshot: &FixtureSnapshot,
+) -> Result<Option<DesktopCommand>, String> {
+    match action {
+        MenuAction::Custom { kind, payload } if kind == "desktop.switch" => {
+            if !snapshot.desktop_capabilities.switch {
+                return Err("compositor does not expose desktop switching".into());
+            }
+            if !snapshot
+                .desktops
+                .iter()
+                .any(|desktop| desktop.id == *payload)
+            {
+                return Err(format!(
+                    "desktop {payload:?} is not in the current snapshot"
+                ));
+            }
+            Ok(Some(DesktopCommand::Switch {
+                desktop_id: payload.clone(),
+            }))
+        }
+        MenuAction::Custom { kind, payload } if kind == "desktop.move_window" => {
+            if !snapshot.desktop_capabilities.move_window {
+                return Err("compositor does not expose move-window-to-desktop control".into());
+            }
+            let payload: DesktopMovePayload = serde_json::from_str(payload)
+                .map_err(|error| format!("invalid desktop move payload: {error}"))?;
+            if !snapshot
+                .windows
+                .iter()
+                .any(|window| window.id == payload.window_id)
+            {
+                return Err(format!(
+                    "toplevel {:?} is not in the current snapshot",
+                    payload.window_id
+                ));
+            }
+            if !snapshot
+                .desktops
+                .iter()
+                .any(|desktop| desktop.id == payload.desktop_id)
+            {
+                return Err(format!(
+                    "desktop {:?} is not in the current snapshot",
+                    payload.desktop_id
+                ));
+            }
+            Ok(Some(DesktopCommand::MoveWindow {
+                window_id: payload.window_id,
+                desktop_id: payload.desktop_id,
+            }))
+        }
+        _ => Ok(None),
+    }
+}
+
 fn default_bluetooth_value() -> ProviderValue {
     ProviderValue {
         state: ValueState::Unavailable,
@@ -243,6 +392,12 @@ pub struct FixtureSnapshot {
     pub tasks: Vec<TaskEntry>,
     #[serde(default)]
     pub windows: Vec<WindowEntry>,
+    #[serde(default)]
+    pub applications: Vec<ApplicationEntry>,
+    #[serde(default)]
+    pub desktops: Vec<DesktopEntry>,
+    #[serde(default)]
+    pub desktop_capabilities: DesktopControlCapabilities,
 }
 
 impl Default for FixtureSnapshot {
@@ -352,6 +507,50 @@ impl Default for FixtureSnapshot {
                     closable: true,
                 },
             ],
+            applications: vec![
+                ApplicationEntry {
+                    id: "foot.desktop".into(),
+                    label: "Terminal".into(),
+                    generic_name: Some("Terminal emulator".into()),
+                    keywords: vec!["shell".into(), "console".into()],
+                    launchable: true,
+                },
+                ApplicationEntry {
+                    id: "thunar.desktop".into(),
+                    label: "Files".into(),
+                    generic_name: Some("File manager".into()),
+                    keywords: vec!["files".into(), "folders".into()],
+                    launchable: true,
+                },
+                ApplicationEntry {
+                    id: "firefox.desktop".into(),
+                    label: "Browser".into(),
+                    generic_name: Some("Web browser".into()),
+                    keywords: vec!["web".into(), "internet".into()],
+                    launchable: true,
+                },
+            ],
+            desktops: vec![
+                DesktopEntry {
+                    id: "1".into(),
+                    label: "Desktop 1".into(),
+                    active: true,
+                    window_count: 2,
+                },
+                DesktopEntry {
+                    id: "2".into(),
+                    label: "Desktop 2".into(),
+                    active: false,
+                    window_count: 0,
+                },
+            ],
+            desktop_capabilities: DesktopControlCapabilities {
+                list: true,
+                switch: false,
+                window_membership: false,
+                move_window: false,
+                sticky_window: false,
+            },
         }
     }
 }
@@ -379,7 +578,7 @@ pub enum MenuFamily {
 
 pub fn build_family(family: MenuFamily, snapshot: &FixtureSnapshot) -> MenuModel {
     match family {
-        MenuFamily::Launcher => build_launcher_menu(),
+        MenuFamily::Launcher => build_launcher_menu_for(snapshot, OverviewMode::All),
         MenuFamily::Network => build_network_menu(snapshot),
         MenuFamily::Bluetooth => build_bluetooth_menu(snapshot),
         MenuFamily::Display => build_display_menu(snapshot),
@@ -392,27 +591,177 @@ pub fn build_family(family: MenuFamily, snapshot: &FixtureSnapshot) -> MenuModel
 }
 
 pub fn build_launcher_menu() -> MenuModel {
+    build_launcher_menu_for(&FixtureSnapshot::default(), OverviewMode::All)
+}
+
+pub fn build_launcher_menu_for(snapshot: &FixtureSnapshot, mode: OverviewMode) -> MenuModel {
+    let mut items = vec![
+        status(
+            "launcher.search",
+            "Search windows, apps and desktops…",
+            "Type while search is focused",
+        ),
+        section("launcher.views", "Overview"),
+    ];
+
+    for candidate in [
+        OverviewMode::All,
+        OverviewMode::Windows,
+        OverviewMode::Apps,
+        OverviewMode::Desktops,
+    ] {
+        let selected = candidate == mode;
+        let label = match candidate {
+            OverviewMode::All => "All",
+            OverviewMode::Windows => "Windows",
+            OverviewMode::Apps => "Apps",
+            OverviewMode::Desktops => "Desktops",
+        };
+        items.push(custom_action(
+            &format!("overview.mode.{}", candidate.as_str()),
+            label,
+            Some(if selected {
+                "Selected view"
+            } else {
+                "Switch view"
+            }),
+            "overview.mode",
+            candidate.as_str(),
+            !selected,
+        ));
+    }
+
+    if matches!(mode, OverviewMode::All | OverviewMode::Windows) {
+        items.push(section("launcher.windows", "Open windows"));
+        if snapshot.windows.is_empty() {
+            items.push(status(
+                "launcher.windows.empty",
+                "No open windows",
+                "Compositor reported no mapped toplevels",
+            ));
+        } else {
+            items.extend(snapshot.windows.iter().take(16).map(|window| {
+                let subtitle = match (&window.app_id, window.focused) {
+                    (Some(app_id), true) => format!("Focused · {app_id}"),
+                    (Some(app_id), false) => app_id.clone(),
+                    (None, true) => "Focused".to_owned(),
+                    (None, false) => "Open window".to_owned(),
+                };
+                custom_action(
+                    &format!("overview.window.{}", window.id),
+                    &window.title,
+                    Some(&subtitle),
+                    "window.focus",
+                    &window.id,
+                    window.focusable,
+                )
+            }));
+        }
+    }
+
+    if matches!(mode, OverviewMode::All | OverviewMode::Apps) {
+        items.push(section("launcher.apps", "Applications"));
+        if snapshot.applications.is_empty() {
+            items.push(status(
+                "launcher.apps.empty",
+                "No applications",
+                "Desktop-entry provider has no visible applications",
+            ));
+        } else {
+            items.extend(snapshot.applications.iter().take(32).map(|application| {
+                let mut detail = Vec::new();
+                if let Some(generic_name) = &application.generic_name {
+                    detail.push(generic_name.clone());
+                }
+                if !application.keywords.is_empty() {
+                    detail.push(
+                        application
+                            .keywords
+                            .iter()
+                            .take(3)
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join(" · "),
+                    );
+                }
+                let subtitle = if detail.is_empty() {
+                    Some(application.id.as_str())
+                } else {
+                    None
+                };
+                let joined_detail = (!detail.is_empty()).then(|| detail.join(" · "));
+                custom_action(
+                    &format!("overview.app.{}", application.id),
+                    &application.label,
+                    joined_detail.as_deref().or(subtitle),
+                    "app.launch",
+                    &application.id,
+                    application.launchable,
+                )
+            }));
+        }
+    }
+
+    if matches!(mode, OverviewMode::All | OverviewMode::Desktops) {
+        items.push(section("launcher.desktops", "Desktops"));
+        if !snapshot.desktop_capabilities.list || snapshot.desktops.is_empty() {
+            items.push(status(
+                "launcher.desktops.unavailable",
+                "Desktop integration unavailable",
+                "Compositor adapter has not exposed desktop/workspace listing",
+            ));
+        } else {
+            items.extend(snapshot.desktops.iter().take(16).map(|desktop| {
+                let subtitle = if desktop.active {
+                    format!("Active · {} windows", desktop.window_count)
+                } else {
+                    format!("{} windows", desktop.window_count)
+                };
+                if desktop.active {
+                    status(
+                        &format!("overview.desktop.{}", desktop.id),
+                        &desktop.label,
+                        &subtitle,
+                    )
+                } else {
+                    custom_action(
+                        &format!("overview.desktop.{}", desktop.id),
+                        &desktop.label,
+                        Some(&subtitle),
+                        "desktop.switch",
+                        &desktop.id,
+                        snapshot.desktop_capabilities.switch,
+                    )
+                }
+            }));
+        }
+
+        if mode == OverviewMode::Desktops {
+            if let Some(window) = snapshot.windows.iter().find(|window| window.focused) {
+                items.push(section("launcher.desktop.move", "Move active window"));
+                for desktop in snapshot.desktops.iter().take(16) {
+                    let payload = serde_json::to_string(&DesktopMovePayload {
+                        window_id: window.id.clone(),
+                        desktop_id: desktop.id.clone(),
+                    })
+                    .expect("desktop move payload is serializable");
+                    items.push(custom_action(
+                        &format!("overview.move.{}.{}", window.id, desktop.id),
+                        &desktop.label,
+                        Some(&window.title),
+                        "desktop.move_window",
+                        &payload,
+                        snapshot.desktop_capabilities.move_window,
+                    ));
+                }
+            }
+        }
+    }
+
     MenuModel {
         id: "launcher".into(),
-        title: "Apps".into(),
-        items: vec![
-            status(
-                "launcher.search",
-                "Search applications…",
-                "Type while search is focused",
-            ),
-            section("launcher.apps", "Applications"),
-            action("app.terminal", "Terminal", "app.launch.terminal"),
-            action("app.files", "Files", "app.launch.files"),
-            action("app.browser", "Browser", "app.launch.browser"),
-            action("app.music", "Music", "app.launch.music"),
-            section("launcher.recent", "Recent"),
-            status(
-                "recent.status",
-                "Recent items",
-                "Unavailable — history provider not connected",
-            ),
-        ],
+        title: "Overview".into(),
+        items,
     }
 }
 
@@ -912,16 +1261,6 @@ fn provider_status(id: &str, label: &str, value: &ProviderValue) -> MenuItem {
     status(id, label, &value.subtitle())
 }
 
-fn action(id: &str, label: &str, action_id: &str) -> MenuItem {
-    MenuItem::action(
-        id,
-        label,
-        MenuAction::Activate {
-            id: action_id.into(),
-        },
-    )
-}
-
 fn action_with_subtitle(
     id: &str,
     label: &str,
@@ -1155,6 +1494,8 @@ pub struct ShellState {
     pub closed: bool,
     #[serde(default)]
     pub pending_confirmation: Option<String>,
+    #[serde(default)]
+    pub overview_mode: OverviewMode,
     #[serde(skip)]
     pointer_pressed_region: Option<HitRegion>,
     #[serde(skip)]
@@ -1172,6 +1513,7 @@ impl ShellState {
             reduced_motion,
             closed: false,
             pending_confirmation: None,
+            overview_mode: OverviewMode::All,
             pointer_pressed_region: None,
             touch_pressed_regions: BTreeMap::new(),
         })
@@ -1184,6 +1526,31 @@ impl ShellState {
         // Never carry confirmation authorization across a provider/model refresh.
         self.pending_confirmation = None;
         Ok(())
+    }
+
+    pub fn refresh_family(
+        &mut self,
+        family: MenuFamily,
+        snapshot: &FixtureSnapshot,
+    ) -> Result<(), String> {
+        let menu = if family == MenuFamily::Launcher {
+            build_launcher_menu_for(snapshot, self.overview_mode)
+        } else {
+            build_family(family, snapshot)
+        };
+        self.refresh_menu(menu)
+    }
+
+    pub fn set_overview_mode(
+        &mut self,
+        mode: OverviewMode,
+        snapshot: &FixtureSnapshot,
+    ) -> Result<(), String> {
+        if self.menu.id != "launcher" {
+            return Err("overview mode is only valid for the launcher surface".into());
+        }
+        self.overview_mode = mode;
+        self.refresh_menu(build_launcher_menu_for(snapshot, mode))
     }
 
     pub fn focus_search(&mut self, focused: bool) -> ActionReport {
@@ -1490,11 +1857,20 @@ mod tests {
     #[test]
     fn navigation_skips_status_and_wraps() {
         let mut shell = shell_with(build_launcher_menu());
-        assert_eq!(shell.state.selected_id.as_deref(), Some("app.terminal"));
+        assert_eq!(
+            shell.state.selected_id.as_deref(),
+            Some("overview.mode.windows")
+        );
         shell.apply_semantic(SemanticInput::Up);
-        assert_eq!(shell.state.selected_id.as_deref(), Some("app.music"));
+        assert_eq!(
+            shell.state.selected_id.as_deref(),
+            Some("overview.app.firefox.desktop")
+        );
         shell.apply_semantic(SemanticInput::Down);
-        assert_eq!(shell.state.selected_id.as_deref(), Some("app.terminal"));
+        assert_eq!(
+            shell.state.selected_id.as_deref(),
+            Some("overview.mode.windows")
+        );
     }
 
     #[test]
@@ -1505,7 +1881,104 @@ mod tests {
         shell.apply_input(launcher_search_input());
         shell.apply_semantic(SemanticInput::Text("term".into()));
         assert_eq!(shell.state.query, "term");
-        assert_eq!(shell.state.selected_id.as_deref(), Some("app.terminal"));
+        assert_eq!(
+            shell.state.selected_id.as_deref(),
+            Some("overview.window.terminal")
+        );
+    }
+
+    #[test]
+    fn super_menu_all_view_unifies_windows_apps_and_desktops() {
+        let snapshot = FixtureSnapshot::default();
+        let menu = build_launcher_menu_for(&snapshot, OverviewMode::All);
+        assert_eq!(menu.title, "Overview");
+        assert!(menu
+            .items
+            .iter()
+            .any(|item| item.id == "overview.window.terminal"));
+        let app = menu
+            .items
+            .iter()
+            .find(|item| item.id == "overview.app.foot.desktop")
+            .expect("desktop application");
+        assert!(matches!(
+            app.action,
+            Some(MenuAction::Custom {
+                ref kind,
+                ref payload
+            }) if kind == "app.launch" && payload == "foot.desktop"
+        ));
+        assert!(menu
+            .items
+            .iter()
+            .any(|item| item.id == "overview.desktop.1"));
+    }
+
+    #[test]
+    fn overview_modes_share_one_canonical_search_state() {
+        let snapshot = FixtureSnapshot::default();
+        let mut shell = shell_with(build_launcher_menu_for(&snapshot, OverviewMode::All));
+        shell.apply_input(launcher_search_input());
+        shell.apply_semantic(SemanticInput::Text("term".into()));
+        assert_eq!(
+            shell.state.selected_id.as_deref(),
+            Some("overview.window.terminal")
+        );
+
+        shell
+            .set_overview_mode(OverviewMode::Apps, &snapshot)
+            .expect("switch app view");
+        assert_eq!(shell.state.query, "term");
+        assert!(shell.search_focused);
+        assert_eq!(
+            shell.state.selected_id.as_deref(),
+            Some("overview.app.foot.desktop")
+        );
+
+        shell
+            .set_overview_mode(OverviewMode::Windows, &snapshot)
+            .expect("switch window view");
+        assert_eq!(shell.state.query, "term");
+        assert_eq!(
+            shell.state.selected_id.as_deref(),
+            Some("overview.window.terminal")
+        );
+    }
+
+    #[test]
+    fn desktop_controls_fail_closed_until_adapter_capabilities_exist() {
+        let mut snapshot = FixtureSnapshot::default();
+        let switch = MenuAction::Custom {
+            kind: "desktop.switch".into(),
+            payload: "2".into(),
+        };
+        assert!(parse_desktop_command(&switch, &snapshot).is_err());
+
+        snapshot.desktop_capabilities.switch = true;
+        assert_eq!(
+            parse_desktop_command(&switch, &snapshot).unwrap(),
+            Some(DesktopCommand::Switch {
+                desktop_id: "2".into()
+            })
+        );
+
+        let move_window = MenuAction::Custom {
+            kind: "desktop.move_window".into(),
+            payload: serde_json::to_string(&DesktopMovePayload {
+                window_id: "terminal".into(),
+                desktop_id: "2".into(),
+            })
+            .unwrap(),
+        };
+        assert!(parse_desktop_command(&move_window, &snapshot).is_err());
+        snapshot.desktop_capabilities.move_window = true;
+        assert_eq!(
+            parse_desktop_command(&move_window, &snapshot).unwrap(),
+            Some(DesktopCommand::MoveWindow {
+                window_id: "terminal".into(),
+                desktop_id: "2".into(),
+            })
+        );
     }
 
     #[test]
@@ -1646,6 +2119,7 @@ mod tests {
     fn touch_and_keyboard_share_dispatch_path() {
         let menu = build_launcher_menu();
         let mut keyboard = shell_with(menu.clone());
+        keyboard.state.selected_id = Some("overview.app.foot.desktop".into());
         let keyboard_report = keyboard.handle_platform_event(PlatformEvent::Key {
             key: PlatformKey::Enter,
             pressed: true,
@@ -1655,7 +2129,7 @@ mod tests {
         let region = touch
             .hit_regions()
             .into_iter()
-            .find(|region| region.item_id == "app.terminal")
+            .find(|region| region.item_id == "overview.app.foot.desktop")
             .expect("terminal hit region");
         assert!(touch
             .handle_platform_event(PlatformEvent::TouchDown {
