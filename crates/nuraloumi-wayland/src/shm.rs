@@ -94,10 +94,12 @@ impl BufferLifecycle {
         self.busy = [false; SLOT_COUNT];
     }
 
-    fn release(&mut self, key: BufferKey) {
-        if key.generation == self.generation && key.slot < SLOT_COUNT {
-            self.busy[key.slot] = false;
+    fn release(&mut self, key: BufferKey) -> bool {
+        if key.generation != self.generation || key.slot >= SLOT_COUNT || !self.busy[key.slot] {
+            return false;
         }
+        self.busy[key.slot] = false;
+        true
     }
 }
 
@@ -120,8 +122,8 @@ impl ShmBuffers {
         }
     }
 
-    pub(crate) fn release(&mut self, key: BufferKey) {
-        self.lifecycle.release(key);
+    pub(crate) fn release(&mut self, key: BufferKey) -> bool {
+        self.lifecycle.release(key)
     }
 
     pub(crate) fn acquire<State>(
@@ -360,17 +362,32 @@ mod tests {
     }
 
     #[test]
+    fn release_reports_only_real_busy_to_free_transitions() {
+        let mut lifecycle = BufferLifecycle::default();
+        lifecycle.reallocated(spec(100, 40));
+        lifecycle.mark_busy(0);
+        let key = BufferKey {
+            surface: SurfaceId(1),
+            slot: 0,
+            generation: lifecycle.generation,
+        };
+
+        assert!(lifecycle.release(key));
+        assert!(!lifecycle.release(key));
+    }
+
+    #[test]
     fn stale_release_cannot_free_new_generation_slot() {
         let mut lifecycle = BufferLifecycle::default();
         lifecycle.reallocated(spec(100, 40));
         let old_generation = lifecycle.generation;
         lifecycle.reallocated(spec(200, 40));
         lifecycle.mark_busy(0);
-        lifecycle.release(BufferKey {
+        assert!(!lifecycle.release(BufferKey {
             surface: SurfaceId(1),
             slot: 0,
             generation: old_generation,
-        });
+        }));
         assert!(lifecycle.busy[0]);
     }
 }

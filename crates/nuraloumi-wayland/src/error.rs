@@ -11,6 +11,8 @@ pub enum BackendError {
     UnknownSurface(u32),
     SurfaceClosed(u32),
     SurfaceNotConfigured(u32),
+    InvalidSurfaceConfig(String),
+    UnsupportedBufferScale { surface_version: u32, scale: i32 },
     WouldBlock,
     InvalidFrame(String),
     Allocation(std::io::Error),
@@ -32,6 +34,16 @@ impl fmt::Display for BackendError {
             Self::SurfaceNotConfigured(id) => {
                 write!(f, "surface {id} has not received a layer-shell configure")
             }
+            Self::InvalidSurfaceConfig(message) => {
+                write!(f, "invalid layer-shell surface configuration: {message}")
+            }
+            Self::UnsupportedBufferScale {
+                surface_version,
+                scale,
+            } => write!(
+                f,
+                "wl_surface v{surface_version} cannot apply buffer scale {scale}; v3+ is required"
+            ),
             Self::WouldBlock => write!(
                 f,
                 "all shm buffers are busy; wait for wl_buffer.release before presenting again"

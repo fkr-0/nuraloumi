@@ -20,7 +20,7 @@ use crate::{
     shm::{BufferKey, ShmBuffers},
     types::{semantic_key, sorted_touch_ids},
     BackendCapabilities, BackendError, BackendEvent, Frame, MenuConfig, OutputId, OutputInfo,
-    OutputTransform, PanelConfig, PlatformEvent, Result, SurfaceId,
+    OutputTransform, PanelConfig, PanelEdge, PlatformEvent, Result, SurfaceId,
 };
 
 struct OutputRecord {
@@ -38,6 +38,7 @@ struct SurfaceRecord {
     scale: i32,
     configured: bool,
     closed: bool,
+    redraw_pending: bool,
     entered_outputs: BTreeSet<OutputId>,
     buffers: ShmBuffers,
 }
@@ -144,18 +145,29 @@ impl WaylandBackend {
     }
 
     pub fn create_panel(&mut self, config: PanelConfig) -> Result<SurfaceId> {
+        self.create_panel_at(config, PanelEdge::Top)
+    }
+
+    /// Create a panel on any output edge while preserving the historical
+    /// top-panel behavior of create_panel(). PanelConfig::height is treated as
+    /// the panel thickness for vertical edges.
+    pub fn create_panel_at(&mut self, config: PanelConfig, edge: PanelEdge) -> Result<SurfaceId> {
+        validate_panel_config(&config)?;
+        let (width, height) = panel_size(edge, config.height);
         self.create_layer_surface(
             config.output,
-            0,
-            config.height,
+            width,
+            height,
             config.namespace,
             LayerRole::Panel {
+                edge,
                 exclusive_zone: config.exclusive_zone,
             },
         )
     }
 
     pub fn create_menu(&mut self, config: MenuConfig) -> Result<SurfaceId> {
+        validate_menu_config(&config)?;
         self.create_layer_surface(
             config.output,
             config.width,
@@ -215,12 +227,11 @@ impl WaylandBackend {
         layer.set_size(width, height);
 
         match role {
-            LayerRole::Panel { exclusive_zone } => {
-                layer.set_anchor(
-                    zwlr_layer_surface_v1::Anchor::Top
-                        | zwlr_layer_surface_v1::Anchor::Left
-                        | zwlr_layer_surface_v1::Anchor::Right,
-                );
+            LayerRole::Panel {
+                edge,
+                exclusive_zone,
+            } => {
+                layer.set_anchor(panel_anchor(edge));
                 layer.set_exclusive_zone(exclusive_zone);
                 layer
                     .set_keyboard_interactivity(zwlr_layer_surface_v1::KeyboardInteractivity::None);
@@ -251,6 +262,7 @@ impl WaylandBackend {
                 scale: 1,
                 configured: false,
                 closed: false,
+                redraw_pending: false,
                 entered_outputs: BTreeSet::new(),
                 buffers: ShmBuffers::new(),
             },
@@ -280,6 +292,15 @@ impl WaylandBackend {
         if record.closed {
             return Err(BackendError::SurfaceClosed(id.0));
         }
+        let surface_version = record.surface.version();
+        let scale = record.scale.max(1);
+        if scale > 1 && surface_version < 3 {
+            return Err(BackendError::UnsupportedBufferScale {
+                surface_version,
+                scale,
+            });
+        }
+
         let Some((expected_width, expected_height)) = record.expected_pixel_size() else {
             return Err(BackendError::SurfaceNotConfigured(id.0));
         };
@@ -290,8 +311,20 @@ impl WaylandBackend {
             )));
         }
 
-        let buffer = record.buffers.acquire(id, frame, &shm, &self.qh)?;
-        record.surface.set_buffer_scale(record.scale.max(1));
+        let buffer = match record.buffers.acquire(id, frame, &shm, &self.qh) {
+            Ok(buffer) => {
+                record.redraw_pending = false;
+                buffer
+            }
+            Err(BackendError::WouldBlock) => {
+                record.redraw_pending = true;
+                return Err(BackendError::WouldBlock);
+            }
+            Err(error) => return Err(error),
+        };
+        if surface_version >= 3 {
+            record.surface.set_buffer_scale(scale);
+        }
         record.surface.attach(Some(&buffer), 0, 0);
         if record.surface.version() >= 4 {
             record
@@ -375,8 +408,14 @@ impl Drop for WaylandBackend {
 
 #[derive(Clone, Copy)]
 enum LayerRole {
-    Panel { exclusive_zone: i32 },
-    Menu { margin_top: i32, margin_left: i32 },
+    Panel {
+        edge: PanelEdge,
+        exclusive_zone: i32,
+    },
+    Menu {
+        margin_top: i32,
+        margin_left: i32,
+    },
 }
 
 impl Dispatch<wl_registry::WlRegistry, ()> for BackendState {
@@ -425,7 +464,8 @@ impl Dispatch<wl_registry::WlRegistry, ()> for BackendState {
             },
             wl_registry::Event::GlobalRemove { name } => {
                 let id = OutputId(name);
-                if state.outputs.remove(&id).is_some() {
+                if let Some(output) = state.outputs.remove(&id) {
+                    release_output(output.proxy);
                     for surface in state.surfaces.values_mut() {
                         surface.entered_outputs.remove(&id);
                     }
@@ -438,13 +478,17 @@ impl Dispatch<wl_registry::WlRegistry, ()> for BackendState {
                     state.shm = None;
                 }
                 if state.layer_shell_global == Some(name) {
-                    state.layer_shell = None;
+                    if let Some(layer_shell) = state.layer_shell.take() {
+                        if layer_shell.is_alive() {
+                            layer_shell.destroy();
+                        }
+                    }
                 }
                 if state.seat_global == Some(name) {
-                    state.seat = None;
-                    state.pointer = None;
-                    state.keyboard = None;
-                    state.touch = None;
+                    release_input_devices(state);
+                    if let Some(seat) = state.seat.take() {
+                        release_seat(seat);
+                    }
                 }
             }
             _ => {}
@@ -502,14 +546,16 @@ impl Dispatch<wl_output::WlOutput, OutputId> for BackendState {
                     output.info.transform = wayland_transform(transform);
                 }
                 wl_output::Event::Mode {
+                    flags,
                     width,
                     height,
                     refresh,
-                    ..
                 } => {
-                    output.info.mode_width = width;
-                    output.info.mode_height = height;
-                    output.info.refresh_mhz = refresh;
+                    if mode_is_current(flags) {
+                        output.info.mode_width = width;
+                        output.info.mode_height = height;
+                        output.info.refresh_mhz = refresh;
+                    }
                 }
                 wl_output::Event::Scale { factor } => {
                     output.info.scale = factor.max(1);
@@ -525,6 +571,66 @@ impl Dispatch<wl_output::WlOutput, OutputId> for BackendState {
         if scale_changed {
             update_surface_scales(state);
         }
+    }
+}
+
+fn validate_panel_config(config: &PanelConfig) -> Result<()> {
+    if config.height == 0 {
+        return Err(BackendError::InvalidSurfaceConfig(
+            "panel thickness must be non-zero".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_menu_config(config: &MenuConfig) -> Result<()> {
+    if config.width == 0 || config.height == 0 {
+        return Err(BackendError::InvalidSurfaceConfig(
+            "menu width and height must both be non-zero".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn panel_size(edge: PanelEdge, thickness: u32) -> (u32, u32) {
+    if edge.is_horizontal() {
+        (0, thickness)
+    } else {
+        (thickness, 0)
+    }
+}
+
+fn panel_anchor(edge: PanelEdge) -> zwlr_layer_surface_v1::Anchor {
+    match edge {
+        PanelEdge::Top => {
+            zwlr_layer_surface_v1::Anchor::Top
+                | zwlr_layer_surface_v1::Anchor::Left
+                | zwlr_layer_surface_v1::Anchor::Right
+        }
+        PanelEdge::Bottom => {
+            zwlr_layer_surface_v1::Anchor::Bottom
+                | zwlr_layer_surface_v1::Anchor::Left
+                | zwlr_layer_surface_v1::Anchor::Right
+        }
+        PanelEdge::Left => {
+            zwlr_layer_surface_v1::Anchor::Left
+                | zwlr_layer_surface_v1::Anchor::Top
+                | zwlr_layer_surface_v1::Anchor::Bottom
+        }
+        PanelEdge::Right => {
+            zwlr_layer_surface_v1::Anchor::Right
+                | zwlr_layer_surface_v1::Anchor::Top
+                | zwlr_layer_surface_v1::Anchor::Bottom
+        }
+    }
+}
+
+fn mode_is_current(flags: WEnum<wl_output::Mode>) -> bool {
+    match flags {
+        WEnum::Value(flags) => flags.contains(wl_output::Mode::Current),
+        // Preserve the well-known CURRENT bit even if a newer compositor adds
+        // mode flag bits unknown to this generated protocol version.
+        WEnum::Unknown(raw) => raw & 0x1 != 0,
     }
 }
 
@@ -643,8 +749,27 @@ impl Dispatch<wl_buffer::WlBuffer, BufferKey> for BackendState {
         _qh: &QueueHandle<Self>,
     ) {
         if let wl_buffer::Event::Release = event {
-            if let Some(surface) = state.surfaces.get_mut(&key.surface) {
-                surface.buffers.release(*key);
+            let retry = state.surfaces.get_mut(&key.surface).and_then(|surface| {
+                let released = surface.buffers.release(*key);
+                if take_redraw_retry(&mut surface.redraw_pending, released)
+                    && surface.configured
+                    && !surface.closed
+                {
+                    Some(PlatformEvent::Configure {
+                        width: surface.width,
+                        height: surface.height,
+                        scale: surface.scale,
+                    })
+                } else {
+                    None
+                }
+            });
+
+            if let Some(event) = retry {
+                state.events.push_back(BackendEvent {
+                    surface: Some(key.surface),
+                    event,
+                });
             }
         }
     }
@@ -670,23 +795,29 @@ impl Dispatch<wl_seat::WlSeat, ()> for BackendState {
             if has_pointer && state.pointer.is_none() {
                 state.pointer = Some(seat.get_pointer(qh, ()));
             } else if !has_pointer {
-                state.pointer = None;
+                if let Some(pointer) = state.pointer.take() {
+                    release_pointer(pointer);
+                }
                 state.pointer_surface = None;
             }
 
             if has_keyboard && state.keyboard.is_none() {
                 state.keyboard = Some(seat.get_keyboard(qh, ()));
             } else if !has_keyboard {
-                state.keyboard = None;
+                if let Some(keyboard) = state.keyboard.take() {
+                    release_keyboard(keyboard);
+                }
                 state.keyboard_surface = None;
+                state.shift_down = false;
             }
 
             if has_touch && state.touch.is_none() {
                 state.touch = Some(seat.get_touch(qh, ()));
             } else if !has_touch {
-                state.touch = None;
-                state.touch_surfaces.clear();
-                state.active_touches.clear();
+                if let Some(touch) = state.touch.take() {
+                    release_touch(touch);
+                }
+                cancel_active_touches(state);
             }
         }
     }
@@ -800,15 +931,7 @@ impl Dispatch<wl_touch::WlTouch, ()> for BackendState {
                     event: PlatformEvent::TouchUp { id },
                 });
             }
-            wl_touch::Event::Cancel => {
-                let ids = sorted_touch_ids(&state.active_touches);
-                state.active_touches.clear();
-                state.touch_surfaces.clear();
-                state.events.push_back(BackendEvent {
-                    surface: None,
-                    event: PlatformEvent::TouchCancel { ids },
-                });
-            }
+            wl_touch::Event::Cancel => cancel_active_touches(state),
             _ => {}
         }
     }
@@ -848,6 +971,73 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for BackendState {
             }
             _ => {}
         }
+    }
+}
+
+fn release_output(output: wl_output::WlOutput) {
+    if output.version() >= 3 && output.is_alive() {
+        output.release();
+    }
+}
+
+fn release_pointer(pointer: wl_pointer::WlPointer) {
+    if pointer.version() >= 3 && pointer.is_alive() {
+        pointer.release();
+    }
+}
+
+fn release_keyboard(keyboard: wl_keyboard::WlKeyboard) {
+    if keyboard.version() >= 3 && keyboard.is_alive() {
+        keyboard.release();
+    }
+}
+
+fn release_touch(touch: wl_touch::WlTouch) {
+    if touch.version() >= 3 && touch.is_alive() {
+        touch.release();
+    }
+}
+
+fn release_seat(seat: wl_seat::WlSeat) {
+    if seat.version() >= 5 && seat.is_alive() {
+        seat.release();
+    }
+}
+
+fn cancel_active_touches(state: &mut BackendState) {
+    let ids = sorted_touch_ids(&state.active_touches);
+    state.active_touches.clear();
+    state.touch_surfaces.clear();
+    if !ids.is_empty() {
+        state.events.push_back(BackendEvent {
+            surface: None,
+            event: PlatformEvent::TouchCancel { ids },
+        });
+    }
+}
+
+fn release_input_devices(state: &mut BackendState) {
+    if let Some(pointer) = state.pointer.take() {
+        release_pointer(pointer);
+    }
+    if let Some(keyboard) = state.keyboard.take() {
+        release_keyboard(keyboard);
+    }
+    if let Some(touch) = state.touch.take() {
+        release_touch(touch);
+    }
+    state.pointer_surface = None;
+    state.keyboard_surface = None;
+    state.shift_down = false;
+    cancel_active_touches(state);
+}
+
+fn take_redraw_retry(pending: &mut bool, released: bool) -> bool {
+    if released && *pending {
+        *pending = false;
+        true
+    } else {
+        false
     }
 }
 
@@ -906,6 +1096,81 @@ mod tests {
         let config = PanelConfig::default();
         assert_eq!(config.height, 48);
         assert_eq!(config.exclusive_zone, 48);
+        assert_eq!(panel_size(PanelEdge::Top, config.height), (0, 48));
+    }
+
+    #[test]
+    fn panel_edge_plans_fill_the_perpendicular_axis() {
+        assert_eq!(panel_size(PanelEdge::Top, 52), (0, 52));
+        assert_eq!(panel_size(PanelEdge::Bottom, 52), (0, 52));
+        assert_eq!(panel_size(PanelEdge::Left, 52), (52, 0));
+        assert_eq!(panel_size(PanelEdge::Right, 52), (52, 0));
+
+        let left = panel_anchor(PanelEdge::Left);
+        assert!(left.contains(zwlr_layer_surface_v1::Anchor::Left));
+        assert!(left.contains(zwlr_layer_surface_v1::Anchor::Top));
+        assert!(left.contains(zwlr_layer_surface_v1::Anchor::Bottom));
+        assert!(!left.contains(zwlr_layer_surface_v1::Anchor::Right));
+    }
+
+    #[test]
+    fn surface_configs_reject_zero_thickness_and_menu_extent() {
+        let panel = PanelConfig {
+            height: 0,
+            ..PanelConfig::default()
+        };
+        assert!(matches!(
+            validate_panel_config(&panel),
+            Err(BackendError::InvalidSurfaceConfig(_))
+        ));
+
+        let menu = MenuConfig {
+            width: 0,
+            ..MenuConfig::default()
+        };
+        assert!(matches!(
+            validate_menu_config(&menu),
+            Err(BackendError::InvalidSurfaceConfig(_))
+        ));
+        assert!(validate_panel_config(&PanelConfig::default()).is_ok());
+        assert!(validate_menu_config(&MenuConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn touch_cancel_ids_are_sorted_and_drained() {
+        let mut state = BackendState::default();
+        state.active_touches.insert(8);
+        state.active_touches.insert(3);
+        state.touch_surfaces.insert(8, SurfaceId(1));
+        state.touch_surfaces.insert(3, SurfaceId(1));
+
+        cancel_active_touches(&mut state);
+        assert!(state.active_touches.is_empty());
+        assert!(state.touch_surfaces.is_empty());
+        assert_eq!(
+            state.events.pop_front(),
+            Some(BackendEvent {
+                surface: None,
+                event: PlatformEvent::TouchCancel { ids: vec![3, 8] },
+            })
+        );
+    }
+
+    #[test]
+    fn current_mode_accepts_known_and_future_flag_sets() {
+        assert!(mode_is_current(WEnum::Value(wl_output::Mode::Current)));
+        assert!(!mode_is_current(WEnum::Value(wl_output::Mode::Preferred)));
+        assert!(mode_is_current(WEnum::Unknown(0x8000_0001)));
+    }
+
+    #[test]
+    fn redraw_retry_is_one_shot_per_real_release() {
+        let mut pending = true;
+        assert!(!take_redraw_retry(&mut pending, false));
+        assert!(pending);
+        assert!(take_redraw_retry(&mut pending, true));
+        assert!(!pending);
+        assert!(!take_redraw_retry(&mut pending, true));
     }
 
     #[test]

@@ -44,6 +44,15 @@ pub enum OutputTransform {
     Flipped270,
 }
 
+impl OutputTransform {
+    pub const fn swaps_axes(self) -> bool {
+        matches!(
+            self,
+            Self::Rotate90 | Self::Rotate270 | Self::Flipped90 | Self::Flipped270
+        )
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct OutputInfo {
     pub id: OutputId,
@@ -71,6 +80,31 @@ impl OutputInfo {
             refresh_mhz: 0,
             scale: 1,
             transform: OutputTransform::Normal,
+        }
+    }
+
+    /// Best-effort logical output size derived from the current wl_output mode.
+    ///
+    /// wl_output mode dimensions are physical-mode units rather than compositor
+    /// logical coordinates. This helper applies the advertised integer scale and
+    /// rotation so callers do not accidentally size portrait surfaces from the
+    /// unrotated mode width. xdg-output logical_size remains authoritative when a
+    /// compositor-specific integration later exposes it.
+    pub fn logical_size(&self) -> Option<(u32, u32)> {
+        let width = u32::try_from(self.mode_width)
+            .ok()
+            .filter(|value| *value > 0)?;
+        let height = u32::try_from(self.mode_height)
+            .ok()
+            .filter(|value| *value > 0)?;
+        let scale = self.scale.max(1) as u32;
+        let width = (width / scale).max(1);
+        let height = (height / scale).max(1);
+
+        if self.transform.swaps_axes() {
+            Some((height, width))
+        } else {
+            Some((width, height))
         }
     }
 }
@@ -157,6 +191,21 @@ pub enum PlatformEvent {
 pub struct BackendEvent {
     pub surface: Option<SurfaceId>,
     pub event: PlatformEvent,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum PanelEdge {
+    #[default]
+    Top,
+    Bottom,
+    Left,
+    Right,
+}
+
+impl PanelEdge {
+    pub const fn is_horizontal(self) -> bool {
+        matches!(self, Self::Top | Self::Bottom)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -534,6 +583,35 @@ mod tests {
             ),
             Point { x: 20.0, y: 350.0 },
         );
+    }
+
+    #[test]
+    fn logical_output_size_applies_scale_and_rotation() {
+        let mut output = OutputInfo::new(OutputId(1));
+        output.mode_width = 1920;
+        output.mode_height = 1080;
+        output.scale = 2;
+        assert_eq!(output.logical_size(), Some((960, 540)));
+
+        output.transform = OutputTransform::Rotate90;
+        assert_eq!(output.logical_size(), Some((540, 960)));
+
+        output.transform = OutputTransform::Flipped270;
+        assert_eq!(output.logical_size(), Some((540, 960)));
+    }
+
+    #[test]
+    fn logical_output_size_requires_a_valid_mode() {
+        let output = OutputInfo::new(OutputId(1));
+        assert_eq!(output.logical_size(), None);
+    }
+
+    #[test]
+    fn panel_edge_orientation_is_stable() {
+        assert!(PanelEdge::Top.is_horizontal());
+        assert!(PanelEdge::Bottom.is_horizontal());
+        assert!(!PanelEdge::Left.is_horizontal());
+        assert!(!PanelEdge::Right.is_horizontal());
     }
 
     #[test]

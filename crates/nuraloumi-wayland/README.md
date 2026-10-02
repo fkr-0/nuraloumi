@@ -33,11 +33,21 @@ a clean lifecycle state. wl_buffer.release returns a slot to the producer, and
 generation tags prevent a late release from an older allocation from freeing a
 current slot.
 
+If a caller redraw arrives while both slots are busy, present returns WouldBlock
+and records one bounded retry request. The first real later wl_buffer.release
+re-emits the surface's unchanged Configure event so existing shell loops redraw
+the newest semantic state instead of silently losing it. The retry flag is
+cleared before delivery, preventing an idle release/redraw loop.
+
 ## Surfaces and focus
 
-Panel surfaces use the top layer, anchors top/left/right, configure an
-exclusive zone, and set keyboard interactivity to None. The panel therefore
-does not steal keyboard focus merely by existing.
+Panel surfaces use the top layer and set keyboard interactivity to None, so the
+panel does not steal keyboard focus merely by existing. create_panel preserves
+the original top/left/right anchored top panel; create_panel_at additionally
+supports bottom, left, and right edges with the same configurable exclusive zone.
+For vertical edges PanelConfig::height is interpreted as panel thickness. A
+zero panel thickness or zero menu width/height is rejected before any protocol
+request, avoiding invalid layer-shell size/anchor combinations.
 
 Menu/sheet surfaces use the overlay layer, top/left anchoring, margins, and
 Exclusive keyboard interactivity while the transient menu is visible.
@@ -47,15 +57,24 @@ Exclusive keyboard interactivity while the transient menu is visible.
 Wayland pointer and touch coordinates are already wl_surface-local logical
 coordinates after compositor output transform handling, so they are forwarded
 without a second transform. Stable touch IDs are preserved through
-down/motion/up and cancel reports all active IDs.
+down/motion/up and cancel reports all active IDs. Seat capability loss and seat
+hot-unplug release v3+ pointer/keyboard/touch objects, reset keyboard modifier
+fallback state, and emit TouchCancel for contacts that were still active.
 
 Keyboard events expose arrows, Enter, Escape, Backspace, raw key codes, and a
 small US-layout text fallback. This fallback avoids a mandatory xkbcommon
 runtime dependency; a shell may layer richer keymap/text handling later.
 
-wl_output scale and transform metadata are tracked. normalize_output_point is
-provided for calibration/tests that start with physical output coordinates and
-covers normal, 90, 180, 270 and flipped transforms.
+wl_output scale and transform metadata are tracked. Buffer scaling is sent only
+when the negotiated wl_surface version supports set_buffer_scale; scaled outputs
+on older surface versions fail explicitly instead of issuing an invalid protocol
+request. Only mode events carrying
+the CURRENT flag replace the stored mode, so an advertised non-current mode
+cannot accidentally resize the shell. OutputInfo::logical_size applies scale and
+90/270-degree axis swapping as a best-effort wl_output-only size; xdg-output
+logical_size remains more authoritative if added later. normalize_output_point
+is provided for calibration/tests that start with physical output coordinates
+and covers normal, 90, 180, 270 and flipped transforms.
 
 ## Live demo
 

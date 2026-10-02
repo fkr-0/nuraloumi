@@ -13,5 +13,6 @@ pub use backend::WaylandBackend;
 pub use error::{BackendError, Result};
 pub use types::{
     normalize_output_point, BackendCapabilities, BackendEvent, Frame, Key, MenuConfig, OutputId,
-    OutputInfo, OutputTransform, PanelConfig, PixelFormat, PlatformEvent, Point, SurfaceId,
+    OutputInfo, OutputTransform, PanelConfig, PanelEdge, PixelFormat, PlatformEvent, Point,
+    SurfaceId,
 };
