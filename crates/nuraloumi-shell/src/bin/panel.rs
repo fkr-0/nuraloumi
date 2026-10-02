@@ -130,10 +130,9 @@ fn run() -> Result<(), String> {
     }
     config.validate()?;
 
+    let defer_live_provider_refresh = should_defer_live_provider_refresh(&args);
     let snapshot = if let Some(path) = args.providers.as_ref() {
         load_fixture_snapshot(path)?
-    } else if args.live {
-        fixture_snapshot_from_probe(&ProbeSnapshot::live())
     } else {
         FixtureSnapshot::default()
     };
@@ -148,10 +147,15 @@ fn run() -> Result<(), String> {
                 execute_provider_actions: args.providers.is_none(),
                 enable_power_actions: args.enable_power_actions,
             },
+            defer_live_provider_refresh,
         );
     }
 
     run_headless(config, snapshot, args.open.as_deref())
+}
+
+fn should_defer_live_provider_refresh(args: &Args) -> bool {
+    args.live && args.providers.is_none()
 }
 
 fn run_headless(
@@ -191,6 +195,7 @@ fn run_live(
     mut snapshot: FixtureSnapshot,
     initial_family: Option<MenuFamily>,
     policy: LivePolicy,
+    defer_live_provider_refresh: bool,
 ) -> Result<(), String> {
     let mut backend =
         WaylandBackend::connect().map_err(|error| format!("Wayland connection failed: {error}"))?;
@@ -223,6 +228,9 @@ fn run_live(
     let mut panel_pointer_press: Option<String> = None;
     let mut panel_touch_press: BTreeMap<i32, Option<String>> = BTreeMap::new();
     let mut active_menu: Option<LiveMenu> = None;
+    let mut panel_first_frame_presented = false;
+    let mut live_provider_probe =
+        defer_live_provider_refresh.then(|| std::thread::spawn(ProbeSnapshot::live));
 
     if let Some(family) = initial_family {
         active_menu = Some(open_live_menu(
@@ -236,9 +244,15 @@ fn run_live(
     }
 
     loop {
-        backend
-            .blocking_dispatch()
-            .map_err(|error| format!("Wayland dispatch failed: {error}"))?;
+        if panel_first_frame_presented && live_provider_probe.is_some() {
+            backend
+                .roundtrip()
+                .map_err(|error| format!("Wayland startup roundtrip failed: {error}"))?;
+        } else {
+            backend
+                .blocking_dispatch()
+                .map_err(|error| format!("Wayland dispatch failed: {error}"))?;
+        }
         let events: Vec<_> = backend.drain_events().collect();
 
         for event in events {
@@ -260,6 +274,10 @@ fn run_live(
                             &search,
                             (width, height, scale),
                         )?);
+
+                        // The first recovery-visible frame is committed and flushed before
+                        // any live provider result is applied.
+                        panel_first_frame_presented = true;
                     }
                     WaylandEvent::PointerButton { x, y, pressed, .. } => {
                         let hit = panel_scene
@@ -504,6 +522,37 @@ fn run_live(
             }
         }
 
+        if panel_first_frame_presented
+            && live_provider_probe
+                .as_ref()
+                .is_some_and(|probe| probe.is_finished())
+        {
+            let probe = live_provider_probe
+                .take()
+                .expect("finished live provider probe must exist")
+                .join()
+                .map_err(|_| "initial live provider probe panicked".to_owned())?;
+            snapshot = fixture_snapshot_from_probe(&probe);
+            if let Some(menu) = active_menu.as_mut() {
+                menu.shell
+                    .refresh_menu(build_family(menu.family, &snapshot))?;
+                if let Some(menu_geometry) = menu.geometry {
+                    menu.scene = Some(render_menu_and_present(
+                        &mut backend,
+                        menu.surface,
+                        &renderer,
+                        &menu.shell,
+                        &config,
+                        menu_geometry,
+                    )?);
+                } else {
+                    menu.scene = None;
+                }
+            }
+            panel_scene = None;
+            eprintln!("nuraloumi-panel-provider-refresh: initial live snapshot ready");
+        }
+
         if panel_scene.is_none() {
             if let Some(geometry) = panel_geometry {
                 let search = panel_search_view(active_menu.as_ref());
@@ -517,6 +566,10 @@ fn run_live(
                     geometry,
                 )?);
             }
+        }
+
+        if panel_first_frame_presented && live_provider_probe.is_some() {
+            std::thread::sleep(std::time::Duration::from_millis(8));
         }
     }
 }
@@ -1356,6 +1409,24 @@ fn next_value(args: &mut impl Iterator<Item = String>, option: &str) -> Result<S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_provider_refresh_is_deferred_only_without_fixture_providers() {
+        let live = Args {
+            live: true,
+            ..Args::default()
+        };
+        assert!(should_defer_live_provider_refresh(&live));
+
+        let fixture_live = Args {
+            live: true,
+            providers: Some("providers.json".into()),
+            ..Args::default()
+        };
+        assert!(!should_defer_live_provider_refresh(&fixture_live));
+
+        assert!(!should_defer_live_provider_refresh(&Args::default()));
+    }
 
     #[test]
     fn panel_target_mapping_is_stable_and_search_requests_focus() {
