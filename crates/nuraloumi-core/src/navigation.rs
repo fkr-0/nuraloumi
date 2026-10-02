@@ -294,6 +294,7 @@ fn append_bounded(target: &mut String, addition: &str, max_chars: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::action_ids::id as action_id;
     use crate::model::{ConfirmationKind, MenuAction, MenuItem, MenuModel};
 
     fn model() -> MenuModel {
@@ -336,9 +337,8 @@ mod tests {
                             MenuAction::destructive(
                                 "Power off?",
                                 Some("Unsaved work may be lost.".into()),
-                                MenuAction::Custom {
-                                    kind: "system.poweroff".into(),
-                                    payload: String::new(),
+                                MenuAction::Activate {
+                                    id: action_id::SYSTEM_POWEROFF.into(),
                                 },
                             ),
                         ),
@@ -448,7 +448,12 @@ mod tests {
             } => {
                 assert_eq!(item_id, "poweroff");
                 assert_eq!(confirmation.kind, ConfirmationKind::Destructive);
-                assert!(matches!(action, MenuAction::Custom { .. }));
+                assert_eq!(
+                    action,
+                    MenuAction::Activate {
+                        id: action_id::SYSTEM_POWEROFF.into(),
+                    }
+                );
             }
             other => panic!("unexpected outcome: {other:?}"),
         }
