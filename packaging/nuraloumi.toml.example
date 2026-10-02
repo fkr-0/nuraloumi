@@ -1,0 +1,12 @@
+# Wave 1 package example.
+# Runtime crates own the eventual stable configuration schema.
+
+[ui]
+reduced_motion = true
+minimum_touch_target_px = 48
+
+[render]
+software_reference = true
+
+[qualification]
+fixture_mode = false

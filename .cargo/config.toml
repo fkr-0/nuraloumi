@@ -1,0 +1,7 @@
+[alias]
+xtask = "run -p nuraloumi-xtask --"
+
+[target.armv7-unknown-linux-musleabihf]
+# Tegra20 is ARMv7 hard-float but has no NEON. Do not set a target-cpu here:
+# toolchain/linker selection remains an explicit qualification prerequisite.
+rustflags = ["-C", "target-feature=-neon"]
