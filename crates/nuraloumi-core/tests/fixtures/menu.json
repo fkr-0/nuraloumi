@@ -1,0 +1,66 @@
+{
+  "id": "system",
+  "title": "System",
+  "items": [
+    {
+      "id": "section:connectivity",
+      "label": "Connectivity",
+      "subtitle": null,
+      "kind": "section",
+      "enabled": false,
+      "visible": true,
+      "action": null,
+      "children": [],
+      "checked": null
+    },
+    {
+      "id": "wifi",
+      "label": "Wi-Fi",
+      "subtitle": "Connected",
+      "kind": "checkable",
+      "enabled": true,
+      "visible": true,
+      "action": {
+        "type": "toggle",
+        "id": "wifi:set"
+      },
+      "children": [],
+      "checked": true
+    },
+    {
+      "id": "power",
+      "label": "Power",
+      "subtitle": null,
+      "kind": "submenu",
+      "enabled": true,
+      "visible": true,
+      "action": null,
+      "children": [
+        {
+          "id": "poweroff",
+          "label": "Power off",
+          "subtitle": null,
+          "kind": "action",
+          "enabled": true,
+          "visible": true,
+          "action": {
+            "type": "confirm",
+            "confirmation": {
+              "title": "Power off?",
+              "body": "Unsaved work may be lost.",
+              "kind": "destructive"
+            },
+            "action": {
+              "type": "custom",
+              "kind": "system.poweroff",
+              "payload": ""
+            }
+          },
+          "children": [],
+          "checked": null
+        }
+      ],
+      "checked": null
+    }
+  ]
+}
