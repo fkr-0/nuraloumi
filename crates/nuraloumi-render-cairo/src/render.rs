@@ -706,6 +706,24 @@ impl<B: TextBackend> CairoRenderer<B> {
         Ok((scene, buffer))
     }
 
+    /// Rasterize a canonical semantic scene through one finite presentation
+    /// transition. Semantic layout and hit geometry stay at their settled
+    /// coordinates; callers should suppress activation until the transition
+    /// settles when spatial motion is non-zero.
+    pub fn render_core_transition(
+        &self,
+        model: &nuraloumi_core::MenuModel,
+        state: &nuraloumi_core::MenuState,
+        viewport: Viewport,
+        tokens: &nuraloumi_core::ThemeTokens,
+        options: RenderOptions,
+        transition: nuraloumi_core::Transition,
+    ) -> Result<(Scene, RenderedBuffer), cairo::Error> {
+        let scene = self.build_core_scene(model, state, viewport, tokens, options);
+        let buffer = self.render_scene_transition(&scene, transition)?;
+        Ok((scene, buffer))
+    }
+
     pub fn build_scene<M: MenuSource>(
         &self,
         menu: &M,
@@ -725,13 +743,48 @@ impl<B: TextBackend> CairoRenderer<B> {
     }
 
     pub fn render_scene(&self, scene: &Scene) -> Result<RenderedBuffer, cairo::Error> {
+        self.render_scene_inner(scene, None)
+    }
+
+    pub fn render_scene_transition(
+        &self,
+        scene: &Scene,
+        transition: nuraloumi_core::Transition,
+    ) -> Result<RenderedBuffer, cairo::Error> {
+        self.render_scene_inner(scene, Some(transition))
+    }
+
+    fn render_scene_inner(
+        &self,
+        scene: &Scene,
+        transition: Option<nuraloumi_core::Transition>,
+    ) -> Result<RenderedBuffer, cairo::Error> {
         let (width, height) = scene.viewport.device_size();
         let surface = ImageSurface::create(Format::ARgb32, width, height)?;
         let context = Context::new(&surface)?;
         context.scale(scene.viewport.scale, scene.viewport.scale);
 
-        for node in &scene.paint {
-            draw_node(&context, node, &self.text)?;
+        if let Some(transition) = transition {
+            let opacity = f64::from(transition.opacity.clamp(0.0, 1.0));
+            let scale = f64::from(transition.scale.max(0.01));
+            let center_x = scene.panel_rect.x + scene.panel_rect.width / 2.0;
+            let center_y = scene.panel_rect.y + scene.panel_rect.height / 2.0;
+
+            context.save()?;
+            context.translate(center_x, center_y + f64::from(transition.translate_y));
+            context.scale(scale, scale);
+            context.translate(-center_x, -center_y);
+            context.push_group();
+            for node in &scene.paint {
+                draw_node(&context, node, &self.text)?;
+            }
+            context.pop_group_to_source()?;
+            context.paint_with_alpha(opacity)?;
+            context.restore()?;
+        } else {
+            for node in &scene.paint {
+                draw_node(&context, node, &self.text)?;
+            }
         }
 
         surface.flush();

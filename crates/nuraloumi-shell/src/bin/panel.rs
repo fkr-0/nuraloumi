@@ -19,8 +19,8 @@ use nuraloumi_shell::{
     MediaPlayerEntry as ShellMediaPlayerEntry, MenuAction, MenuFamily,
     NotificationHistoryEntry as ShellNotificationHistoryEntry, OverviewMode, PanelAffordance,
     PanelController, PanelEdge as ShellPanelEdge, PlatformEvent as ShellPlatformEvent,
-    ProviderValue, SemanticInput, ShellConfig, ShellState, Theme as ShellTheme, ValueState,
-    WifiNetworkEntry, WindowControlCapabilities,
+    ProviderValue, SceneTransitionClock, SemanticInput, ShellConfig, ShellState,
+    Theme as ShellTheme, ValueState, WifiNetworkEntry, WindowControlCapabilities,
 };
 use nuraloumi_wayland::{
     BackendCapabilities as WaylandCapabilities, BackendError, Frame, Key as WaylandKey,
@@ -115,6 +115,7 @@ struct LiveMenu {
     geometry: Option<(u32, u32, i32)>,
     scene: Option<Scene>,
     touch_regions: BTreeMap<i32, Option<ShellHitRegion>>,
+    motion: Option<SceneTransitionClock>,
 }
 
 #[derive(Clone, Copy)]
@@ -304,7 +305,15 @@ fn run_live(
     }
 
     loop {
-        if panel_first_frame_presented && live_provider_probe.is_some() {
+        let menu_animating = active_menu
+            .as_ref()
+            .is_some_and(|menu| menu.motion.is_some());
+        if menu_animating {
+            std::thread::sleep(SceneTransitionClock::frame_interval());
+            backend
+                .roundtrip()
+                .map_err(|error| format!("Wayland animation roundtrip failed: {error}"))?;
+        } else if panel_first_frame_presented && live_provider_probe.is_some() {
             backend
                 .roundtrip()
                 .map_err(|error| format!("Wayland startup roundtrip failed: {error}"))?;
@@ -338,6 +347,7 @@ fn run_live(
                         &menu.shell,
                         &config,
                         menu_geometry,
+                        menu.motion.as_ref().map(|clock| clock.sample().transition),
                     )?);
                 } else {
                     menu.scene = None;
@@ -465,10 +475,17 @@ fn run_live(
                     redraw = true;
                 }
                 WaylandEvent::PointerButton { x, y, pressed, .. } => {
-                    let region = menu
-                        .scene
+                    let input_enabled = menu
+                        .motion
                         .as_ref()
-                        .and_then(|scene| shell_hit_region(scene, x, y));
+                        .is_none_or(|clock| !clock.blocks_hit_testing());
+                    let region = input_enabled
+                        .then(|| {
+                            menu.scene
+                                .as_ref()
+                                .and_then(|scene| shell_hit_region(scene, x, y))
+                        })
+                        .flatten();
                     report = menu
                         .shell
                         .handle_platform_event(ShellPlatformEvent::PointerButton {
@@ -478,10 +495,17 @@ fn run_live(
                     redraw = true;
                 }
                 WaylandEvent::TouchDown { id, x, y } => {
-                    let region = menu
-                        .scene
+                    let input_enabled = menu
+                        .motion
                         .as_ref()
-                        .and_then(|scene| shell_hit_region(scene, x, y));
+                        .is_none_or(|clock| !clock.blocks_hit_testing());
+                    let region = input_enabled
+                        .then(|| {
+                            menu.scene
+                                .as_ref()
+                                .and_then(|scene| shell_hit_region(scene, x, y))
+                        })
+                        .flatten();
                     menu.touch_regions.insert(id, region.clone());
                     report = menu
                         .shell
@@ -489,10 +513,17 @@ fn run_live(
                     redraw = true;
                 }
                 WaylandEvent::TouchMotion { id, x, y } => {
-                    let region = menu
-                        .scene
+                    let input_enabled = menu
+                        .motion
                         .as_ref()
-                        .and_then(|scene| shell_hit_region(scene, x, y));
+                        .is_none_or(|clock| !clock.blocks_hit_testing());
+                    let region = input_enabled
+                        .then(|| {
+                            menu.scene
+                                .as_ref()
+                                .and_then(|scene| shell_hit_region(scene, x, y))
+                        })
+                        .flatten();
                     menu.touch_regions.insert(id, region);
                 }
                 WaylandEvent::TouchUp { id } => {
@@ -547,6 +578,8 @@ fn run_live(
                     } else if kind == "overview.mode" {
                         menu.shell
                             .set_overview_mode(OverviewMode::parse(payload)?, &snapshot)?;
+                        menu.motion =
+                            (!config.reduced_motion).then(|| SceneTransitionClock::new(false));
                         panel_scene = None;
                         redraw = true;
                     } else if kind == "control.tab" {
@@ -555,6 +588,8 @@ fn run_live(
                             refresh_control_center_tab_snapshot(&mut snapshot, tab);
                         }
                         menu.shell.set_control_center_tab(tab, &snapshot)?;
+                        menu.motion =
+                            (!config.reduced_motion).then(|| SceneTransitionClock::new(false));
                         panel_scene = None;
                         redraw = true;
                     }
@@ -657,6 +692,7 @@ fn run_live(
                     refresh_control_center_tab_snapshot(&mut snapshot, ControlCenterTab::Media);
                 }
                 menu.shell.refresh_family(family, &snapshot)?;
+                menu.motion = (!config.reduced_motion).then(|| SceneTransitionClock::new(false));
                 panel_scene = None;
                 redraw = true;
             }
@@ -676,6 +712,7 @@ fn run_live(
                         &menu.shell,
                         &config,
                         geometry,
+                        menu.motion.as_ref().map(|clock| clock.sample().transition),
                     )?);
                 }
             }
@@ -713,6 +750,7 @@ fn run_live(
                         &menu.shell,
                         &config,
                         menu_geometry,
+                        menu.motion.as_ref().map(|clock| clock.sample().transition),
                     )?);
                 } else {
                     menu.scene = None;
@@ -720,6 +758,24 @@ fn run_live(
             }
             panel_scene = None;
             eprintln!("nuraloumi-panel-provider-refresh: initial live snapshot ready");
+        }
+
+        if let Some(menu) = active_menu.as_mut() {
+            if let (Some(clock), Some(menu_geometry)) = (menu.motion.as_ref(), menu.geometry) {
+                let sample = clock.sample();
+                menu.scene = Some(render_menu_and_present(
+                    &mut backend,
+                    menu.surface,
+                    &renderer,
+                    &menu.shell,
+                    &config,
+                    menu_geometry,
+                    Some(sample.transition),
+                )?);
+                if sample.complete {
+                    menu.motion = None;
+                }
+            }
         }
 
         if panel_scene.is_none() {
@@ -804,6 +860,7 @@ fn open_live_menu(
         geometry: None,
         scene: None,
         touch_regions: BTreeMap::new(),
+        motion: (!config.reduced_motion).then(|| SceneTransitionClock::new(false)),
     })
 }
 
@@ -902,6 +959,7 @@ fn render_menu_and_present(
     shell: &ShellState,
     config: &ShellConfig,
     geometry: (u32, u32, i32),
+    transition: Option<nuraloumi_core::Transition>,
 ) -> Result<Scene, String> {
     let (logical_width, logical_height, scale) = geometry;
     let viewport = Viewport::new(
@@ -913,15 +971,25 @@ fn render_menu_and_present(
         ShellTheme::Dark => &DARK_THEME,
         ShellTheme::Light => &LIGHT_THEME,
     };
-    let (scene, mut buffer) = renderer
-        .render_core(
+    let rendered = match transition {
+        Some(transition) => renderer.render_core_transition(
             &shell.menu,
             &shell.state,
             viewport,
             theme_tokens,
             RenderOptions::default(),
-        )
-        .map_err(|error| format!("Cairo menu render failed: {error}"))?;
+            transition,
+        ),
+        None => renderer.render_core(
+            &shell.menu,
+            &shell.state,
+            viewport,
+            theme_tokens,
+            RenderOptions::default(),
+        ),
+    };
+    let (scene, mut buffer) =
+        rendered.map_err(|error| format!("Cairo menu render failed: {error}"))?;
     present_buffer(backend, surface, &mut buffer)?;
     Ok(scene)
 }

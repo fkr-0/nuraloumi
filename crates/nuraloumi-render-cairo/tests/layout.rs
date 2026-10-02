@@ -78,6 +78,44 @@ fn non_action_and_disabled_rows_never_activate() {
 }
 
 #[test]
+fn transitioned_raster_preserves_settled_semantic_geometry() {
+    let renderer = nuraloumi_render_cairo::CairoRenderer::default();
+    let viewport = Viewport::new(800.0, 600.0, 1.0);
+    let scene = renderer.build_scene(
+        &mixed_menu(),
+        &InteractionState::default(),
+        viewport,
+        &Theme::dark(),
+        RenderOptions::default(),
+    );
+    let buffer = renderer
+        .render_scene_transition(
+            &scene,
+            nuraloumi_core::Transition {
+                opacity: 0.5,
+                translate_y: 8.0,
+                scale: 1.0,
+            },
+        )
+        .expect("transitioned raster");
+
+    assert_eq!(buffer.info().width, 800);
+    assert_eq!(buffer.info().height, 600);
+    let hit = scene
+        .hits
+        .iter()
+        .find(|hit| hit.item_id == "action")
+        .expect("action hit");
+    assert_eq!(
+        scene.hit_test(
+            hit.rect.x + hit.rect.width / 2.0,
+            hit.rect.y + hit.rect.height / 2.0
+        ),
+        Some("action")
+    );
+}
+
+#[test]
 fn viewport_width_is_clamped_below_target_range() {
     let scene = layout_menu(
         &mixed_menu(),

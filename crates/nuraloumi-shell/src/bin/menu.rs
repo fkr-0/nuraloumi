@@ -14,9 +14,9 @@ use nuraloumi_shell::{
     ControlCenterTab, DesktopCommand, DesktopControlCapabilities, DesktopEntry, FixtureSnapshot,
     HitRegion as ShellHitRegion, MediaPlayerEntry as ShellMediaPlayerEntry, MenuAction, MenuFamily,
     NotificationHistoryEntry as ShellNotificationHistoryEntry, OverviewMode,
-    PlatformEvent as ShellPlatformEvent, ProviderValue, SemanticInput, ShellConfig, ShellInput,
-    ShellState, Theme as ShellTheme, ValueState, WifiNetworkEntry, WindowControlCapabilities,
-    WindowEntry,
+    PlatformEvent as ShellPlatformEvent, ProviderValue, SceneTransitionClock, SemanticInput,
+    ShellConfig, ShellInput, ShellState, Theme as ShellTheme, ValueState, WifiNetworkEntry,
+    WindowControlCapabilities, WindowEntry,
 };
 use nuraloumi_wayland::{
     BackendCapabilities as WaylandCapabilities, BackendError, Frame, Key as WaylandKey,
@@ -366,11 +366,19 @@ fn run_live(
     let mut touch_regions: BTreeMap<i32, Option<ShellHitRegion>> = BTreeMap::new();
     let mut initial_control_refresh_pending =
         policy.execute_provider_actions && shell.menu.id == "control-center";
+    let mut motion = (!config.reduced_motion).then(|| SceneTransitionClock::new(false));
 
     loop {
-        backend
-            .blocking_dispatch()
-            .map_err(|error| format!("Wayland dispatch failed: {error}"))?;
+        if motion.is_some() {
+            std::thread::sleep(SceneTransitionClock::frame_interval());
+            backend
+                .roundtrip()
+                .map_err(|error| format!("Wayland animation roundtrip failed: {error}"))?;
+        } else {
+            backend
+                .blocking_dispatch()
+                .map_err(|error| format!("Wayland dispatch failed: {error}"))?;
+        }
         let toplevel_changed = backend.drain_toplevel_events().count() > 0;
         let workspace_changed = backend.drain_workspace_events().count() > 0;
         if policy.execute_provider_actions && (toplevel_changed || workspace_changed) {
@@ -389,6 +397,7 @@ fn run_live(
                         theme_tokens,
                         &shell,
                         geometry,
+                        motion.as_ref().map(|clock| clock.sample().transition),
                     )?);
                 }
             }
@@ -413,9 +422,16 @@ fn run_live(
                     redraw = true;
                 }
                 WaylandEvent::PointerButton { x, y, pressed, .. } => {
-                    let region = scene
+                    let input_enabled = motion
                         .as_ref()
-                        .and_then(|scene| shell_hit_region(scene, x, y));
+                        .is_none_or(|clock| !clock.blocks_hit_testing());
+                    let region = input_enabled
+                        .then(|| {
+                            scene
+                                .as_ref()
+                                .and_then(|scene| shell_hit_region(scene, x, y))
+                        })
+                        .flatten();
                     report = shell.handle_platform_event(ShellPlatformEvent::PointerButton {
                         region,
                         pressed,
@@ -423,18 +439,32 @@ fn run_live(
                     redraw = true;
                 }
                 WaylandEvent::TouchDown { id, x, y } => {
-                    let region = scene
+                    let input_enabled = motion
                         .as_ref()
-                        .and_then(|scene| shell_hit_region(scene, x, y));
+                        .is_none_or(|clock| !clock.blocks_hit_testing());
+                    let region = input_enabled
+                        .then(|| {
+                            scene
+                                .as_ref()
+                                .and_then(|scene| shell_hit_region(scene, x, y))
+                        })
+                        .flatten();
                     touch_regions.insert(id, region.clone());
                     report =
                         shell.handle_platform_event(ShellPlatformEvent::TouchDown { id, region });
                     redraw = true;
                 }
                 WaylandEvent::TouchMotion { id, x, y } => {
-                    let region = scene
+                    let input_enabled = motion
                         .as_ref()
-                        .and_then(|scene| shell_hit_region(scene, x, y));
+                        .is_none_or(|clock| !clock.blocks_hit_testing());
+                    let region = input_enabled
+                        .then(|| {
+                            scene
+                                .as_ref()
+                                .and_then(|scene| shell_hit_region(scene, x, y))
+                        })
+                        .flatten();
                     touch_regions.insert(id, region);
                 }
                 WaylandEvent::TouchUp { id } => {
@@ -472,6 +502,13 @@ fn run_live(
             }
 
             if let Some(report) = report {
+                let scene_changed = matches!(
+                    &report,
+                    ActionReport::Dispatched {
+                        action: MenuAction::Custom { kind, .. },
+                        ..
+                    } if kind == "menu.open" || kind == "overview.mode" || kind == "control.tab"
+                );
                 if handle_live_report(&report, &mut shell, &mut snapshot, &mut backend, policy)? {
                     backend
                         .destroy_surface(surface)
@@ -480,6 +517,9 @@ fn run_live(
                         .flush()
                         .map_err(|error| format!("failed to flush Wayland connection: {error}"))?;
                     return Ok(());
+                }
+                if scene_changed {
+                    motion = (!config.reduced_motion).then(|| SceneTransitionClock::new(false));
                 }
                 redraw = true;
             }
@@ -503,6 +543,7 @@ fn run_live(
                         theme_tokens,
                         &shell,
                         geometry,
+                        motion.as_ref().map(|clock| clock.sample().transition),
                     )?);
                     if initial_control_refresh_pending {
                         initial_control_refresh_pending = false;
@@ -518,9 +559,26 @@ fn run_live(
                             theme_tokens,
                             &shell,
                             geometry,
+                            motion.as_ref().map(|clock| clock.sample().transition),
                         )?);
                     }
                 }
+            }
+        }
+
+        if let (Some(clock), Some(geometry)) = (motion.as_ref(), geometry) {
+            let sample = clock.sample();
+            scene = Some(render_and_present(
+                &mut backend,
+                surface,
+                &renderer,
+                theme_tokens,
+                &shell,
+                geometry,
+                Some(sample.transition),
+            )?);
+            if sample.complete {
+                motion = None;
             }
         }
     }
@@ -533,6 +591,7 @@ fn render_and_present(
     tokens: &nuraloumi_core::ThemeTokens,
     shell: &ShellState,
     geometry: (u32, u32, i32),
+    transition: Option<nuraloumi_core::Transition>,
 ) -> Result<Scene, String> {
     let (logical_width, logical_height, scale) = geometry;
     let viewport = Viewport::new(
@@ -540,15 +599,24 @@ fn render_and_present(
         f64::from(logical_height),
         f64::from(scale.max(1)),
     );
-    let (scene, mut buffer) = renderer
-        .render_core(
+    let rendered = match transition {
+        Some(transition) => renderer.render_core_transition(
             &shell.menu,
             &shell.state,
             viewport,
             tokens,
             RenderOptions::default(),
-        )
-        .map_err(|error| format!("Cairo render failed: {error}"))?;
+            transition,
+        ),
+        None => renderer.render_core(
+            &shell.menu,
+            &shell.state,
+            viewport,
+            tokens,
+            RenderOptions::default(),
+        ),
+    };
+    let (scene, mut buffer) = rendered.map_err(|error| format!("Cairo render failed: {error}"))?;
 
     let info = buffer.info();
     let width = u32::try_from(info.width).map_err(|_| "negative rendered width".to_owned())?;

@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
+use std::time::{Duration, Instant};
 pub use window_adapter::{
     execute_window_command, parse_window_command, window_entries, WindowCommand,
     WindowControlCapabilities,
@@ -46,6 +47,61 @@ pub struct ShellConfig {
     pub row_height: u32,
     pub theme: Theme,
     pub reduced_motion: bool,
+}
+
+const SCENE_FRAME_INTERVAL_MS: u64 = 16;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SceneTransitionSample {
+    pub transition: nuraloumi_core::Transition,
+    pub complete: bool,
+}
+
+pub fn scene_enter_transition(elapsed_ms: u32, reduced_motion: bool) -> SceneTransitionSample {
+    if reduced_motion {
+        return SceneTransitionSample {
+            transition: nuraloumi_core::reduced_motion(true),
+            complete: true,
+        };
+    }
+    let raw = nuraloumi_core::normalized_progress(elapsed_ms, nuraloumi_core::MotionClass::Fast);
+    let eased = nuraloumi_core::ease_out_cubic(raw);
+    SceneTransitionSample {
+        transition: nuraloumi_core::enter_transition(eased, nuraloumi_core::MotionMode::Full),
+        complete: raw >= 1.0,
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SceneTransitionClock {
+    started: Instant,
+    reduced_motion: bool,
+}
+
+impl SceneTransitionClock {
+    pub fn new(reduced_motion: bool) -> Self {
+        Self {
+            started: Instant::now(),
+            reduced_motion,
+        }
+    }
+
+    pub fn restart(&mut self) {
+        self.started = Instant::now();
+    }
+
+    pub fn sample(&self) -> SceneTransitionSample {
+        let elapsed_ms = self.started.elapsed().as_millis().min(u128::from(u32::MAX)) as u32;
+        scene_enter_transition(elapsed_ms, self.reduced_motion)
+    }
+
+    pub const fn frame_interval() -> Duration {
+        Duration::from_millis(SCENE_FRAME_INTERVAL_MS)
+    }
+
+    pub fn blocks_hit_testing(&self) -> bool {
+        !self.sample().complete
+    }
 }
 
 impl Default for ShellConfig {
@@ -2314,6 +2370,24 @@ mod tests {
 
     fn shell_with(menu: MenuModel) -> ShellState {
         ShellState::new(menu, false).expect("valid test menu")
+    }
+
+    #[test]
+    fn scene_transition_is_finite_and_reduced_motion_settles_immediately() {
+        let start = scene_enter_transition(0, false);
+        assert!(!start.complete);
+        assert_eq!(start.transition.opacity, 0.0);
+        assert!(start.transition.translate_y > 0.0);
+
+        let end = scene_enter_transition(nuraloumi_core::MotionClass::Fast.duration_ms(), false);
+        assert!(end.complete);
+        assert_eq!(end.transition.opacity, 1.0);
+        assert_eq!(end.transition.translate_y, 0.0);
+
+        let reduced = scene_enter_transition(0, true);
+        assert!(reduced.complete);
+        assert_eq!(reduced.transition.opacity, 1.0);
+        assert_eq!(reduced.transition.translate_y, 0.0);
     }
 
     #[test]
