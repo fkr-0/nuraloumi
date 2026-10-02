@@ -95,3 +95,30 @@ It must support a fixture/demo mode requiring no real system services.
 ## nuraloumi-xtask
 
 Owns build/packaging/qualification only. It must not become runtime authority.
+
+## Foreign-toplevel/window-control contract
+
+The compositor integration boundary is strict:
+
+- `nuraloumi-wayland` owns foreign-toplevel protocol discovery, generated proxy
+  handles, coherent protocol state, opaque `ToplevelId` allocation and typed
+  activate/fullscreen/close requests. It must not depend on menu models.
+- `nuraloumi-shell` is the only runtime crate allowed to map between typed
+  toplevel snapshots and `WindowEntry`/semantic window actions.
+- `nuraloumi-core` remains compositor-agnostic. It may carry generic/custom
+  semantic actions but no Wayland/labwc types.
+- `nuraloumi-providers` must not implement a second Wayland stack. Process/task
+  inspection remains a separate provider concern and must not require a PID ↔
+  window relationship.
+
+Protocol policy:
+
+1. prefer `zwlr_foreign_toplevel_manager_v1` for list + state + control;
+2. fall back to `ext_foreign_toplevel_list_v1` for list/title/app-id only;
+3. expose explicit capability flags so shell actions fail closed when control is
+   unavailable;
+4. never identify a window by title or app ID; use opaque non-reused
+   `ToplevelId` values;
+5. apply property updates only at protocol `done`;
+6. treat close as a request and wait for compositor `closed` before emitting
+   removal.

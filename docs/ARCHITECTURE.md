@@ -35,6 +35,39 @@ The reference rendering path is CPU software:
 No runtime crate may require EGL initialization to display the panel or menus.
 If the compositor itself later uses Grate/GPU acceleration, NuraLoumi remains unchanged.
 
+## Compositor toplevel boundary
+
+Foreign-toplevel integration obeys this dependency rule:
+
+```text
+nuraloumi-wayland
+    owns Wayland globals, proxy handles, protocol lifetimes and compositor requests
+    does not know menu rows or semantic navigation
+
+nuraloumi-shell
+    depends on Wayland + core
+    converts typed toplevel snapshots into WindowEntry values
+    converts validated window semantic actions back into typed Wayland requests
+
+nuraloumi-core
+    owns generic menu/action semantics
+    knows neither Wayland protocol objects nor labwc
+
+nuraloumi-providers
+    owns non-compositor OS/service providers
+    must not become a second Wayland protocol stack
+```
+
+`zwlr_foreign_toplevel_manager_v1` is the preferred list/control backend because
+it provides state, activation, fullscreen and close requests. The staging
+`ext_foreign_toplevel_list_v1` protocol is a list-only degraded fallback. Window
+identity is always an opaque NuraLoumi `ToplevelId`; titles and app IDs are
+presentation metadata and must never be used as control identity.
+
+Foreign-toplevel property changes are committed to shell-visible snapshots only
+at the protocol `done` boundary. A close request does not remove a window
+optimistically; removal follows the compositor's `closed` event.
+
 ## Resource discipline
 
 - single process is preferred for panel + transient menu surfaces in 0.1.

@@ -4,12 +4,20 @@ use std::{
 };
 
 use wayland_client::{
-    delegate_noop,
+    delegate_noop, event_created_child,
     protocol::{
         wl_buffer, wl_compositor, wl_keyboard, wl_output, wl_pointer, wl_registry, wl_seat, wl_shm,
         wl_shm_pool, wl_surface, wl_touch,
     },
     Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum,
+};
+use wayland_protocols::ext::foreign_toplevel_list::v1::client::{
+    ext_foreign_toplevel_handle_v1::{self, ExtForeignToplevelHandleV1},
+    ext_foreign_toplevel_list_v1::{self, ExtForeignToplevelListV1},
+};
+use wayland_protocols_wlr::foreign_toplevel::v1::client::{
+    zwlr_foreign_toplevel_handle_v1::{self, ZwlrForeignToplevelHandleV1},
+    zwlr_foreign_toplevel_manager_v1::{self, ZwlrForeignToplevelManagerV1},
 };
 use wayland_protocols_wlr::layer_shell::v1::client::{
     zwlr_layer_shell_v1::{self, ZwlrLayerShellV1},
@@ -17,10 +25,12 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
 };
 
 use crate::{
+    foreign_toplevel::{parse_wlr_state, ForeignToplevelStore},
     shm::{BufferKey, ShmBuffers},
     types::{semantic_key, sorted_touch_ids},
     BackendCapabilities, BackendError, BackendEvent, Frame, MenuConfig, OutputId, OutputInfo,
-    OutputTransform, PanelConfig, PanelEdge, PlatformEvent, Result, SurfaceId,
+    OutputTransform, PanelConfig, PanelEdge, PlatformEvent, Result, SurfaceId, ToplevelEvent,
+    ToplevelId, ToplevelInfo, ToplevelSource,
 };
 
 struct OutputRecord {
@@ -82,10 +92,12 @@ struct BackendState {
     touch_surfaces: HashMap<i32, SurfaceId>,
     active_touches: BTreeSet<i32>,
     shift_down: bool,
+    foreign_toplevel: ForeignToplevelStore,
 }
 
 pub struct WaylandBackend {
     connection: Connection,
+    registry: wl_registry::WlRegistry,
     queue: EventQueue<BackendState>,
     qh: QueueHandle<BackendState>,
     state: BackendState,
@@ -97,9 +109,10 @@ impl WaylandBackend {
             .map_err(|error| BackendError::Connect(error.to_string()))?;
         let queue = connection.new_event_queue();
         let qh = queue.handle();
-        connection.display().get_registry(&qh, ());
+        let registry = connection.display().get_registry(&qh, ());
         let mut backend = Self {
             connection,
+            registry,
             queue,
             qh,
             state: BackendState::default(),
@@ -130,7 +143,70 @@ impl WaylandBackend {
             output_count: self.state.outputs.len(),
             argb8888: self.state.shm_argb8888,
             xrgb8888: self.state.shm_xrgb8888,
+            toplevel: self.state.foreign_toplevel.capabilities(),
         }
+    }
+
+    pub fn toplevels(&self) -> Vec<ToplevelInfo> {
+        self.state.foreign_toplevel.toplevels()
+    }
+
+    pub fn drain_toplevel_events(&mut self) -> impl Iterator<Item = ToplevelEvent> + '_ {
+        self.state.foreign_toplevel.drain_events()
+    }
+
+    pub fn activate_toplevel(&mut self, id: ToplevelId) -> Result<()> {
+        let handle = self.state.foreign_toplevel.wlr_handle(id).ok_or_else(|| {
+            BackendError::Dispatch(format!("toplevel {id} is unknown or not controllable"))
+        })?;
+        let seat = self
+            .state
+            .seat
+            .as_ref()
+            .ok_or(BackendError::MissingGlobal("wl_seat"))?;
+        handle.activate(seat);
+        self.flush()
+    }
+
+    pub fn set_toplevel_fullscreen(
+        &mut self,
+        id: ToplevelId,
+        fullscreen: bool,
+        output: Option<OutputId>,
+    ) -> Result<()> {
+        let handle = self.state.foreign_toplevel.wlr_handle(id).ok_or_else(|| {
+            BackendError::Dispatch(format!("toplevel {id} is unknown or not controllable"))
+        })?;
+        if handle.version() < 2 {
+            return Err(BackendError::Dispatch(
+                "foreign-toplevel fullscreen requires protocol version 2+".to_owned(),
+            ));
+        }
+        if fullscreen {
+            let output_proxy = output
+                .map(|output_id| {
+                    self.state
+                        .outputs
+                        .get(&output_id)
+                        .map(|record| record.proxy.clone())
+                        .ok_or_else(|| {
+                            BackendError::Dispatch(format!("unknown output {}", output_id.0))
+                        })
+                })
+                .transpose()?;
+            handle.set_fullscreen(output_proxy.as_ref());
+        } else {
+            handle.unset_fullscreen();
+        }
+        self.flush()
+    }
+
+    pub fn close_toplevel(&mut self, id: ToplevelId) -> Result<()> {
+        let handle = self.state.foreign_toplevel.wlr_handle(id).ok_or_else(|| {
+            BackendError::Dispatch(format!("toplevel {id} is unknown or not controllable"))
+        })?;
+        handle.close();
+        self.flush()
     }
 
     pub fn outputs(&self) -> Vec<OutputInfo> {
@@ -360,21 +436,48 @@ impl WaylandBackend {
     }
 
     pub fn blocking_dispatch(&mut self) -> Result<usize> {
-        self.queue
+        let dispatched = self
+            .queue
             .blocking_dispatch(&mut self.state)
-            .map_err(|error| BackendError::Dispatch(error.to_string()))
+            .map_err(|error| BackendError::Dispatch(error.to_string()))?;
+        self.refresh_foreign_toplevel_binding()?;
+        Ok(dispatched)
     }
 
     pub fn dispatch_pending(&mut self) -> Result<usize> {
-        self.queue
+        let dispatched = self
+            .queue
             .dispatch_pending(&mut self.state)
-            .map_err(|error| BackendError::Dispatch(error.to_string()))
+            .map_err(|error| BackendError::Dispatch(error.to_string()))?;
+        self.refresh_foreign_toplevel_binding()?;
+        Ok(dispatched)
     }
 
     pub fn roundtrip(&mut self) -> Result<usize> {
-        self.queue
+        let dispatched = self
+            .queue
             .roundtrip(&mut self.state)
-            .map_err(|error| BackendError::Dispatch(error.to_string()))
+            .map_err(|error| BackendError::Dispatch(error.to_string()))?;
+        self.refresh_foreign_toplevel_binding()?;
+        Ok(dispatched)
+    }
+
+    fn refresh_foreign_toplevel_binding(&mut self) -> Result<()> {
+        if self.state.foreign_toplevel.has_binding() {
+            return Ok(());
+        }
+        if let Some((name, version)) = self.state.foreign_toplevel.wlr_global() {
+            let manager: ZwlrForeignToplevelManagerV1 =
+                self.registry.bind(name, version.min(3), &self.qh, ());
+            self.state.foreign_toplevel.bind_wlr(manager);
+            self.flush()?;
+        } else if let Some((name, version)) = self.state.foreign_toplevel.ext_global() {
+            let list: ExtForeignToplevelListV1 =
+                self.registry.bind(name, version.min(1), &self.qh, ());
+            self.state.foreign_toplevel.bind_ext(list);
+            self.flush()?;
+        }
+        Ok(())
     }
 
     pub fn flush(&self) -> Result<()> {
@@ -461,9 +564,16 @@ impl Dispatch<wl_registry::WlRegistry, ()> for BackendState {
                     state.layer_shell = Some(registry.bind(name, version.min(5), qh, ()));
                     state.layer_shell_global = Some(name);
                 }
+                "zwlr_foreign_toplevel_manager_v1" => {
+                    state.foreign_toplevel.record_wlr_global(name, version);
+                }
+                "ext_foreign_toplevel_list_v1" => {
+                    state.foreign_toplevel.record_ext_global(name, version);
+                }
                 _ => {}
             },
             wl_registry::Event::GlobalRemove { name } => {
+                state.foreign_toplevel.remove_global(name);
                 let id = OutputId(name);
                 if let Some(output) = state.outputs.remove(&id) {
                     release_output(output.proxy);
@@ -500,6 +610,147 @@ impl Dispatch<wl_registry::WlRegistry, ()> for BackendState {
 delegate_noop!(BackendState: ignore wl_compositor::WlCompositor);
 delegate_noop!(BackendState: ignore wl_shm_pool::WlShmPool);
 delegate_noop!(BackendState: ignore ZwlrLayerShellV1);
+
+impl Dispatch<ZwlrForeignToplevelManagerV1, ()> for BackendState {
+    fn event(
+        state: &mut Self,
+        _proxy: &ZwlrForeignToplevelManagerV1,
+        event: zwlr_foreign_toplevel_manager_v1::Event,
+        _data: &(),
+        _connection: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        match event {
+            zwlr_foreign_toplevel_manager_v1::Event::Toplevel { toplevel } => {
+                state.foreign_toplevel.register_wlr(toplevel);
+            }
+            zwlr_foreign_toplevel_manager_v1::Event::Finished => {
+                state
+                    .foreign_toplevel
+                    .manager_finished(ToplevelSource::WlrManagement);
+            }
+            _ => {}
+        }
+    }
+
+    event_created_child!(BackendState, ZwlrForeignToplevelManagerV1, [
+        zwlr_foreign_toplevel_manager_v1::EVT_TOPLEVEL_OPCODE => (ZwlrForeignToplevelHandleV1, ()),
+    ]);
+}
+
+impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for BackendState {
+    fn event(
+        state: &mut Self,
+        proxy: &ZwlrForeignToplevelHandleV1,
+        event: zwlr_foreign_toplevel_handle_v1::Event,
+        _data: &(),
+        _connection: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        let object = proxy.id();
+        match event {
+            zwlr_foreign_toplevel_handle_v1::Event::Title { title } => {
+                state.foreign_toplevel.set_wlr_title(&object, title);
+            }
+            zwlr_foreign_toplevel_handle_v1::Event::AppId { app_id } => {
+                state.foreign_toplevel.set_wlr_app_id(&object, app_id);
+            }
+            zwlr_foreign_toplevel_handle_v1::Event::State { state: raw } => {
+                state
+                    .foreign_toplevel
+                    .set_wlr_state(&object, parse_wlr_state(&raw));
+            }
+            zwlr_foreign_toplevel_handle_v1::Event::OutputEnter { output } => {
+                if let Some(id) = output_id_for_proxy(state, &output) {
+                    state.foreign_toplevel.wlr_output_enter(&object, id);
+                }
+            }
+            zwlr_foreign_toplevel_handle_v1::Event::OutputLeave { output } => {
+                if let Some(id) = output_id_for_proxy(state, &output) {
+                    state.foreign_toplevel.wlr_output_leave(&object, id);
+                }
+            }
+            zwlr_foreign_toplevel_handle_v1::Event::Done => {
+                state.foreign_toplevel.commit_wlr(&object);
+            }
+            zwlr_foreign_toplevel_handle_v1::Event::Closed => {
+                if let Some(handle) = state.foreign_toplevel.close_wlr(&object) {
+                    if handle.is_alive() {
+                        handle.destroy();
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<ExtForeignToplevelListV1, ()> for BackendState {
+    fn event(
+        state: &mut Self,
+        proxy: &ExtForeignToplevelListV1,
+        event: ext_foreign_toplevel_list_v1::Event,
+        _data: &(),
+        _connection: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        match event {
+            ext_foreign_toplevel_list_v1::Event::Toplevel { toplevel } => {
+                state.foreign_toplevel.register_ext(toplevel);
+            }
+            ext_foreign_toplevel_list_v1::Event::Finished => {
+                state
+                    .foreign_toplevel
+                    .manager_finished(ToplevelSource::ExtList);
+                if proxy.is_alive() {
+                    proxy.destroy();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    event_created_child!(BackendState, ExtForeignToplevelListV1, [
+        ext_foreign_toplevel_list_v1::EVT_TOPLEVEL_OPCODE => (ExtForeignToplevelHandleV1, ()),
+    ]);
+}
+
+impl Dispatch<ExtForeignToplevelHandleV1, ()> for BackendState {
+    fn event(
+        state: &mut Self,
+        proxy: &ExtForeignToplevelHandleV1,
+        event: ext_foreign_toplevel_handle_v1::Event,
+        _data: &(),
+        _connection: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        let object = proxy.id();
+        match event {
+            ext_foreign_toplevel_handle_v1::Event::Title { title } => {
+                state.foreign_toplevel.set_ext_title(&object, title);
+            }
+            ext_foreign_toplevel_handle_v1::Event::AppId { app_id } => {
+                state.foreign_toplevel.set_ext_app_id(&object, app_id);
+            }
+            ext_foreign_toplevel_handle_v1::Event::Identifier { identifier } => {
+                state
+                    .foreign_toplevel
+                    .set_ext_identifier(&object, identifier);
+            }
+            ext_foreign_toplevel_handle_v1::Event::Done => {
+                state.foreign_toplevel.commit_ext(&object);
+            }
+            ext_foreign_toplevel_handle_v1::Event::Closed => {
+                if let Some(handle) = state.foreign_toplevel.close_ext(&object) {
+                    if handle.is_alive() {
+                        handle.destroy();
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
 
 impl Dispatch<wl_shm::WlShm, ()> for BackendState {
     fn event(
@@ -573,6 +824,13 @@ impl Dispatch<wl_output::WlOutput, OutputId> for BackendState {
             update_surface_scales(state);
         }
     }
+}
+
+fn output_id_for_proxy(state: &BackendState, proxy: &wl_output::WlOutput) -> Option<OutputId> {
+    state
+        .outputs
+        .iter()
+        .find_map(|(id, record)| (record.proxy.id() == proxy.id()).then_some(*id))
 }
 
 fn validate_panel_config(config: &PanelConfig) -> Result<()> {

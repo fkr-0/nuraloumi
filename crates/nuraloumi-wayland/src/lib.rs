@@ -6,11 +6,15 @@
 
 mod backend;
 mod error;
+mod foreign_toplevel;
 mod shm;
 mod types;
 
 pub use backend::WaylandBackend;
 pub use error::{BackendError, Result};
+pub use foreign_toplevel::{
+    ToplevelCapabilities, ToplevelEvent, ToplevelId, ToplevelInfo, ToplevelSource, ToplevelState,
+};
 pub use types::{
     normalize_output_point, BackendCapabilities, BackendEvent, Frame, Key, MenuConfig, OutputId,
     OutputInfo, OutputTransform, PanelConfig, PanelEdge, PixelFormat, PlatformEvent, Point,

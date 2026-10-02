@@ -1,5 +1,7 @@
 use std::collections::BTreeSet;
 
+use crate::ToplevelCapabilities;
+
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct SurfaceId(pub u32);
 
@@ -118,6 +120,7 @@ pub struct BackendCapabilities {
     pub output_count: usize,
     pub argb8888: bool,
     pub xrgb8888: bool,
+    pub toplevel: ToplevelCapabilities,
 }
 
 impl BackendCapabilities {
