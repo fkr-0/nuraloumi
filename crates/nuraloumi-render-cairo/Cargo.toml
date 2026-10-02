@@ -1,8 +1,19 @@
 [package]
-name="nuraloumi-render-cairo"
-version.workspace=true
-edition.workspace=true
-license.workspace=true
+name = "nuraloumi-render-cairo"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# Optional complex-script shaping through the system PangoCairo C ABI.
+# Requires Pango/PangoCairo >= 1.44 for scale-stable unrounded glyph positions.
+# This intentionally adds no Rust dependency or default runtime cost.
+pangocairo = []
+# Strict font-file binding via system FriBidi + HarfBuzz + FreeType + Cairo FT.
+# Opens only caller-provided font files and never performs fontconfig fallback.
+packaged-font = []
 
 [dependencies]
-nuraloumi-core={ path="../nuraloumi-core" }
+nuraloumi-core = { path = "../nuraloumi-core" }
+cairo-rs = { version = "0.20", default-features = false, features = ["png"] }
