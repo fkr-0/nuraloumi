@@ -69,6 +69,13 @@ export PKG_CONFIG_ALLOW_CROSS=1
 export PKG_CONFIG_SYSROOT_DIR="$SYSROOT"
 export PKG_CONFIG_LIBDIR="$PKGCONFIG"
 export PKG_CONFIG_PATH="$PKGCONFIG"
+# Cargo config provides checkout-relative target defaults for raw cargo checks.
+# Explicit target-scoped environment variables win over those defaults so this
+# script remains relocatable when a prepared sysroot lives outside the checkout.
+export PKG_CONFIG_ALLOW_CROSS_armv7_unknown_linux_musleabihf=1
+export PKG_CONFIG_SYSROOT_DIR_armv7_unknown_linux_musleabihf="$SYSROOT"
+export PKG_CONFIG_LIBDIR_armv7_unknown_linux_musleabihf="$PKGCONFIG"
+export PKG_CONFIG_PATH_armv7_unknown_linux_musleabihf="$PKGCONFIG"
 export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=-neon,-d32,-hwdiv,-hwdiv-arm,-crt-static"
 export CARGO_PROFILE_RELEASE_STRIP=debuginfo
 
