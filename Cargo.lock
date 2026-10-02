@@ -143,9 +143,6 @@ dependencies = [
 [[package]]
 name = "nuraloumi-providers"
 version = "0.1.0"
-dependencies = [
- "nuraloumi-core",
-]
 
 [[package]]
 name = "nuraloumi-render-cairo"
