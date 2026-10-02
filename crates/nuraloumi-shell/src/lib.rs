@@ -1070,6 +1070,10 @@ impl From<SemanticInput> for ShellInput {
     }
 }
 
+pub fn launcher_search_input() -> ShellInput {
+    ShellInput::SearchFocus(true)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ActionReport {
@@ -1208,6 +1212,8 @@ impl ShellState {
 
         if matches!(&input, SemanticInput::Back | SemanticInput::Escape) {
             if self.search_focused {
+                self.state.query.clear();
+                self.state.normalize(&self.menu);
                 return self.focus_search(false);
             }
             if let Some(item_id) = self.pending_confirmation.take() {
@@ -1496,13 +1502,35 @@ mod tests {
         let mut shell = shell_with(build_launcher_menu());
         let ignored = shell.apply_semantic(SemanticInput::Text("term".into()));
         assert!(matches!(ignored, ActionReport::Ignored { .. }));
-        shell.apply_input(ShellInput::SearchFocus(true));
+        shell.apply_input(launcher_search_input());
         shell.apply_semantic(SemanticInput::Text("term".into()));
         assert_eq!(shell.state.query, "term");
         assert_eq!(shell.state.selected_id.as_deref(), Some("app.terminal"));
-        shell.apply_semantic(SemanticInput::Back);
-        assert!(!shell.search_focused);
-        assert!(!shell.closed);
+    }
+
+    #[test]
+    fn back_and_escape_clear_search_before_close_and_preserve_selection() {
+        for input in [SemanticInput::Back, SemanticInput::Escape] {
+            let mut shell = shell_with(build_launcher_menu());
+            shell.apply_input(launcher_search_input());
+            shell.apply_semantic(SemanticInput::Text("term".into()));
+            let selected = shell.state.selected_id.clone();
+
+            assert_eq!(
+                shell.apply_semantic(input.clone()),
+                ActionReport::SearchChanged {
+                    query: String::new(),
+                    focused: false,
+                }
+            );
+            assert!(shell.state.query.is_empty());
+            assert_eq!(shell.state.selected_id, selected);
+            assert!(!shell.search_focused);
+            assert!(!shell.closed);
+
+            assert_eq!(shell.apply_semantic(input), ActionReport::SurfaceClosed);
+            assert!(shell.closed);
+        }
     }
 
     #[test]

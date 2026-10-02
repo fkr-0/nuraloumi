@@ -6,12 +6,12 @@ use nuraloumi_providers::{
 };
 use nuraloumi_render_cairo::{CairoRenderer, RenderOptions, Scene, Viewport};
 use nuraloumi_shell::{
-    build_family, execute_window_command, load_config, load_fixture_snapshot, load_menu,
-    parse_family, parse_window_command, window_entries, ActionReport, BluetoothDeviceEntry,
-    FixtureSnapshot, HitRegion as ShellHitRegion, MenuAction, MenuFamily,
-    PlatformEvent as ShellPlatformEvent, ProviderValue, SemanticInput, ShellConfig, ShellInput,
-    ShellState, Theme as ShellTheme, ValueState, WifiNetworkEntry, WindowControlCapabilities,
-    WindowEntry,
+    build_family, execute_window_command, launcher_search_input, load_config,
+    load_fixture_snapshot, load_menu, parse_family, parse_window_command, window_entries,
+    ActionReport, BluetoothDeviceEntry, FixtureSnapshot, HitRegion as ShellHitRegion, MenuAction,
+    MenuFamily, PlatformEvent as ShellPlatformEvent, ProviderValue, SemanticInput, ShellConfig,
+    ShellInput, ShellState, Theme as ShellTheme, ValueState, WifiNetworkEntry,
+    WindowControlCapabilities, WindowEntry,
 };
 use nuraloumi_wayland::{
     BackendCapabilities as WaylandCapabilities, BackendError, Frame, Key as WaylandKey,
@@ -814,7 +814,7 @@ fn parse_input(step: &str) -> Result<ShellInput, String> {
         "enter" | "activate" => ShellInput::Semantic(SemanticInput::Activate),
         "esc" | "escape" | "back" => ShellInput::Semantic(SemanticInput::Back),
         "backspace" => ShellInput::Semantic(SemanticInput::Backspace),
-        "search" => ShellInput::SearchFocus(true),
+        "search" => launcher_search_input(),
         "blur" => ShellInput::SearchFocus(false),
         other if other.starts_with("text:") => {
             ShellInput::Semantic(SemanticInput::Text(other["text:".len()..].to_owned()))
@@ -827,6 +827,11 @@ fn parse_input(step: &str) -> Result<ShellInput, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn search_input_uses_canonical_launcher_search_semantics() {
+        assert_eq!(parse_input("search").unwrap(), launcher_search_input());
+    }
 
     #[test]
     fn live_probe_snapshot_preserves_scan_results() {

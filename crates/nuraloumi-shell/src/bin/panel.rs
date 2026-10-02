@@ -9,9 +9,9 @@ use nuraloumi_render_cairo::{
     RowKind, Scene, ScrollWindow, TextStyle, Theme as RenderTheme, Viewport,
 };
 use nuraloumi_shell::{
-    build_family, load_config, load_fixture_snapshot, panel_affordances, parse_family,
-    BluetoothDeviceEntry, FixtureSnapshot, HitRegion as ShellHitRegion, MenuAction, MenuFamily,
-    PanelAffordance, PanelController, PanelEdge as ShellPanelEdge,
+    build_family, launcher_search_input, load_config, load_fixture_snapshot, panel_affordances,
+    parse_family, BluetoothDeviceEntry, FixtureSnapshot, HitRegion as ShellHitRegion, MenuAction,
+    MenuFamily, PanelAffordance, PanelController, PanelEdge as ShellPanelEdge,
     PlatformEvent as ShellPlatformEvent, ProviderValue, SemanticInput, ShellConfig, ShellState,
     Theme as ShellTheme, ValueState, WifiNetworkEntry,
 };
@@ -661,7 +661,7 @@ fn activate_panel_target(
     )?;
     if target.focus_search {
         if let Some(menu) = active_menu.as_mut() {
-            let _ = menu.shell.focus_search(true);
+            let _ = menu.shell.apply_input(launcher_search_input());
         }
     }
     Ok(())
