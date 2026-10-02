@@ -43,6 +43,7 @@ pub fn qualify_host(root: &Path, strict: bool, nested: bool) -> Result<(), Strin
                 &[
                     "run",
                     "-q",
+                    "--locked",
                     "-p",
                     "nuraloumi-render-cairo",
                     "--example",
@@ -254,7 +255,7 @@ pub fn qualify_armv7(root: &Path, cross_check: bool) -> Result<(), String> {
                 ];
                 let output = run_capture_env(
                     "cargo",
-                    &["check", "--workspace", "--target", ARMV7_TARGET],
+                    &["check", "--locked", "--workspace", "--target", ARMV7_TARGET],
                     root,
                     &envs,
                 )?;

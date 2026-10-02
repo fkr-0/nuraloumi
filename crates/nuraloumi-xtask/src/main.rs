@@ -78,13 +78,23 @@ fn cmd_check(root: &Path, args: &[String]) -> Result<(), String> {
             ),
             (
                 "check",
-                vec!["check", "--package", "nuraloumi-xtask", "--all-targets"],
+                vec![
+                    "check",
+                    "--locked",
+                    "--package",
+                    "nuraloumi-xtask",
+                    "--all-targets",
+                ],
             ),
-            ("test", vec!["test", "--package", "nuraloumi-xtask"]),
+            (
+                "test",
+                vec!["test", "--locked", "--package", "nuraloumi-xtask"],
+            ),
             (
                 "clippy",
                 vec![
                     "clippy",
+                    "--locked",
                     "--package",
                     "nuraloumi-xtask",
                     "--all-targets",
@@ -97,12 +107,16 @@ fn cmd_check(root: &Path, args: &[String]) -> Result<(), String> {
     } else {
         vec![
             ("fmt", vec!["fmt", "--all", "--", "--check"]),
-            ("check", vec!["check", "--workspace", "--all-targets"]),
-            ("test", vec!["test", "--workspace"]),
+            (
+                "check",
+                vec!["check", "--locked", "--workspace", "--all-targets"],
+            ),
+            ("test", vec!["test", "--locked", "--workspace"]),
             (
                 "clippy",
                 vec![
                     "clippy",
+                    "--locked",
                     "--workspace",
                     "--all-targets",
                     "--",
@@ -139,7 +153,7 @@ fn cmd_build_release(root: &Path, args: &[String]) -> Result<(), String> {
         return Ok(());
     }
     let target = option_value(args, "--target")?;
-    let mut cargo_args = vec!["build", "--release", "--workspace", "--bins"];
+    let mut cargo_args = vec!["build", "--locked", "--release", "--workspace", "--bins"];
     if let Some(target) = target.as_deref() {
         cargo_args.push("--target");
         cargo_args.push(target);
@@ -185,7 +199,7 @@ fn cmd_deps(root: &Path, args: &[String]) -> Result<(), String> {
     for package in RUNTIME_PACKAGES {
         let output = run_capture(
             "cargo",
-            &["tree", "-p", package, "--edges", "normal,build"],
+            &["tree", "--locked", "-p", package, "--edges", "normal,build"],
             root,
         )?;
         if !output.status.success() {
