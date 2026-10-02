@@ -26,6 +26,8 @@ use std::env;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+const PANEL_MENU_GAP: u32 = 6;
+
 const HELP: &str = r#"nuraloumi-panel — NuraLoumi top panel
 
 USAGE:
@@ -81,6 +83,18 @@ struct LiveMenu {
 struct LivePolicy {
     execute_provider_actions: bool,
     enable_power_actions: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PanelTarget {
+    family: MenuFamily,
+    focus_search: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct PanelSearchView {
+    query: String,
+    focused: bool,
 }
 
 fn main() -> ExitCode {
@@ -161,7 +175,7 @@ fn run_headless(
         mode: "headless",
         config,
         panel,
-        affordances: panel_affordances(&snapshot),
+        affordances: live_panel_affordances(&snapshot, &PanelSearchView::default()),
         active_menu,
     };
     println!(
@@ -203,10 +217,6 @@ fn run_live(
         .map_err(|error| format!("failed to create panel surface: {error}"))?;
 
     let renderer = CairoRenderer::default();
-    let render_theme = RenderTheme::from(match config.theme {
-        ShellTheme::Dark => &DARK_THEME,
-        ShellTheme::Light => &LIGHT_THEME,
-    });
     let mut panel = PanelController::default();
     let mut panel_geometry: Option<(u32, u32, i32)> = None;
     let mut panel_scene: Option<Scene> = None;
@@ -240,13 +250,14 @@ fn run_live(
                         scale,
                     } => {
                         panel_geometry = Some((width, height, scale));
+                        let search = panel_search_view(active_menu.as_ref());
                         panel_scene = Some(render_panel_and_present(
                             &mut backend,
                             panel_surface,
                             &renderer,
-                            &render_theme,
                             &snapshot,
                             &config,
+                            &search,
                             (width, height, scale),
                         )?);
                     }
@@ -261,17 +272,16 @@ fn run_live(
                             let pressed_id = panel_pointer_press.take();
                             if pressed_id.is_some() && pressed_id == hit {
                                 if let Some(id) = hit {
-                                    if let Some(family) = panel_family_for_id(&id) {
-                                        replace_live_menu(
-                                            &mut backend,
-                                            &config,
-                                            &snapshot,
-                                            output.as_ref(),
-                                            &mut panel,
-                                            &mut active_menu,
-                                            family,
-                                        )?;
-                                    }
+                                    activate_panel_target(
+                                        &mut backend,
+                                        &config,
+                                        &snapshot,
+                                        output.as_ref(),
+                                        &mut panel,
+                                        &mut active_menu,
+                                        &id,
+                                    )?;
+                                    panel_scene = None;
                                 }
                             }
                         }
@@ -285,17 +295,16 @@ fn run_live(
                     }
                     WaylandEvent::TouchUp { id } => {
                         if let Some(Some(item_id)) = panel_touch_press.remove(&id) {
-                            if let Some(family) = panel_family_for_id(&item_id) {
-                                replace_live_menu(
-                                    &mut backend,
-                                    &config,
-                                    &snapshot,
-                                    output.as_ref(),
-                                    &mut panel,
-                                    &mut active_menu,
-                                    family,
-                                )?;
-                            }
+                            activate_panel_target(
+                                &mut backend,
+                                &config,
+                                &snapshot,
+                                output.as_ref(),
+                                &mut panel,
+                                &mut active_menu,
+                                &item_id,
+                            )?;
+                            panel_scene = None;
                         }
                     }
                     WaylandEvent::TouchCancel { ids } => {
@@ -400,6 +409,12 @@ fn run_live(
             }
 
             if let Some(action_report) = report {
+                if matches!(
+                    &action_report,
+                    nuraloumi_shell::ActionReport::SearchChanged { .. }
+                ) {
+                    panel_scene = None;
+                }
                 eprintln!(
                     "nuraloumi-panel-action: {}",
                     serde_json::to_string(&action_report)
@@ -461,12 +476,17 @@ fn run_live(
 
             if let Some(family) = switch_family {
                 menu.family = family;
+                if family != MenuFamily::Launcher && menu.shell.search_focused {
+                    let _ = menu.shell.focus_search(false);
+                }
                 menu.shell.refresh_menu(build_family(family, &snapshot))?;
+                panel_scene = None;
                 redraw = true;
             }
 
             if close {
                 close_live_menu(&mut backend, &mut panel, &mut active_menu)?;
+                panel_scene = None;
                 continue;
             }
 
@@ -486,13 +506,14 @@ fn run_live(
 
         if panel_scene.is_none() {
             if let Some(geometry) = panel_geometry {
+                let search = panel_search_view(active_menu.as_ref());
                 panel_scene = Some(render_panel_and_present(
                     &mut backend,
                     panel_surface,
                     &renderer,
-                    &render_theme,
                     &snapshot,
                     &config,
+                    &search,
                     geometry,
                 )?);
             }
@@ -522,18 +543,24 @@ fn open_live_menu(
         })
         .map(|height| {
             height
-                .saturating_sub(config.panel_height.saturating_add(16))
+                .saturating_sub(
+                    config
+                        .panel_height
+                        .saturating_add(PANEL_MENU_GAP)
+                        .saturating_add(16),
+                )
                 .clamp(240, 720)
         })
         .unwrap_or(640);
 
+    let panel_menu_offset = config.panel_height.saturating_add(PANEL_MENU_GAP);
     let margin_top = if config.panel_edge == ShellPanelEdge::Top {
-        config.panel_height as i32
+        panel_menu_offset as i32
     } else {
         0
     };
     let margin_left = if config.panel_edge == ShellPanelEdge::Left {
-        config.panel_height as i32
+        panel_menu_offset as i32
     } else {
         0
     };
@@ -556,6 +583,35 @@ fn open_live_menu(
         scene: None,
         touch_regions: BTreeMap::new(),
     })
+}
+
+fn activate_panel_target(
+    backend: &mut WaylandBackend,
+    config: &ShellConfig,
+    snapshot: &FixtureSnapshot,
+    output: Option<&nuraloumi_wayland::OutputInfo>,
+    panel: &mut PanelController,
+    active_menu: &mut Option<LiveMenu>,
+    item_id: &str,
+) -> Result<(), String> {
+    let Some(target) = panel_target_for_id(item_id) else {
+        return Ok(());
+    };
+    replace_live_menu(
+        backend,
+        config,
+        snapshot,
+        output,
+        panel,
+        active_menu,
+        target.family,
+    )?;
+    if target.focus_search {
+        if let Some(menu) = active_menu.as_mut() {
+            let _ = menu.shell.focus_search(true);
+        }
+    }
+    Ok(())
 }
 
 fn replace_live_menu(
@@ -595,12 +651,16 @@ fn render_panel_and_present(
     backend: &mut WaylandBackend,
     surface: SurfaceId,
     renderer: &CairoRenderer,
-    theme: &RenderTheme,
     snapshot: &FixtureSnapshot,
     config: &ShellConfig,
+    search: &PanelSearchView,
     geometry: (u32, u32, i32),
 ) -> Result<Scene, String> {
-    let scene = build_panel_scene(snapshot, config, geometry, *theme);
+    let theme = RenderTheme::from(match config.theme {
+        ShellTheme::Dark => &DARK_THEME,
+        ShellTheme::Light => &LIGHT_THEME,
+    });
+    let scene = build_panel_scene(snapshot, config, search, geometry, theme);
     present_scene(backend, surface, renderer, &scene)?;
     Ok(scene)
 }
@@ -681,6 +741,7 @@ fn present_buffer(
 fn build_panel_scene(
     snapshot: &FixtureSnapshot,
     config: &ShellConfig,
+    search: &PanelSearchView,
     geometry: (u32, u32, i32),
     theme: RenderTheme,
 ) -> Scene {
@@ -691,17 +752,12 @@ fn build_panel_scene(
         f64::from(scale.max(1)),
     );
     let panel_rect = viewport.logical_rect();
-    let affordances = panel_affordances(snapshot);
+    let affordances = live_panel_affordances(snapshot, search);
     let horizontal = matches!(
         config.panel_edge,
         ShellPanelEdge::Top | ShellPanelEdge::Bottom
     );
-    let count = affordances.len().max(1) as f64;
-    let segment_extent = if horizontal {
-        panel_rect.width / count
-    } else {
-        panel_rect.height / count
-    };
+    let slot_rects = panel_affordance_rects(panel_rect, horizontal, &affordances);
 
     let mut paint = vec![PaintNode::FillRect {
         rect: panel_rect,
@@ -709,32 +765,68 @@ fn build_panel_scene(
     }];
     let mut hits = Vec::with_capacity(affordances.len());
 
-    for (index, affordance) in affordances.iter().enumerate() {
+    for (index, (affordance, rect)) in affordances.iter().zip(slot_rects.into_iter()).enumerate() {
         let index = index as f64;
-        let rect = if horizontal {
-            Rect::new(
-                panel_rect.x + index * segment_extent,
-                panel_rect.y,
-                segment_extent,
-                panel_rect.height,
-            )
-        } else {
-            Rect::new(
-                panel_rect.x,
-                panel_rect.y + index * segment_extent,
-                panel_rect.width,
-                segment_extent,
-            )
-        };
+        if affordance.id == "search" {
+            let field = Rect::new(
+                rect.x,
+                rect.y + 5.0,
+                rect.width,
+                (rect.height - 10.0).max(1.0),
+            );
+            paint.push(PaintNode::RoundedRect {
+                rect: field,
+                radius: 8.0,
+                fill: nuraloumi_render_cairo::Fill::Solid(theme.card),
+                stroke: Some((
+                    if search.focused {
+                        theme.accent
+                    } else {
+                        theme.border
+                    },
+                    1.0,
+                )),
+            });
+            let text = if search.query.is_empty() {
+                "Search…".to_owned()
+            } else {
+                truncate_chars(
+                    &search.query,
+                    ((field.width - 28.0) / 7.0).max(3.0) as usize,
+                )
+            };
+            paint.push(PaintNode::Text {
+                origin: Point::new(field.x + 14.0, field.y + field.height / 2.0 + 4.0),
+                text,
+                style: TextStyle {
+                    size: 12.0,
+                    bold: false,
+                },
+                color: if search.query.is_empty() && !search.focused {
+                    theme.hint
+                } else {
+                    theme.primary_text
+                },
+            });
+            hits.push(RenderHitRegion {
+                item_id: affordance.id.clone(),
+                rect,
+                actionable: true,
+                enabled: true,
+                kind: RowKind::Action,
+            });
+            continue;
+        }
+
         let marker_color = state_color(affordance.state, theme);
         let marker = if horizontal {
-            Rect::new(rect.x + 8.0, rect.y + rect.height / 2.0 - 3.0, 6.0, 6.0)
+            Rect::new(rect.x + 8.0, rect.y + rect.height / 2.0 - 2.5, 5.0, 5.0)
         } else {
-            Rect::new(rect.x + 6.0, rect.y + 8.0, 6.0, 6.0)
+            Rect::new(rect.x + 6.0, rect.y + 8.0, 5.0, 5.0)
         };
         paint.push(PaintNode::RoundedRect {
             rect: marker,
-            radius: 3.0,
+            radius: 2.5,
             fill: nuraloumi_render_cairo::Fill::Solid(marker_color),
             stroke: None,
         });
@@ -746,7 +838,7 @@ fn build_panel_scene(
         };
         let label = panel_text(affordance, available);
         let baseline = if horizontal {
-            rect.y + rect.height / 2.0 + 5.0
+            rect.y + rect.height / 2.0 + 4.5
         } else {
             rect.y + rect.height / 2.0 + 4.0
         };
@@ -754,7 +846,7 @@ fn build_panel_scene(
             origin: Point::new(rect.x + 20.0, baseline),
             text: label,
             style: TextStyle {
-                size: if horizontal { 13.0 } else { 12.0 },
+                size: 12.0,
                 bold: affordance.id == "apps",
             },
             color: if affordance.state == ValueState::Unavailable {
@@ -833,6 +925,125 @@ fn build_panel_scene(
     }
 }
 
+fn live_panel_affordances(
+    snapshot: &FixtureSnapshot,
+    search: &PanelSearchView,
+) -> Vec<PanelAffordance> {
+    let mut affordances = panel_affordances(snapshot);
+    let search_index = affordances
+        .iter()
+        .position(|item| item.id == "network")
+        .map(|index| index + 1)
+        .unwrap_or(affordances.len());
+    affordances.insert(
+        search_index,
+        PanelAffordance {
+            id: "search".into(),
+            label: "Search".into(),
+            value: (!search.query.is_empty()).then(|| search.query.clone()),
+            state: ValueState::Ready,
+        },
+    );
+    affordances
+}
+
+fn panel_affordance_rects(
+    panel_rect: Rect,
+    horizontal: bool,
+    affordances: &[PanelAffordance],
+) -> Vec<Rect> {
+    if affordances.is_empty() {
+        return Vec::new();
+    }
+
+    if !horizontal {
+        let extent = panel_rect.height / affordances.len() as f64;
+        return (0..affordances.len())
+            .map(|index| {
+                Rect::new(
+                    panel_rect.x,
+                    panel_rect.y + index as f64 * extent,
+                    panel_rect.width,
+                    extent,
+                )
+            })
+            .collect();
+    }
+
+    fn width_for(id: &str) -> Option<f64> {
+        match id {
+            "apps" => Some(96.0),
+            "network" => Some(310.0),
+            "audio" => Some(140.0),
+            "battery" => Some(180.0),
+            "clock" => Some(118.0),
+            _ => None,
+        }
+    }
+
+    let known = affordances
+        .iter()
+        .all(|item| item.id == "search" || width_for(&item.id).is_some());
+    let left_total: f64 = affordances
+        .iter()
+        .filter(|item| matches!(item.id.as_str(), "apps" | "network"))
+        .filter_map(|item| width_for(&item.id))
+        .sum();
+    let right_total: f64 = affordances
+        .iter()
+        .filter(|item| matches!(item.id.as_str(), "audio" | "battery" | "clock"))
+        .filter_map(|item| width_for(&item.id))
+        .sum();
+    let center_available = panel_rect.width - left_total - right_total;
+    if !known || center_available < 272.0 {
+        let extent = panel_rect.width / affordances.len() as f64;
+        return (0..affordances.len())
+            .map(|index| {
+                Rect::new(
+                    panel_rect.x + index as f64 * extent,
+                    panel_rect.y,
+                    extent,
+                    panel_rect.height,
+                )
+            })
+            .collect();
+    }
+
+    let search_width = (center_available - 32.0).clamp(240.0, 360.0);
+    let search_x = panel_rect.x + left_total + (center_available - search_width) / 2.0;
+    let mut left_x = panel_rect.x;
+    let mut right_x = panel_rect.right() - right_total;
+
+    affordances
+        .iter()
+        .map(|item| match item.id.as_str() {
+            "apps" | "network" => {
+                let width = width_for(&item.id).expect("known left panel affordance");
+                let rect = Rect::new(left_x, panel_rect.y, width, panel_rect.height);
+                left_x += width;
+                rect
+            }
+            "search" => Rect::new(search_x, panel_rect.y, search_width, panel_rect.height),
+            _ => {
+                let width = width_for(&item.id).expect("known right panel affordance");
+                let rect = Rect::new(right_x, panel_rect.y, width, panel_rect.height);
+                right_x += width;
+                rect
+            }
+        })
+        .collect()
+}
+
+fn panel_search_view(active_menu: Option<&LiveMenu>) -> PanelSearchView {
+    active_menu
+        .filter(|menu| menu.family == MenuFamily::Launcher)
+        .map(|menu| PanelSearchView {
+            query: menu.shell.state.query.clone(),
+            focused: menu.shell.search_focused,
+        })
+        .unwrap_or_default()
+}
+
 fn panel_text(affordance: &PanelAffordance, available_width: f64) -> String {
     let raw = match affordance.value.as_deref() {
         Some(value) if !value.is_empty() => format!("{} · {value}", affordance.label),
@@ -864,14 +1075,19 @@ fn state_color(state: ValueState, theme: RenderTheme) -> Color {
     }
 }
 
-fn panel_family_for_id(id: &str) -> Option<MenuFamily> {
-    match id {
-        "apps" => Some(MenuFamily::Launcher),
-        "network" => Some(MenuFamily::Network),
-        "audio" => Some(MenuFamily::Audio),
-        "battery" | "clock" => Some(MenuFamily::System),
-        _ => None,
-    }
+fn panel_target_for_id(id: &str) -> Option<PanelTarget> {
+    let (family, focus_search) = match id {
+        "apps" => (MenuFamily::Launcher, false),
+        "network" => (MenuFamily::Network, false),
+        "search" => (MenuFamily::Launcher, true),
+        "audio" => (MenuFamily::Audio, false),
+        "battery" | "clock" => (MenuFamily::System, false),
+        _ => return None,
+    };
+    Some(PanelTarget {
+        family,
+        focus_search,
+    })
 }
 
 fn wayland_panel_edge(edge: ShellPanelEdge) -> WaylandPanelEdge {
@@ -1142,28 +1358,109 @@ mod tests {
     use super::*;
 
     #[test]
-    fn panel_family_mapping_is_stable() {
-        assert_eq!(panel_family_for_id("apps"), Some(MenuFamily::Launcher));
-        assert_eq!(panel_family_for_id("network"), Some(MenuFamily::Network));
-        assert_eq!(panel_family_for_id("audio"), Some(MenuFamily::Audio));
-        assert_eq!(panel_family_for_id("battery"), Some(MenuFamily::System));
-        assert_eq!(panel_family_for_id("clock"), Some(MenuFamily::System));
+    fn panel_target_mapping_is_stable_and_search_requests_focus() {
+        assert_eq!(
+            panel_target_for_id("apps"),
+            Some(PanelTarget {
+                family: MenuFamily::Launcher,
+                focus_search: false,
+            })
+        );
+        assert_eq!(
+            panel_target_for_id("network"),
+            Some(PanelTarget {
+                family: MenuFamily::Network,
+                focus_search: false,
+            })
+        );
+        assert_eq!(
+            panel_target_for_id("search"),
+            Some(PanelTarget {
+                family: MenuFamily::Launcher,
+                focus_search: true,
+            })
+        );
+        assert_eq!(
+            panel_target_for_id("audio"),
+            Some(PanelTarget {
+                family: MenuFamily::Audio,
+                focus_search: false,
+            })
+        );
+        assert_eq!(
+            panel_target_for_id("battery"),
+            Some(PanelTarget {
+                family: MenuFamily::System,
+                focus_search: false,
+            })
+        );
     }
 
     #[test]
     fn panel_scene_has_one_hit_per_affordance() {
         let snapshot = FixtureSnapshot::default();
         let config = ShellConfig::default();
+        let search = PanelSearchView::default();
         let scene = build_panel_scene(
             &snapshot,
             &config,
+            &search,
             (1366, config.panel_height, 1),
             RenderTheme::dark(),
         );
-        assert_eq!(scene.hits.len(), panel_affordances(&snapshot).len());
+        assert_eq!(scene.hits.len(), panel_affordances(&snapshot).len() + 1);
         assert!(scene.hits.iter().all(|hit| hit.actionable && hit.enabled));
         assert_eq!(scene.panel_rect.width, 1366.0);
         assert_eq!(scene.panel_rect.height, f64::from(config.panel_height));
+
+        let apps = scene.hits.iter().find(|hit| hit.item_id == "apps").unwrap();
+        let network = scene
+            .hits
+            .iter()
+            .find(|hit| hit.item_id == "network")
+            .unwrap();
+        let search = scene
+            .hits
+            .iter()
+            .find(|hit| hit.item_id == "search")
+            .unwrap();
+        let audio = scene
+            .hits
+            .iter()
+            .find(|hit| hit.item_id == "audio")
+            .unwrap();
+        let clock = scene
+            .hits
+            .iter()
+            .find(|hit| hit.item_id == "clock")
+            .unwrap();
+        assert_eq!(apps.rect.width, 96.0);
+        assert_eq!(network.rect.width, 310.0);
+        assert_eq!(search.rect.width, 360.0);
+        assert!(network.rect.right() < search.rect.x);
+        assert!(search.rect.right() < audio.rect.x);
+        assert_eq!(clock.rect.right(), scene.panel_rect.right());
+    }
+
+    #[test]
+    fn focused_search_query_is_rendered_in_top_bar() {
+        let snapshot = FixtureSnapshot::default();
+        let config = ShellConfig::default();
+        let search = PanelSearchView {
+            query: "term".into(),
+            focused: true,
+        };
+        let scene = build_panel_scene(
+            &snapshot,
+            &config,
+            &search,
+            (1280, config.panel_height, 1),
+            RenderTheme::dark(),
+        );
+        assert!(scene.paint.iter().any(|node| matches!(
+            node,
+            PaintNode::Text { text, .. } if text == "term"
+        )));
     }
 
     #[test]
