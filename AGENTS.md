@@ -26,6 +26,16 @@ Core design:
 - Preserve unrelated work. Use ws-bridge claims/transactions in concurrent work.
 - Before handoff run the narrow crate tests, then cargo test --workspace and cargo clippy --workspace --all-targets -- -D warnings when practical.
 
+## SL101 power-state safety
+
+- Never run unattended `rtcwake -m mem`, force `mem/deep` through `/sys/power/state`, or use `loginctl -i` / `--ignore-inhibitors` on the SL101.
+- Do not treat RTC wake as proof of successful resume. Display, input, EC, SDIO/Wi-Fi, compositor, providers, and network recovery must all be checked.
+- Real suspend qualification requires a human physically present with a recovery path and an exact recorded kernel + DTB identity.
+- Use the inhibitor-aware `loginctl` path. Start with dry-run, then shallow `freeze`; deep suspend is a separately authorized experiment only after shallow resume passes.
+- If SSH is the only recovery/control path, do not issue a real suspend.
+- NuraLoumi suspend must remain dry-run unless the separate unsafe-suspend capability is explicitly enabled; ordinary reboot/poweroff enablement is not sufficient.
+- Read `docs/qualification/SL101-BOOT-SUSPEND-20261002.md` before any SL101 sleep-state work.
+
 ## Performance budget
 
 Target device class: dual-core Tegra20, ~1 GiB RAM, ARMv7 without NEON.

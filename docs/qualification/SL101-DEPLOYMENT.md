@@ -102,6 +102,19 @@ For 100 open/close cycles, use the final shell's documented non-destructive
 open/close command or input harness after it lands. Record pre/post RSS and
 labwc PID; do not substitute 100 process crashes/restarts for menu lifecycle.
 
-For suspend/resume, keep SSH recovery available where possible, record panel
-PID/RSS before suspend, resume physically, then verify input, surface recovery,
-and whether the process survived or restarted cleanly.
+For suspend/resume, **do not** use unattended `rtcwake -m mem`, direct
+`/sys/power/state` writes, or inhibitor-bypass flags. The safe progression is:
+
+1. record the exact kernel, boot-image/DTB identity, labwc/panel PID/RSS, network
+   state and available physical recovery path;
+2. run `loginctl --dry-run suspend`;
+3. with a human present, constrain elogind to shallow `freeze` and request
+   suspend through `loginctl` so inhibitors remain active;
+4. after physical wake, verify display, touch, slider keyboard, labwc/panel,
+   provider refresh, menu lifecycle and Wi-Fi/network recovery;
+5. only after shallow recovery passes may a separately authorized,
+   human-present `mem/deep` experiment be considered.
+
+If SSH is the only recovery path, stop before step 3. RTC wake alone is not a
+resume PASS. See `SL101-BOOT-SUSPEND-20261002.md` for the failed deep-suspend
+incident and its kernel/DTB boundary.
