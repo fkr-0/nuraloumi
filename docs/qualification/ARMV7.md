@@ -35,13 +35,16 @@ A cross compiler result must never be reported as device qualification.
 
 ## Reproducible SL101 cross build
 
-The repository can derive a minimal link sysroot from the actual tablet without
+The repository can derive a link sysroot from the actual tablet without
 installing a compiler or headers on it. The generated sysroot stays under
 `target/sl101-cross` and is never committed. The preparation step uses
 `apk fetch` only, extracting the tablet-matched `musl-dev`, `gcc`, and
 `libgcc-static` packages into the generated sysroot alongside the live loader,
-Cairo, Wayland and libgcc_s runtime libraries. Dynamic PIEs therefore use musl's
-matching `Scrt1.o/crti.o/crtn.o` and GCC's `crtbeginS.o/crtendS.o/libgcc.a`.
+Cairo, Wayland and libgcc_s runtime libraries. It also stages the exact live
+FreeType, HarfBuzz and FriBidi DSOs used by the strict packaged-font renderer,
+including SONAME/unversioned linker aliases and target pkg-config metadata.
+Dynamic PIEs therefore use musl's matching `Scrt1.o/crti.o/crtn.o` and GCC's
+`crtbeginS.o/crtendS.o/libgcc.a`.
 Do not substitute Rust's bundled musl CRT: on the SL101 that mix corrupted DSO TLS
 and crashed pixman/font paths after `__tls_get_addr`.
 
@@ -50,6 +53,7 @@ and crashed pixman/font paths after `__tls_get_addr`.
     scripts/build-sl101-armv7.sh
     cargo xtask qualify-armv7 --cross-check
     scripts/smoke-sl101-armv7.sh root@192.168.23.106
+    scripts/smoke-sl101-strict-font.sh /path/to/coverage-font.ttf root@192.168.23.106
 
 `build-sl101-armv7.sh --prepare` combines the first two project-specific
 steps. The linker wrapper uses Clang/LLD as an ARMv7 hard-float driver with
@@ -67,6 +71,31 @@ misdecode data as NEON instructions. Mapping symbols do not affect runtime RSS.
 The device smoke is copy-only: binaries are copied to `/tmp`, hashes are
 checked, `--help` is executed to catch loader/SIGILL failures, and the files
 are removed. It does not alter services, packages, boot state or the desktop.
+
+The strict-font smoke is also copy-only. It builds the
+`render_strict_font` example with the exact-file `packaged-font` backend,
+audits the ARMv7 ELF, copies the binary and a caller-selected font temporarily
+to `/tmp`, renders mixed LTR/RTL text on the tablet, copies the PNG back to
+`target/sl101-evidence/strict-font.png`, verifies remote/local hashes, and
+removes all remote evidence files. The selected font must cover the sample
+`abc سلام 42`. Missing coverage is expected to fail closed rather than invoke
+font fallback.
+
+### Strict packaged-font live evidence
+
+The 2026-10-02 SL101 run from a freshly regenerated sysroot passed:
+
+    ELF_FILE=PASS arm32=yes fp=VFPv3-D16 neon-attribute=no \
+        neon-disassembly-heuristic=no upper-dregs=no hwdiv=no
+    SL101_STRICT_FONT=PASS target=root@192.168.23.106 arch=armv7l
+
+The exact tablet runtimes recorded by the prepare step were FreeType 2.14.3,
+HarfBuzz 14.2.1 and FriBidi 1.0.16. The evidence renderer resolved the mixed
+sample into three visual runs (LTR Latin, level-2 LTR digits, RTL Arabic) and
+produced a 480x720 RGB PNG with SHA-256
+`107b20ddc390adcb92b7af39e6f6533b862614e473d3ce63cb33a1ae2499ff2e`.
+The test font was copied temporarily and removed; it is not part of the
+repository or generated package.
 
 After a real cross release exists:
 

@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 TARGET=armv7-unknown-linux-musleabihf
 CROSS_ROOT=${NURALOUMI_SL101_CROSS_ROOT:-"$ROOT/target/sl101-cross"}
 SYSROOT=${NURALOUMI_SL101_SYSROOT:-"$CROSS_ROOT/sysroot"}
@@ -46,10 +46,16 @@ for required in \
     "$SYSROOT/lib/ld-musl-armhf.so.1" \
     "$SYSROOT/usr/lib/libcairo.so" \
     "$SYSROOT/usr/lib/libgcc_s.so" \
+    "$SYSROOT/usr/lib/libfreetype.so" \
+    "$SYSROOT/usr/lib/libharfbuzz.so" \
+    "$SYSROOT/usr/lib/libfribidi.so" \
     "$SYSROOT/usr/lib/Scrt1.o" \
     "$SYSROOT/usr/lib/crti.o" \
     "$SYSROOT/usr/lib/crtn.o" \
-    "$PKGCONFIG/cairo.pc"; do
+    "$PKGCONFIG/cairo.pc" \
+    "$PKGCONFIG/freetype2.pc" \
+    "$PKGCONFIG/harfbuzz.pc" \
+    "$PKGCONFIG/fribidi.pc"; do
     if [ ! -e "$required" ]; then
         echo "SL101_CROSS_BUILD=PENDING reason=sysroot-not-prepared missing=$required" >&2
         echo "run scripts/build-sl101-armv7.sh --prepare" >&2
