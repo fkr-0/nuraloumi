@@ -239,13 +239,18 @@ impl ExactFace {
         if !style.size.is_finite() || style.size <= 0.0 {
             return Err(PackagedFontError::InvalidSize(style.size));
         }
-        let fixed = (style.size * 64.0).round();
-        if fixed > c_long::MAX as f64 {
+        // `f64::round()` may lower to a target libm helper. The SL101's
+        // ARMv7/VFPv3-D16 runtime has been observed executing that helper with
+        // d16+ registers, which SIGILLs on Tegra20. Text sizes are strictly
+        // positive here, so half-up rounding is equivalent and stays inline.
+        let fixed = style.size * 64.0;
+        if !fixed.is_finite() || fixed > (c_long::MAX as f64 - 0.5) {
             return Err(PackagedFontError::InvalidSize(style.size));
         }
+        let fixed = (fixed + 0.5) as c_long;
         // 72 dpi makes one point equal one logical pixel for this renderer.
         // SAFETY: the exact FT_Face is live for this borrow.
-        let code = unsafe { FT_Set_Char_Size(self.owner.face, 0, fixed as c_long, 72, 72) };
+        let code = unsafe { FT_Set_Char_Size(self.owner.face, 0, fixed, 72, 72) };
         if code != 0 {
             return Err(PackagedFontError::FreeType {
                 operation: "FT_Set_Char_Size",
