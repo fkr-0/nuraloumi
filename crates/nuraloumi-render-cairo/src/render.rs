@@ -101,11 +101,21 @@ impl DeterministicText {
         } else if matches!(ch, '@' | '%' | '#' | '&') {
             0.72
         } else if ch.is_ascii_uppercase() {
-            0.63
+            match ch {
+                'I' => 0.30,
+                'J' => 0.48,
+                'M' | 'W' => 0.78,
+                _ => 0.61,
+            }
         } else if ch.is_ascii_lowercase() {
-            0.55
+            match ch {
+                'i' | 'l' => 0.27,
+                'f' | 'j' | 'r' | 't' => 0.38,
+                'm' | 'w' => 0.76,
+                _ => 0.52,
+            }
         } else if ch.is_ascii_digit() {
-            0.56
+            0.54
         } else if is_wide(ch) {
             1.0
         } else {

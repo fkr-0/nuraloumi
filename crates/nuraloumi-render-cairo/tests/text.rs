@@ -30,9 +30,31 @@ fn punctuation_ascii_classes_and_bold_have_stable_relative_widths() {
         DeterministicText::advance_for_char('a', normal)
             < DeterministicText::advance_for_char('A', normal)
     );
+    assert!(
+        DeterministicText::advance_for_char('i', normal)
+            < DeterministicText::advance_for_char('a', normal)
+    );
+    assert!(
+        DeterministicText::advance_for_char('a', normal)
+            < DeterministicText::advance_for_char('m', normal)
+    );
+    assert!(
+        DeterministicText::advance_for_char('I', normal)
+            < DeterministicText::advance_for_char('M', normal)
+    );
     let normal_width = DeterministicText.measure("Menu", normal).width;
     let bold_width = DeterministicText.measure("Menu", bold).width;
-    assert_eq!(bold_width, normal_width * 1.04);
+    assert!((bold_width - normal_width * 1.04).abs() < 1.0e-9);
+}
+
+#[test]
+fn narrow_latin_runs_do_not_look_monospaced() {
+    let normal = style(16.0, false);
+    let narrow = DeterministicText.measure("illt", normal).width;
+    let ordinary = DeterministicText.measure("aceo", normal).width;
+    let wide = DeterministicText.measure("mwww", normal).width;
+    assert!(narrow < ordinary);
+    assert!(ordinary < wide);
 }
 
 #[test]
@@ -64,7 +86,7 @@ fn cairo_draw_endpoint_matches_measured_width_even_under_context_scale() {
 
     let end = text.draw_to_cairo(&context, origin, run, style).unwrap();
     let measured = text.measure(run, style);
-    assert_eq!(end, origin.x + measured.width);
+    assert!((end - (origin.x + measured.width)).abs() < 1.0e-9);
 }
 
 #[test]

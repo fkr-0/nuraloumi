@@ -31,17 +31,19 @@ impl Default for LayoutMetrics {
 impl LayoutMetrics {
     pub fn from_core_metrics(metrics: &nuraloumi_core::UiMetrics) -> Self {
         Self {
-            outer_margin: f64::from(metrics.outer_padding),
-            content_insets: crate::Insets::all(f64::from(metrics.spacing.lg)),
-            header_height: 56.0,
-            primary_row_height: f64::from(metrics.hit_targets.primary_row),
-            compact_row_height: f64::from(metrics.hit_targets.compact_row),
-            separator_row_height: 20.0,
-            target_width: 480.0,
-            min_target_width: 420.0,
-            max_target_width: 520.0,
-            icon_size: f64::from(metrics.icons.medium),
-            icon_gap: f64::from(metrics.spacing.md),
+            // SL101 is a 1280x800 touch display: keep the 48px actionable
+            // contract while trimming non-interactive chrome and side padding.
+            outer_margin: 8.0,
+            content_insets: crate::Insets::all(f64::from(metrics.spacing.md)),
+            header_height: 48.0,
+            primary_row_height: 48.0,
+            compact_row_height: 32.0,
+            separator_row_height: 12.0,
+            target_width: 448.0,
+            min_target_width: 400.0,
+            max_target_width: 468.0,
+            icon_size: 18.0,
+            icon_gap: f64::from(metrics.spacing.sm),
         }
     }
 
@@ -79,7 +81,7 @@ fn text_origin_for_row(
         x += metrics.icon_size + metrics.icon_gap;
     }
     if has_subtitle {
-        (x, row.y + 20.0, row.y + 39.0)
+        (x, row.y + 17.0, row.y + 34.0)
     } else {
         (x, row.y + row.height / 2.0 + 5.0, 0.0)
     }
@@ -129,6 +131,7 @@ pub fn layout_menu<M: MenuSource, T: TextMeasurer>(
         clipped: content_height > body.height,
     };
 
+    let panel_radius = theme.panel_radius.min(10.0);
     let mut paint = Vec::with_capacity(menu.len() * 5 + 10);
     paint.push(PaintNode::FillRect {
         rect: viewport.logical_rect(),
@@ -138,13 +141,13 @@ pub fn layout_menu<M: MenuSource, T: TextMeasurer>(
     if !constrained {
         paint.push(PaintNode::RoundedRect {
             rect: Rect::new(panel.x + 2.0, panel.y + 4.0, panel.width, panel.height),
-            radius: theme.panel_radius + 1.0,
+            radius: panel_radius + 1.0,
             fill: Fill::Solid(Color::rgba(0, 0, 0, 72)),
             stroke: None,
         });
         paint.push(PaintNode::RoundedRect {
             rect: Rect::new(panel.x + 1.0, panel.y + 2.0, panel.width, panel.height),
-            radius: theme.panel_radius,
+            radius: panel_radius,
             fill: Fill::Solid(Color::rgba(0, 0, 0, 42)),
             stroke: None,
         });
@@ -166,7 +169,7 @@ pub fn layout_menu<M: MenuSource, T: TextMeasurer>(
     });
 
     let title_style = TextStyle {
-        size: 20.0,
+        size: 18.0,
         bold: true,
     };
     let title = text.ellipsize(
@@ -216,8 +219,8 @@ pub fn layout_menu<M: MenuSource, T: TextMeasurer>(
                 theme.card
             };
             paint.push(PaintNode::RoundedRect {
-                rect: Rect::new(row.x + 8.0, row.y + 3.0, row.width - 16.0, row.height - 6.0),
-                radius: 8.0,
+                rect: Rect::new(row.x + 6.0, row.y + 2.0, row.width - 12.0, row.height - 4.0),
+                radius: 7.0,
                 fill: Fill::Solid(fill),
                 stroke: selected.then_some((
                     Color::rgba(theme.accent.r, theme.accent.g, theme.accent.b, 92),
@@ -238,7 +241,7 @@ pub fn layout_menu<M: MenuSource, T: TextMeasurer>(
             }
             RowKind::Section => {
                 let style = TextStyle {
-                    size: 13.0,
+                    size: 12.0,
                     bold: true,
                 };
                 let label = text.ellipsize(
@@ -247,7 +250,7 @@ pub fn layout_menu<M: MenuSource, T: TextMeasurer>(
                     style,
                 );
                 paint.push(PaintNode::Text {
-                    origin: Point::new(row.x + metrics.content_insets.left, row.y + 25.0),
+                    origin: Point::new(row.x + metrics.content_insets.left, row.y + 21.0),
                     text: label,
                     style,
                     color: theme.accent,
@@ -255,11 +258,11 @@ pub fn layout_menu<M: MenuSource, T: TextMeasurer>(
             }
             RowKind::Status => {
                 let label_style = TextStyle {
-                    size: 14.0,
+                    size: 13.0,
                     bold: false,
                 };
                 let value_style = TextStyle {
-                    size: 13.0,
+                    size: 12.0,
                     bold: false,
                 };
                 let right = row.right() - metrics.content_insets.right;
@@ -277,14 +280,14 @@ pub fn layout_menu<M: MenuSource, T: TextMeasurer>(
                         .max(0.0);
                 let label = text.ellipsize(item.label, label_max, label_style);
                 paint.push(PaintNode::Text {
-                    origin: Point::new(label_x, row.y + 25.0),
+                    origin: Point::new(label_x, row.y + 21.0),
                     text: label,
                     style: label_style,
                     color: theme.secondary_text,
                 });
                 if let Some(value) = fitted_value {
                     paint.push(PaintNode::Text {
-                        origin: Point::new(right - value_width, row.y + 25.0),
+                        origin: Point::new(right - value_width, row.y + 21.0),
                         text: value,
                         style: value_style,
                         color: theme.hint,
@@ -358,7 +361,7 @@ pub fn layout_menu<M: MenuSource, T: TextMeasurer>(
                 };
                 let text_max_width = (label_right - text_x).max(0.0);
                 let title_style = TextStyle {
-                    size: 16.0,
+                    size: 15.0,
                     bold: selected,
                 };
                 let fitted_label = text.ellipsize(item.label, text_max_width, title_style);
@@ -375,7 +378,7 @@ pub fn layout_menu<M: MenuSource, T: TextMeasurer>(
                 });
                 if let Some(subtitle) = item.subtitle {
                     let subtitle_style = TextStyle {
-                        size: 12.0,
+                        size: 11.0,
                         bold: false,
                     };
                     let fitted_subtitle = text.ellipsize(subtitle, text_max_width, subtitle_style);

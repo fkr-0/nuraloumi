@@ -87,9 +87,22 @@ fn viewport_width_is_clamped_below_target_range() {
         &ToyText,
         true,
     );
-    assert_eq!(scene.panel_rect.x, 16.0);
-    assert_eq!(scene.panel_rect.width, 328.0);
+    assert_eq!(scene.panel_rect.x, 8.0);
+    assert_eq!(scene.panel_rect.width, 344.0);
     assert!(scene.panel_rect.right() <= 360.0);
+}
+
+#[test]
+fn normal_desktop_viewport_uses_compact_448_logical_menu_width() {
+    let scene = layout_menu(
+        &mixed_menu(),
+        &InteractionState::default(),
+        Viewport::new(800.0, 600.0, 1.0),
+        &Theme::dark(),
+        &ToyText,
+        false,
+    );
+    assert_eq!(scene.panel_rect.width, 448.0);
 }
 
 #[test]
