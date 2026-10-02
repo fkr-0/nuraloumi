@@ -1,3 +1,33 @@
-//! System provider snapshots and explicit actions.
+//! Linux system-state providers and explicit, validated actions.
+//!
+//! Snapshot calls are mutation-free. Any state change is represented by an
+//! explicit action and routed through a bounded backend.
 
-pub const CRATE_READY: bool = false;
+pub mod audio;
+pub mod backlight;
+pub mod battery;
+pub mod bluetooth;
+pub mod clock;
+pub mod command;
+pub mod common;
+pub mod error;
+pub mod network;
+pub mod probe;
+pub mod session;
+
+pub use audio::{AudioAction, AudioProvider, AudioSnapshot};
+pub use backlight::{BacklightAction, BacklightProvider, BacklightSnapshot};
+pub use battery::{BatteryProvider, BatterySnapshot};
+pub use bluetooth::{BluetoothAction, BluetoothDevice, BluetoothProvider, BluetoothSnapshot};
+pub use clock::{ClockProvider, ClockSnapshot};
+pub use command::{
+    CommandLimits, CommandOutput, CommandRunner, CommandSpec, FixtureCommandRunner,
+    SystemCommandRunner,
+};
+pub use common::{ActionProvider, ActionResult, Health, Provider, SnapshotMeta};
+pub use error::{ProviderError, ProviderErrorCategory};
+pub use network::{NetworkAction, NetworkProvider, NetworkSnapshot, WifiNetwork};
+pub use probe::ProbeSnapshot;
+pub use session::{SessionAction, SessionProvider, SessionSnapshot};
+
+pub const CRATE_READY: bool = true;
