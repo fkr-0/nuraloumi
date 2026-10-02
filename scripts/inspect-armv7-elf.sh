@@ -74,6 +74,11 @@ for elf in "$@"; do
         status=1
         continue
     fi
+    if ! printf '%s\n' "$attrs" | grep -Eq 'Tag_FP_arch:[[:space:]]+VFPv3-D16'; then
+        echo "ELF_FILE=FAIL path=$elf reason=not-VFPv3-D16"
+        status=1
+        continue
+    fi
 
     if [ -z "$OBJDUMP" ]; then
         echo "ELF_FILE=PENDING path=$elf arm32=yes neon-attribute=no reason=objdump-not-installed"
@@ -90,7 +95,17 @@ for elf in "$@"; do
         status=1
         continue
     fi
-    echo "ELF_FILE=PASS path=$elf arm32=yes neon-attribute=no neon-disassembly-heuristic=no"
+    if printf '%s\n' "$disasm" | grep -Eiq '[[:space:],{]d(1[6-9]|2[0-9]|3[01])([,}\\]]|[[:space:]])'; then
+        echo "ELF_FILE=FAIL path=$elf reason=upper-VFP-register-d16-d31-detected"
+        status=1
+        continue
+    fi
+    if printf '%s\n' "$disasm" | grep -Eiq '[[:space:]](sdiv|udiv)[[:space:]]'; then
+        echo "ELF_FILE=FAIL path=$elf reason=hardware-divide-opcode-detected"
+        status=1
+        continue
+    fi
+    echo "ELF_FILE=PASS path=$elf arm32=yes fp=VFPv3-D16 neon-attribute=no neon-disassembly-heuristic=no upper-dregs=no hwdiv=no"
 done
 
 exit "$status"

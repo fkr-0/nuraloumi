@@ -46,6 +46,9 @@ for required in \
     "$SYSROOT/lib/ld-musl-armhf.so.1" \
     "$SYSROOT/usr/lib/libcairo.so" \
     "$SYSROOT/usr/lib/libgcc_s.so" \
+    "$SYSROOT/usr/lib/Scrt1.o" \
+    "$SYSROOT/usr/lib/crti.o" \
+    "$SYSROOT/usr/lib/crtn.o" \
     "$PKGCONFIG/cairo.pc"; do
     if [ ! -e "$required" ]; then
         echo "SL101_CROSS_BUILD=PENDING reason=sysroot-not-prepared missing=$required" >&2
@@ -65,7 +68,7 @@ export PKG_CONFIG_ALLOW_CROSS=1
 export PKG_CONFIG_SYSROOT_DIR="$SYSROOT"
 export PKG_CONFIG_LIBDIR="$PKGCONFIG"
 export PKG_CONFIG_PATH="$PKGCONFIG"
-export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=-neon,-crt-static"
+export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=-neon,-d32,-hwdiv,-hwdiv-arm,-crt-static"
 # Keep ARM mapping symbols ($a/$t/$d) so llvm-objdump can distinguish ARM,
 # Thumb and inline data. Full symbol stripping makes no-NEON disassembly
 # heuristics produce false positives; stripping debug info does not affect RSS.

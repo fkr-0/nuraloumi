@@ -185,12 +185,13 @@ pub fn qualify_armv7(root: &Path, cross_check: bool) -> Result<(), String> {
     let config_text = fs::read_to_string(&config)
         .map_err(|error| format!("read {}: {error}", config.display()))?;
     if config_text.contains("[target.armv7-unknown-linux-musleabihf]")
-        && config_text.contains("target-feature=-neon")
+        && config_text.contains("target-feature=-neon,-d32,-hwdiv,-hwdiv-arm")
     {
         println!("NO_NEON_CONFIG=PASS");
+        println!("TEGRA20_CODEGEN_CONFIG=PASS vfp=VFPv3-D16 d32=off hwdiv=off");
     } else {
         return Err(format!(
-            "{} does not explicitly disable NEON for {}",
+            "{} must explicitly disable NEON, d32, hwdiv and hwdiv-arm for {}",
             config.display(),
             ARMV7_TARGET
         ));

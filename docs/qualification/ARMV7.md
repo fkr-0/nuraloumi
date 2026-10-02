@@ -5,11 +5,12 @@
 The current SL101 Nura bring-up evidence shows a musl userspace. The Rust target
 for Wave 1 is therefore armv7-unknown-linux-musleabihf, not a GNU/glibc target.
 
-Tegra20 is ARMv7 with hard-float support but no NEON. The repository target
-configuration disables neon explicitly and leaves target-cpu unspecified. The
-committed linker wrapper uses host Clang/LLD, while the target libc/Cairo ABI is
-always derived from a generated sysroot and therefore remains build-host/device
-evidence rather than a vendored binary toolchain.
+Tegra20 is ARMv7 with hard-float VFPv3-D16 support but no NEON. The repository
+target configuration disables NEON, the upper d16-d31 VFP register bank, and ARM
+hardware divide instructions. This is required by real-device evidence: disabling
+NEON alone still allowed LLVM to emit `vmov.f64 d17`, which SIGILLed on Tegra20.
+The committed linker wrapper uses host Clang/LLD, while libc/Cairo and the matching
+musl/GCC startup ABI are derived from the tablet's package repository and runtime.
 
 ## Evidence levels
 
@@ -36,9 +37,13 @@ A cross compiler result must never be reported as device qualification.
 
 The repository can derive a minimal link sysroot from the actual tablet without
 installing a compiler or headers on it. The generated sysroot stays under
-`target/sl101-cross` and is never committed. It contains only the target musl
-loader/libc ABI, libgcc_s, Cairo runtime library, Wayland runtime ABI reference,
-and generated pkg-config metadata. Rust supplies the ARMv7 musl CRT objects.
+`target/sl101-cross` and is never committed. The preparation step uses
+`apk fetch` only, extracting the tablet-matched `musl-dev`, `gcc`, and
+`libgcc-static` packages into the generated sysroot alongside the live loader,
+Cairo, Wayland and libgcc_s runtime libraries. Dynamic PIEs therefore use musl's
+matching `Scrt1.o/crti.o/crtn.o` and GCC's `crtbeginS.o/crtendS.o/libgcc.a`.
+Do not substitute Rust's bundled musl CRT: on the SL101 that mix corrupted DSO TLS
+and crashed pixman/font paths after `__tls_get_addr`.
 
     rustup target add armv7-unknown-linux-musleabihf
     scripts/prepare-sl101-sysroot.sh root@192.168.23.106
@@ -47,10 +52,10 @@ and generated pkg-config metadata. Rust supplies the ARMv7 musl CRT objects.
     scripts/smoke-sl101-armv7.sh root@192.168.23.106
 
 `build-sl101-armv7.sh --prepare` combines the first two project-specific
-steps. The linker wrapper uses Clang/LLD as an ARMv7 hard-float driver, Rust's
-self-contained musl CRT, and the generated target runtime sysroot. It forces
-VFPv3-D16 rather than NEON and dynamically links the shell against the tablet's
-Cairo ABI. The probe remains eligible for a fully static Rust-musl build, but
+steps. The linker wrapper uses Clang/LLD as an ARMv7 hard-float driver with
+the generated tablet-matched musl/GCC CRT and runtime sysroot. Rust codegen
+disables NEON, d32, hwdiv and hwdiv-arm; the linker forces VFPv3-D16 and
+dynamically links the shell against the tablet's Cairo ABI. The probe remains eligible for a fully static Rust-musl build, but
 the common build script deliberately uses the same dynamic musl policy for all
 three runtime binaries so one target ABI is qualified.
 

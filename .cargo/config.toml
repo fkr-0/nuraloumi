@@ -1,7 +1,18 @@
 [alias]
 xtask = "run -p nuraloumi-xtask --"
 
+[env]
+# cargo-sys crates use pkg-config during their build scripts. Keep these
+# target-scoped so normal host builds remain untouched while a raw
+# `cargo check --target armv7-unknown-linux-musleabihf` automatically uses
+# the generated SL101 sysroot prepared under target/sl101-cross.
+PKG_CONFIG_ALLOW_CROSS_armv7_unknown_linux_musleabihf = { value = "1", force = false }
+PKG_CONFIG_SYSROOT_DIR_armv7_unknown_linux_musleabihf = { value = "target/sl101-cross/sysroot", relative = true, force = false }
+PKG_CONFIG_LIBDIR_armv7_unknown_linux_musleabihf = { value = "target/sl101-cross/pkgconfig", relative = true, force = false }
+PKG_CONFIG_PATH_armv7_unknown_linux_musleabihf = { value = "target/sl101-cross/pkgconfig", relative = true, force = false }
+
 [target.armv7-unknown-linux-musleabihf]
-# Tegra20 is ARMv7 hard-float but has no NEON. Do not set a target-cpu here:
-# toolchain/linker selection remains an explicit qualification prerequisite.
-rustflags = ["-C", "target-feature=-neon"]
+# Tegra20 is ARMv7 hard-float VFPv3-D16: no NEON, no d16-d31 bank, and
+# no ARM hardware divide. Real-device qualification caught LLVM using d17 when
+# only NEON was disabled. Keep target-cpu unset; the linker/sysroot is explicit.
+rustflags = ["-C", "target-feature=-neon,-d32,-hwdiv,-hwdiv-arm"]
