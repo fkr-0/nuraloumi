@@ -1,0 +1,6 @@
+nmcli
+--terse
+--fields
+DEVICE,TYPE,STATE,CONNECTION
+device
+status

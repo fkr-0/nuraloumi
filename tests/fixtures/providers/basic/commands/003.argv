@@ -1,0 +1,9 @@
+nmcli
+--terse
+--fields
+IN-USE,SSID,SIGNAL,SECURITY
+device
+wifi
+list
+--rescan
+no
