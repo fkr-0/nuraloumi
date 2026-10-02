@@ -1,5 +1,5 @@
 use crate::package::{host_triple, release_dir, target_root};
-use crate::process::{command_available, run_capture, run_checked};
+use crate::process::{command_available, run_capture, run_capture_env, run_checked};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -219,19 +219,53 @@ pub fn qualify_armv7(root: &Path, cross_check: bool) -> Result<(), String> {
         if !target_installed {
             println!("CROSS_CHECK=PENDING reason=target-not-installed");
         } else {
-            let output = run_capture(
-                "cargo",
-                &["check", "--workspace", "--target", ARMV7_TARGET],
-                root,
-            )?;
-            if output.status.success() {
-                println!("CROSS_CHECK=PASS compiler-only-not-device-proof");
+            let cross_root = env::var_os("NURALOUMI_SL101_CROSS_ROOT")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| root.join("target/sl101-cross"));
+            let sysroot = env::var_os("NURALOUMI_SL101_SYSROOT")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| cross_root.join("sysroot"));
+            let pkgconfig = env::var_os("NURALOUMI_SL101_PKGCONFIG")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| cross_root.join("pkgconfig"));
+            let linker = root.join("scripts/armv7-sl101-linker.sh");
+            if !sysroot.join("lib/ld-musl-armhf.so.1").is_file()
+                || !pkgconfig.join("cairo.pc").is_file()
+                || !linker.is_file()
+            {
+                println!(
+                    "CROSS_CHECK=PENDING reason=sl101-sysroot-not-prepared hint=scripts/prepare-sl101-sysroot.sh"
+                );
             } else {
-                return Err(format!(
-                    "cross cargo check failed\nstdout:\n{}\nstderr:\n{}",
-                    output.stdout.trim_end(),
-                    output.stderr.trim_end()
-                ));
+                let sysroot_text = sysroot.to_string_lossy().into_owned();
+                let pkgconfig_text = pkgconfig.to_string_lossy().into_owned();
+                let linker_text = linker.to_string_lossy().into_owned();
+                let envs = [
+                    (
+                        "CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER",
+                        linker_text.as_str(),
+                    ),
+                    ("NURALOUMI_SL101_SYSROOT", sysroot_text.as_str()),
+                    ("PKG_CONFIG_ALLOW_CROSS", "1"),
+                    ("PKG_CONFIG_SYSROOT_DIR", sysroot_text.as_str()),
+                    ("PKG_CONFIG_LIBDIR", pkgconfig_text.as_str()),
+                    ("PKG_CONFIG_PATH", pkgconfig_text.as_str()),
+                ];
+                let output = run_capture_env(
+                    "cargo",
+                    &["check", "--workspace", "--target", ARMV7_TARGET],
+                    root,
+                    &envs,
+                )?;
+                if output.status.success() {
+                    println!("CROSS_CHECK=PASS compiler-only-not-device-proof");
+                } else {
+                    return Err(format!(
+                        "cross cargo check failed\nstdout:\n{}\nstderr:\n{}",
+                        output.stdout.trim_end(),
+                        output.stderr.trim_end()
+                    ));
+                }
             }
         }
     } else {
@@ -290,6 +324,9 @@ pub fn qualify_armv7(root: &Path, cross_check: bool) -> Result<(), String> {
 
 fn arm_musl_linkers(root: &Path) -> Result<Vec<String>, String> {
     let mut candidates = vec![
+        root.join("scripts/armv7-sl101-linker.sh")
+            .to_string_lossy()
+            .into_owned(),
         "armv7-unknown-linux-musleabihf-gcc".to_owned(),
         "arm-linux-musleabihf-gcc".to_owned(),
         "armv7-alpine-linux-musleabihf-gcc".to_owned(),

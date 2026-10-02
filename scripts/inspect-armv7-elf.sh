@@ -11,6 +11,29 @@ if ! command -v readelf >/dev/null 2>&1; then
     exit 2
 fi
 
+find_objdump() {
+    if command -v llvm-objdump >/dev/null 2>&1; then
+        command -v llvm-objdump
+        return 0
+    fi
+    if command -v rustc >/dev/null 2>&1; then
+        rust_sysroot=$(rustc --print sysroot 2>/dev/null || true)
+        rust_host=$(rustc -vV 2>/dev/null | sed -n 's/^host: //p')
+        rust_llvm_objdump="$rust_sysroot/lib/rustlib/$rust_host/bin/llvm-objdump"
+        if [ -x "$rust_llvm_objdump" ]; then
+            printf '%s\n' "$rust_llvm_objdump"
+            return 0
+        fi
+    fi
+    if command -v objdump >/dev/null 2>&1; then
+        command -v objdump
+        return 0
+    fi
+    return 1
+}
+
+OBJDUMP=$(find_objdump || true)
+
 status=0
 mark_pending() {
     if [ "$status" -eq 0 ]; then
@@ -52,13 +75,13 @@ for elf in "$@"; do
         continue
     fi
 
-    if ! command -v objdump >/dev/null 2>&1; then
+    if [ -z "$OBJDUMP" ]; then
         echo "ELF_FILE=PENDING path=$elf arm32=yes neon-attribute=no reason=objdump-not-installed"
         mark_pending
         continue
     fi
-    if ! disasm=$(objdump -d "$elf" 2>/dev/null); then
-        echo "ELF_FILE=PENDING path=$elf arm32=yes neon-attribute=no reason=objdump-disassembly-failed"
+    if ! disasm=$("$OBJDUMP" -d "$elf" 2>/dev/null); then
+        echo "ELF_FILE=PENDING path=$elf arm32=yes neon-attribute=no reason=objdump-disassembly-failed tool=$OBJDUMP"
         mark_pending
         continue
     fi

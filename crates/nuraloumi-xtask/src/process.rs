@@ -9,9 +9,21 @@ pub struct RunOutput {
 }
 
 pub fn run_capture(program: &str, args: &[&str], cwd: &Path) -> Result<RunOutput, String> {
-    let output = Command::new(program)
-        .args(args)
-        .current_dir(cwd)
+    run_capture_env(program, args, cwd, &[])
+}
+
+pub fn run_capture_env(
+    program: &str,
+    args: &[&str],
+    cwd: &Path,
+    envs: &[(&str, &str)],
+) -> Result<RunOutput, String> {
+    let mut command = Command::new(program);
+    command.args(args).current_dir(cwd);
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    let output = command
         .output()
         .map_err(|error| format!("failed to start {program}: {error}"))?;
 
