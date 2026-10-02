@@ -10,10 +10,16 @@ pub use nuraloumi_core::{
     Confirmation, MenuAction, MenuItem, MenuItemKind, MenuModel, MenuState, NavigationOutcome,
     SemanticInput,
 };
+
+mod window_adapter;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
+pub use window_adapter::{
+    execute_window_command, parse_window_command, window_entries, WindowCommand,
+    WindowControlCapabilities,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -46,9 +52,9 @@ impl Default for ShellConfig {
     fn default() -> Self {
         Self {
             panel_edge: PanelEdge::Top,
-            panel_height: 48,
-            menu_width: 480,
-            row_height: 52,
+            panel_height: 40,
+            menu_width: 448,
+            row_height: 48,
             theme: Theme::Dark,
             reduced_motion: false,
         }
@@ -137,27 +143,13 @@ impl ProviderValue {
     fn subtitle(&self) -> String {
         match self.state {
             ValueState::Ready => self.value.clone().unwrap_or_else(|| "Ready".into()),
-            ValueState::Unavailable => format!(
-                "Unavailable{}",
-                self.message
-                    .as_deref()
-                    .map(|message| format!(" — {message}"))
-                    .unwrap_or_default()
-            ),
-            ValueState::Stale => format!(
-                "Stale{}",
-                self.value
-                    .as_deref()
-                    .map(|value| format!(" — {value}"))
-                    .unwrap_or_default()
-            ),
-            ValueState::Error => format!(
-                "Error{}",
-                self.message
-                    .as_deref()
-                    .map(|message| format!(" — {message}"))
-                    .unwrap_or_default()
-            ),
+            ValueState::Unavailable => self.value.clone().unwrap_or_else(|| "Unavailable".into()),
+            ValueState::Stale => self
+                .value
+                .as_deref()
+                .map(|value| format!("Stale · {value}"))
+                .unwrap_or_else(|| "Stale".into()),
+            ValueState::Error => "Error".into(),
         }
     }
 
@@ -198,6 +190,10 @@ pub struct TaskEntry {
     pub memory_mib: Option<u32>,
 }
 
+const fn default_window_control_enabled() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WindowEntry {
     pub id: String,
@@ -208,6 +204,12 @@ pub struct WindowEntry {
     pub focused: bool,
     #[serde(default)]
     pub fullscreen: bool,
+    #[serde(default = "default_window_control_enabled")]
+    pub focusable: bool,
+    #[serde(default = "default_window_control_enabled")]
+    pub fullscreen_controllable: bool,
+    #[serde(default = "default_window_control_enabled")]
+    pub closable: bool,
 }
 
 fn default_bluetooth_value() -> ProviderValue {
@@ -335,6 +337,9 @@ impl Default for FixtureSnapshot {
                     app_id: Some("foot".into()),
                     focused: true,
                     fullscreen: false,
+                    focusable: true,
+                    fullscreen_controllable: true,
+                    closable: true,
                 },
                 WindowEntry {
                     id: "files".into(),
@@ -342,6 +347,9 @@ impl Default for FixtureSnapshot {
                     app_id: Some("thunar".into()),
                     focused: false,
                     fullscreen: false,
+                    focusable: true,
+                    fullscreen_controllable: true,
+                    closable: true,
                 },
             ],
         }
@@ -566,9 +574,11 @@ pub fn build_display_menu(snapshot: &FixtureSnapshot) -> MenuModel {
             "display.fullscreen",
             "Fullscreen",
             &format!("window.fullscreen:{}", window.id),
-            true,
+            window.fullscreen_controllable,
             Some(window.fullscreen),
-            Some(if window.fullscreen {
+            Some(if !window.fullscreen_controllable {
+                "Compositor exposes a read-only window list"
+            } else if window.fullscreen {
                 "Currently fullscreen"
             } else {
                 "Currently windowed"
@@ -683,13 +693,21 @@ pub fn build_tasks_menu(snapshot: &FixtureSnapshot) -> MenuModel {
 }
 
 pub fn build_windows_menu(snapshot: &FixtureSnapshot) -> MenuModel {
+    let has_windows = !snapshot.windows.is_empty();
+    let has_controls = snapshot
+        .windows
+        .iter()
+        .any(|window| window.focusable || window.fullscreen_controllable || window.closable);
+    let source_status = if !has_windows {
+        "No mapped compositor windows"
+    } else if has_controls {
+        "Compositor list and control available"
+    } else {
+        "Compositor list available · controls unavailable"
+    };
     let mut items = vec![
         section("windows.summary", "Windows"),
-        status(
-            "windows.concept",
-            "Conceptual window list",
-            "Fixture/compositor snapshot · focus/fullscreen/close are semantic actions only",
-        ),
+        status("windows.source", "Window source", source_status),
     ];
 
     if let Some(window) = snapshot.windows.iter().find(|window| window.focused) {
@@ -697,7 +715,7 @@ pub fn build_windows_menu(snapshot: &FixtureSnapshot) -> MenuModel {
             "windows.fullscreen",
             "Toggle fullscreen",
             &format!("window.fullscreen:{}", window.id),
-            true,
+            window.fullscreen_controllable,
             Some(window.fullscreen),
             Some(&window.title),
         ));
@@ -707,7 +725,7 @@ pub fn build_windows_menu(snapshot: &FixtureSnapshot) -> MenuModel {
             Some(&window.title),
             "window.close",
             &window.id,
-            true,
+            window.closable,
         ));
     }
 
@@ -716,7 +734,7 @@ pub fn build_windows_menu(snapshot: &FixtureSnapshot) -> MenuModel {
         items.push(status(
             "windows.empty",
             "No windows",
-            "Foreign-toplevel/compositor source is not connected",
+            "Compositor reported no mapped toplevels or no supported protocol is available",
         ));
     } else {
         items.extend(snapshot.windows.iter().take(32).map(|window| {
@@ -741,7 +759,7 @@ pub fn build_windows_menu(snapshot: &FixtureSnapshot) -> MenuModel {
                 Some(&subtitle),
                 "window.focus",
                 &window.id,
-                true,
+                window.focusable,
             )
         }));
     }
@@ -754,73 +772,83 @@ pub fn build_windows_menu(snapshot: &FixtureSnapshot) -> MenuModel {
 }
 
 pub fn build_system_menu(snapshot: &FixtureSnapshot) -> MenuModel {
+    let mut items = vec![
+        section("system.summary", "Quick status"),
+        provider_status("system.network", "Wi-Fi", &snapshot.network),
+        provider_status("system.bluetooth", "Bluetooth", &snapshot.bluetooth),
+        provider_status(
+            "system.brightness.state",
+            "Brightness",
+            &snapshot.brightness,
+        ),
+        provider_status("system.audio", "Speaker volume", &snapshot.audio),
+        section("system.menus", "Controls"),
+        custom_action(
+            "system.open.network",
+            "Wi-Fi",
+            Some("Networks and radio"),
+            "menu.open",
+            "wifi",
+            true,
+        ),
+        custom_action(
+            "system.open.bluetooth",
+            "Bluetooth",
+            Some("Adapter and devices"),
+            "menu.open",
+            "bluetooth",
+            true,
+        ),
+        custom_action(
+            "system.open.display",
+            "Display",
+            Some("Brightness and fullscreen"),
+            "menu.open",
+            "display",
+            true,
+        ),
+        custom_action(
+            "system.open.audio",
+            "Speaker volume",
+            Some("Volume and mute"),
+            "menu.open",
+            "audio",
+            true,
+        ),
+    ];
+
+    if !snapshot.tasks.is_empty() {
+        items.push(custom_action(
+            "system.open.tasks",
+            "Tasks",
+            Some("Running tasks"),
+            "menu.open",
+            "tasks",
+            true,
+        ));
+    }
+    if !snapshot.windows.is_empty() {
+        items.push(custom_action(
+            "system.open.windows",
+            "Windows",
+            Some("Open windows"),
+            "menu.open",
+            "windows",
+            true,
+        ));
+    }
+
+    items.extend([
+        section("system.session", "Power"),
+        confirm_action("system.suspend", "Suspend", "system.suspend"),
+        confirm_action("system.restart", "Restart…", "system.restart"),
+        confirm_action("system.poweroff", "Power off…", "system.poweroff"),
+    ]);
+
     MenuModel {
         id: "system".into(),
         title: "System".into(),
-        items: vec![
-            section("system.summary", "Quick status"),
-            provider_status("system.network", "Wi-Fi", &snapshot.network),
-            provider_status("system.bluetooth", "Bluetooth", &snapshot.bluetooth),
-            provider_status(
-                "system.brightness.state",
-                "Brightness",
-                &snapshot.brightness,
-            ),
-            provider_status("system.audio", "Speaker volume", &snapshot.audio),
-            section("system.menus", "Controls"),
-            custom_action(
-                "system.open.network",
-                "Wi-Fi",
-                Some("Networks and radio"),
-                "menu.open",
-                "wifi",
-                true,
-            ),
-            custom_action(
-                "system.open.bluetooth",
-                "Bluetooth",
-                Some("Adapter and devices"),
-                "menu.open",
-                "bluetooth",
-                true,
-            ),
-            custom_action(
-                "system.open.display",
-                "Display",
-                Some("Brightness and fullscreen"),
-                "menu.open",
-                "display",
-                true,
-            ),
-            custom_action(
-                "system.open.audio",
-                "Speaker volume",
-                Some("Volume and mute"),
-                "menu.open",
-                "audio",
-                true,
-            ),
-            custom_action(
-                "system.open.tasks",
-                "Tasks",
-                Some("Conceptual task viewer"),
-                "menu.open",
-                "tasks",
-                true,
-            ),
-            custom_action(
-                "system.open.windows",
-                "Windows",
-                Some("Conceptual window list"),
-                "menu.open",
-                "windows",
-                true,
-            ),
-            section("system.session", "Power"),
-            confirm_action("system.suspend", "Suspend", "system.suspend"),
-            confirm_action("system.restart", "Restart…", "system.restart"),
-            confirm_action("system.poweroff", "Power off…", "system.poweroff"),
-        ],
+        items,
     }
 }
 
@@ -1389,9 +1417,9 @@ mod tests {
     #[test]
     fn config_defaults_match_sl101_class() {
         let config = ShellConfig::default();
-        assert_eq!(config.panel_height, 48);
-        assert_eq!(config.menu_width, 480);
-        assert_eq!(config.row_height, 52);
+        assert_eq!(config.panel_height, 40);
+        assert_eq!(config.menu_width, 448);
+        assert_eq!(config.row_height, 48);
         assert_eq!(config.panel_edge, PanelEdge::Top);
         config.validate().expect("defaults valid");
     }
@@ -1442,6 +1470,60 @@ mod tests {
             .refresh_menu(build_audio_menu(&refreshed))
             .expect("refresh valid");
         assert_eq!(shell.state.selected_id, selected);
+    }
+
+    #[test]
+    fn live_system_menu_omits_unpopulated_conceptual_collections() {
+        let mut snapshot = FixtureSnapshot::default();
+        snapshot.tasks.clear();
+        snapshot.windows.clear();
+        let menu = build_system_menu(&snapshot);
+        assert!(!menu.items.iter().any(|item| item.id == "system.open.tasks"));
+        assert!(!menu
+            .items
+            .iter()
+            .any(|item| item.id == "system.open.windows"));
+
+        snapshot.tasks.push(TaskEntry {
+            id: "labwc".into(),
+            label: "labwc".into(),
+            state: "Running".into(),
+            cpu_percent: None,
+            memory_mib: None,
+        });
+        snapshot.windows.push(WindowEntry {
+            id: "terminal".into(),
+            title: "Terminal".into(),
+            app_id: Some("foot".into()),
+            focused: true,
+            fullscreen: false,
+            focusable: true,
+            fullscreen_controllable: true,
+            closable: true,
+        });
+        let menu = build_system_menu(&snapshot);
+        assert!(menu.items.iter().any(|item| item.id == "system.open.tasks"));
+        assert!(menu
+            .items
+            .iter()
+            .any(|item| item.id == "system.open.windows"));
+    }
+
+    #[test]
+    fn provider_status_suppresses_command_diagnostics_in_primary_ui() {
+        let unavailable = ProviderValue {
+            state: ValueState::Unavailable,
+            value: None,
+            message: Some("wpctl exited 127: command not found".into()),
+        };
+        assert_eq!(unavailable.subtitle(), "Unavailable");
+
+        let error = ProviderValue {
+            state: ValueState::Error,
+            value: None,
+            message: Some("backend-specific diagnostics".into()),
+        };
+        assert_eq!(error.subtitle(), "Error");
     }
 
     #[test]
@@ -1684,6 +1766,39 @@ mod tests {
                 |item| item.id == "display.brightness.down" || item.id == "display.brightness.up"
             )
             .all(|item| !item.enabled && item.action.is_none()));
+    }
+
+    #[test]
+    fn window_controls_degrade_to_list_only() {
+        let mut snapshot = FixtureSnapshot::default();
+        for window in &mut snapshot.windows {
+            window.focusable = false;
+            window.fullscreen_controllable = false;
+            window.closable = false;
+        }
+        let windows = build_windows_menu(&snapshot);
+        let focus = windows
+            .items
+            .iter()
+            .find(|item| item.id == "windows.item.terminal")
+            .expect("window row");
+        assert!(!focus.enabled);
+        assert!(focus.action.is_none());
+        let close = windows
+            .items
+            .iter()
+            .find(|item| item.id == "windows.close")
+            .expect("close row");
+        assert!(!close.enabled);
+        assert!(close.action.is_none());
+        let display = build_display_menu(&snapshot);
+        let fullscreen = display
+            .items
+            .iter()
+            .find(|item| item.id == "display.fullscreen")
+            .expect("fullscreen row");
+        assert!(!fullscreen.enabled);
+        assert!(fullscreen.action.is_none());
     }
 
     #[test]

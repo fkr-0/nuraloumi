@@ -9,11 +9,11 @@ rendering, system providers, and destructive actions separated.
 | --- | --- | --- |
 | `wifi` | radio, connection status, rescan, connect | NetworkProvider / nmcli |
 | `bluetooth` / `bt` | adapter power, devices, connect/disconnect | BluetoothProvider / bluetoothctl |
-| `display` | brightness and active-window fullscreen | brightness is live; fullscreen remains semantic until a toplevel-control source is wired |
+| `display` | brightness and active-window fullscreen | brightness provider + live foreign-toplevel fullscreen control |
 | `audio` / `speaker` | speaker volume and mute | AudioProvider / wpctl |
 | `power` | battery, suspend, restart, power off | SessionProvider; confirmation required and dry-run by default |
 | `tasks` | conceptual task snapshot | inspection-only fixture/model contract |
-| `windows` | conceptual window snapshot | focus/fullscreen/close semantics only |
+| `windows` | compositor window list | wlr foreign-toplevel list/focus/fullscreen/close; ext-list degrades to read-only |
 | `system` | quick status/control-center links and power rows | opens the families above |
 
 Aliases such as `brightness`, `fullscreen`, `volume`, `task-viewer`, and
@@ -53,9 +53,11 @@ That flag permits the SessionProvider to execute confirmed suspend/reboot/
 poweroff. It has no effect outside live mode.
 
 Task rows emit only `task.inspect`; there is intentionally no process-kill
-action. Window focus/fullscreen/close remain semantic until a bounded
-foreign-toplevel/compositor integration exists. Window close still requires
-confirmation.
+action. In normal live mode, window focus/fullscreen/close are translated by the
+shell into typed `nuraloumi-wayland` foreign-toplevel requests. Window close
+still requires confirmation and the row is not removed until the compositor
+emits its `closed` event. Supplying `--providers` keeps window actions fixture-
+only and never mutates real compositor state.
 
 ## Fixture schema additions
 
@@ -79,12 +81,22 @@ deserialize: Bluetooth becomes unavailable and the structured lists are empty.
     cargo run -p nuraloumi-shell --bin nuraloumi-menu -- --family tasks --providers examples/menu-fixtures/providers.json
     cargo run -p nuraloumi-shell --bin nuraloumi-menu -- --family windows --providers examples/menu-fixtures/providers.json
 
+Inspect compositor window-control capability without opening a menu:
+
+    cargo run -p nuraloumi-shell --bin nuraloumi-menu -- --probe-toplevels
+
 On a compositor exposing `zwlr_layer_shell_v1`:
 
     cargo run -p nuraloumi-shell --bin nuraloumi-menu -- --live --family system
 
-The live menu can render without enabling system mutation. Real power actions
-require the separate flag described above.
+The preferred control path is `zwlr_foreign_toplevel_manager_v1`. Activation
+is advertised only when a usable `wl_seat` is also available, because the wlr
+activate request requires a seat. Fullscreen and close remain independently
+available when the compositor exposes them. In live mode, `--input` is applied
+only after the compositor toplevel snapshot is loaded and is dispatched through
+the same semantic/confirmation/control path as keyboard or touch input. The live
+menu can render without enabling system mutation. Real power actions require the
+separate flag described above.
 
 ## Review findings / next wiring
 
@@ -97,6 +109,9 @@ lands:
 - the brightness value displayed by the menu should come from the same writable
   backlight device that the adjustment action will change.
 
-Fullscreen, window focus/close, and task inspection remain semantic contracts
-until a bounded compositor/process adapter exists. This is preferable to adding
-ad-hoc shell commands that bypass the provider/runtime boundary.
+Window control now follows the bounded compositor adapter: wlr foreign-toplevel
+management provides list/state/focus/fullscreen/close, while ext foreign-
+toplevel-list provides a read-only fallback. Opaque `tl:<generation>` IDs are
+used for actions; title/app-id are never control identity. Task inspection
+remains a separate conceptual/process-provider concern and is intentionally not
+coupled to Wayland window identity.

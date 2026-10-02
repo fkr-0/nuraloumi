@@ -6,14 +6,17 @@ use nuraloumi_providers::{
 };
 use nuraloumi_render_cairo::{CairoRenderer, RenderOptions, Scene, Viewport};
 use nuraloumi_shell::{
-    build_family, load_config, load_fixture_snapshot, load_menu, parse_family, ActionReport,
-    BluetoothDeviceEntry, FixtureSnapshot, HitRegion as ShellHitRegion, MenuAction, MenuFamily,
+    build_family, execute_window_command, load_config, load_fixture_snapshot, load_menu,
+    parse_family, parse_window_command, window_entries, ActionReport, BluetoothDeviceEntry,
+    FixtureSnapshot, HitRegion as ShellHitRegion, MenuAction, MenuFamily,
     PlatformEvent as ShellPlatformEvent, ProviderValue, SemanticInput, ShellConfig, ShellInput,
-    ShellState, Theme as ShellTheme, ValueState, WifiNetworkEntry,
+    ShellState, Theme as ShellTheme, ValueState, WifiNetworkEntry, WindowControlCapabilities,
+    WindowEntry,
 };
 use nuraloumi_wayland::{
-    BackendError, Frame, Key as WaylandKey, MenuConfig as WaylandMenuConfig, PixelFormat,
-    PlatformEvent as WaylandEvent, SurfaceId, WaylandBackend,
+    BackendCapabilities as WaylandCapabilities, BackendError, Frame, Key as WaylandKey,
+    MenuConfig as WaylandMenuConfig, PixelFormat, PlatformEvent as WaylandEvent, SurfaceId,
+    WaylandBackend,
 };
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -29,6 +32,7 @@ USAGE:
 OPTIONS:
     --headless                 Render no surface; print deterministic JSON (default)
     --live                     Open a native Wayland/Cairo software-rendered menu sheet
+    --probe-toplevels          Print compositor toplevel capabilities/windows as JSON and exit
     --family <name>            launcher|wifi|bluetooth|display|audio|power|tasks|windows|system
     --fixture <path>           Load a JSON/TOML MenuModel instead of a built-in family
     --providers <path>         Load deterministic JSON/TOML provider snapshot
@@ -50,6 +54,7 @@ LIVE MODE:
 #[derive(Debug, Default)]
 struct Args {
     live: bool,
+    probe_toplevels: bool,
     family: Option<String>,
     fixture: Option<PathBuf>,
     providers: Option<PathBuf>,
@@ -75,6 +80,12 @@ struct Output<'a> {
     hit_regions: Vec<ShellHitRegion>,
 }
 
+#[derive(Debug, Serialize)]
+struct ToplevelProbeOutput {
+    capabilities: WindowControlCapabilities,
+    windows: Vec<WindowEntry>,
+}
+
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
@@ -97,6 +108,9 @@ fn run() -> Result<(), String> {
     let args = parse_args()?;
     if args.enable_power_actions && !args.live {
         return Err("--enable-power-actions requires --live".into());
+    }
+    if args.probe_toplevels {
+        return run_toplevel_probe();
     }
     let mut config = if let Some(path) = args.config.as_ref() {
         load_config(path)?
@@ -122,17 +136,8 @@ fn run() -> Result<(), String> {
         build_family(family, &snapshot)
     };
     let mut shell = ShellState::new(menu, config.reduced_motion)?;
-    let mut reports = Vec::new();
-    if let Some(input) = args.input.as_deref() {
-        for step in input.split(',').filter(|step| !step.is_empty()) {
-            reports.push(shell.apply_input(parse_input(step)?));
-        }
-    }
 
     if args.live {
-        for report in &reports {
-            log_live_report(report)?;
-        }
         return run_live(
             shell,
             config,
@@ -141,7 +146,15 @@ fn run() -> Result<(), String> {
                 execute_provider_actions: args.providers.is_none(),
                 enable_power_actions: args.enable_power_actions,
             },
+            args.input.as_deref(),
         );
+    }
+
+    let mut reports = Vec::new();
+    if let Some(input) = args.input.as_deref() {
+        for step in input.split(',').filter(|step| !step.is_empty()) {
+            reports.push(shell.apply_input(parse_input(step)?));
+        }
     }
 
     let output = Output {
@@ -160,17 +173,50 @@ fn run() -> Result<(), String> {
     Ok(())
 }
 
+fn run_toplevel_probe() -> Result<(), String> {
+    let mut backend =
+        WaylandBackend::connect().map_err(|error| format!("Wayland connection failed: {error}"))?;
+    backend
+        .roundtrip()
+        .map_err(|error| format!("Wayland toplevel roundtrip failed: {error}"))?;
+    let capabilities = window_control_capabilities(&backend.capabilities());
+    let output = ToplevelProbeOutput {
+        windows: window_entries(&backend.toplevels(), capabilities),
+        capabilities,
+    };
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&output)
+            .map_err(|error| format!("failed to serialize toplevel probe: {error}"))?
+    );
+    Ok(())
+}
+
 fn run_live(
     mut shell: ShellState,
     config: ShellConfig,
     mut snapshot: FixtureSnapshot,
     policy: LivePolicy,
+    initial_input: Option<&str>,
 ) -> Result<(), String> {
     let mut backend =
         WaylandBackend::connect().map_err(|error| format!("Wayland connection failed: {error}"))?;
     let capabilities = backend.capabilities();
     if !capabilities.layer_shell {
         return Err("compositor does not advertise zwlr_layer_shell_v1".into());
+    }
+    if policy.execute_provider_actions {
+        refresh_window_snapshot(&mut snapshot, &backend);
+        refresh_builtin_menu(&mut shell, &snapshot)?;
+    }
+
+    if let Some(input) = initial_input {
+        for step in input.split(',').filter(|step| !step.is_empty()) {
+            let report = shell.apply_input(parse_input(step)?);
+            if handle_live_report(&report, &mut shell, &mut snapshot, &mut backend, policy)? {
+                return Ok(());
+            }
+        }
     }
 
     let output = backend.outputs().into_iter().next();
@@ -219,6 +265,22 @@ fn run_live(
         backend
             .blocking_dispatch()
             .map_err(|error| format!("Wayland dispatch failed: {error}"))?;
+        let toplevel_changed = backend.drain_toplevel_events().count() > 0;
+        if policy.execute_provider_actions && toplevel_changed {
+            refresh_window_snapshot(&mut snapshot, &backend);
+            if refresh_builtin_menu(&mut shell, &snapshot)? {
+                if let Some(geometry) = geometry {
+                    scene = Some(render_and_present(
+                        &mut backend,
+                        surface,
+                        &renderer,
+                        theme_tokens,
+                        &shell,
+                        geometry,
+                    )?);
+                }
+            }
+        }
         let events: Vec<_> = backend.drain_events().collect();
 
         for event in events {
@@ -298,7 +360,7 @@ fn run_live(
             }
 
             if let Some(report) = report {
-                if handle_live_report(&report, &mut shell, &mut snapshot, policy)? {
+                if handle_live_report(&report, &mut shell, &mut snapshot, &mut backend, policy)? {
                     backend
                         .destroy_surface(surface)
                         .map_err(|error| format!("failed to destroy menu surface: {error}"))?;
@@ -410,6 +472,7 @@ fn handle_live_report(
     report: &ActionReport,
     shell: &mut ShellState,
     snapshot: &mut FixtureSnapshot,
+    backend: &mut WaylandBackend,
     policy: LivePolicy,
 ) -> Result<bool, String> {
     log_live_report(report)?;
@@ -428,6 +491,10 @@ fn handle_live_report(
 
     if policy.execute_provider_actions {
         if let ActionReport::Dispatched { action, .. } = report {
+            if let Some(command) = parse_window_command(action, &snapshot.windows)? {
+                execute_window_command(backend, command)?;
+                return Ok(false);
+            }
             match execute_live_action(action, policy.enable_power_actions) {
                 Ok(Some(result)) => {
                     eprintln!(
@@ -435,23 +502,46 @@ fn handle_live_report(
                         result.executed, result.dry_run, result.message
                     );
                     *snapshot = fixture_snapshot_from_probe(&ProbeSnapshot::live());
-                    if let Ok(family) = parse_family(&shell.menu.id) {
-                        shell.refresh_menu(build_family(family, snapshot))?;
-                    }
+                    refresh_window_snapshot(snapshot, backend);
+                    refresh_builtin_menu(shell, snapshot)?;
                 }
                 Ok(None) => {}
                 Err(error) => {
                     eprintln!("nuraloumi-provider-error: {error}");
                     *snapshot = fixture_snapshot_from_probe(&ProbeSnapshot::live());
-                    if let Ok(family) = parse_family(&shell.menu.id) {
-                        shell.refresh_menu(build_family(family, snapshot))?;
-                    }
+                    refresh_window_snapshot(snapshot, backend);
+                    refresh_builtin_menu(shell, snapshot)?;
                 }
             }
         }
     }
 
     Ok(matches!(report, ActionReport::SurfaceClosed))
+}
+
+fn refresh_window_snapshot(snapshot: &mut FixtureSnapshot, backend: &WaylandBackend) {
+    let capabilities = window_control_capabilities(&backend.capabilities());
+    snapshot.windows = window_entries(&backend.toplevels(), capabilities);
+}
+
+fn window_control_capabilities(backend: &WaylandCapabilities) -> WindowControlCapabilities {
+    let mut capabilities: WindowControlCapabilities = backend.toplevel.into();
+    // zwlr_foreign_toplevel_handle_v1.activate requires a wl_seat. The
+    // protocol may be present while seat access is restricted, so advertise
+    // focus only when both capabilities exist.
+    capabilities.focus &= backend.seat;
+    capabilities
+}
+
+fn refresh_builtin_menu(
+    shell: &mut ShellState,
+    snapshot: &FixtureSnapshot,
+) -> Result<bool, String> {
+    let Ok(family) = parse_family(&shell.menu.id) else {
+        return Ok(false);
+    };
+    shell.refresh_menu(build_family(family, snapshot))?;
+    Ok(true)
 }
 
 fn execute_live_action(
@@ -681,6 +771,7 @@ fn parse_args() -> Result<Args, String> {
         match arg.as_str() {
             "--headless" => {}
             "--live" => parsed.live = true,
+            "--probe-toplevels" => parsed.probe_toplevels = true,
             "--family" => parsed.family = Some(next_value(&mut args, "--family")?),
             "--fixture" => parsed.fixture = Some(next_value(&mut args, "--fixture")?.into()),
             "--providers" => parsed.providers = Some(next_value(&mut args, "--providers")?.into()),
@@ -732,6 +823,34 @@ mod tests {
             .wifi_networks
             .iter()
             .any(|network| network.connected && network.signal_percent == Some(82)));
+    }
+
+    #[test]
+    fn window_activation_capability_requires_a_wayland_seat() {
+        let toplevel = nuraloumi_wayland::ToplevelCapabilities {
+            list: true,
+            state: true,
+            activate: true,
+            fullscreen: true,
+            close: true,
+        };
+        let without_seat = WaylandCapabilities {
+            seat: false,
+            toplevel,
+            ..WaylandCapabilities::default()
+        };
+        let capabilities = window_control_capabilities(&without_seat);
+        assert!(capabilities.list);
+        assert!(!capabilities.focus);
+        assert!(capabilities.fullscreen);
+        assert!(capabilities.close);
+
+        let with_seat = WaylandCapabilities {
+            seat: true,
+            toplevel,
+            ..WaylandCapabilities::default()
+        };
+        assert!(window_control_capabilities(&with_seat).focus);
     }
 
     #[test]
