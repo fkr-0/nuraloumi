@@ -5,6 +5,7 @@
 //! It intentionally has no dependency on a GUI toolkit, window system, async
 //! runtime, system service, or timer implementation.
 
+pub mod action_ids;
 pub mod model;
 pub mod motion;
 pub mod navigation;

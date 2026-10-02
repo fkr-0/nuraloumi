@@ -472,8 +472,8 @@ mod tests {
         .disabled();
         action.action = None;
 
-        let mut checkable = MenuItem::checkable("offline-toggle", "Unavailable toggle", "toggle", false)
-            .disabled();
+        let mut checkable =
+            MenuItem::checkable("offline-toggle", "Unavailable toggle", "toggle", false).disabled();
         checkable.action = None;
         checkable.checked = None;
 
