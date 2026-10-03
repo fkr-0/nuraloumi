@@ -9,24 +9,24 @@ use nuraloumi_providers::{
 use nuraloumi_render_cairo::{CairoRenderer, RenderOptions, Scene, Viewport};
 use nuraloumi_shell::{
     apply_launcher_preferences, blank_press_requests_dismiss, build_family,
-    dismiss_backdrop_margins, execute_window_command, launcher_search_input,
+    dismiss_backdrop_margins, dispatch_keybinding, execute_window_command, launcher_search_input,
     load_config_or_default, load_fixture_snapshot, load_menu, parse_desktop_command, parse_family,
     parse_window_command, render_menu_follow_selection, resolve_app_activation,
     successful_action_requests_dismiss, window_entries, ActionReport, AppActivation,
     ApplicationEntry as ShellApplicationEntry, BluetoothDeviceEntry, ControlCenterTab,
     DesktopCommand, DesktopControlCapabilities, DesktopEntry, FixtureSnapshot,
-    HitRegion as ShellHitRegion, MediaPlayerEntry as ShellMediaPlayerEntry, MenuAction, MenuFamily,
-    NotificationHistoryEntry as ShellNotificationHistoryEntry, OverviewMode,
-    PlatformEvent as ShellPlatformEvent, ProviderValue, SceneTransitionClock, SemanticInput,
-    ShellConfig, ShellInput, ShellState, TaskEntry as ShellTaskEntry, Theme as ShellTheme,
-    ValueState, WifiNetworkEntry, WindowCommand, WindowControlCapabilities, WindowEntry,
-    WindowThumbnailEntry,
+    HitRegion as ShellHitRegion, KeybindingRegistry, MediaPlayerEntry as ShellMediaPlayerEntry,
+    MenuAction, MenuFamily, NotificationHistoryEntry as ShellNotificationHistoryEntry,
+    OverviewMode, PlatformEvent as ShellPlatformEvent, ProviderValue, SceneTransitionClock,
+    SemanticInput, ShellConfig, ShellInput, ShellState, TaskEntry as ShellTaskEntry,
+    Theme as ShellTheme, ValueState, WifiNetworkEntry, WindowCommand, WindowControlCapabilities,
+    WindowEntry, WindowThumbnailEntry,
 };
 use nuraloumi_wayland::{
     capture_toplevel_thumbnails_with_timeout, BackendCapabilities as WaylandCapabilities,
-    BackendError, DismissBackdropConfig, Frame, Key as WaylandKey, MenuConfig as WaylandMenuConfig,
-    PixelFormat, PlatformEvent as WaylandEvent, SurfaceId, ToplevelThumbnailReport,
-    ToplevelThumbnailRequest, WaylandBackend, WorkspaceId,
+    BackendError, DismissBackdropConfig, Frame, MenuConfig as WaylandMenuConfig, PixelFormat,
+    PlatformEvent as WaylandEvent, SurfaceId, ToplevelThumbnailReport, ToplevelThumbnailRequest,
+    WaylandBackend, WorkspaceId,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -48,6 +48,7 @@ OPTIONS:
     --fixture <path>           Load a JSON/TOML MenuModel instead of a built-in family
     --providers <path>         Load deterministic JSON/TOML provider snapshot
     --config <path>            Load JSON/TOML shell geometry/theme config
+    --dump-keybindings         Print effective keybinding registry as JSON and exit
     --input <steps>            Initial semantic input, e.g. down,enter,search,text:term
     --reduced-motion           Force reduced-motion state
     --enable-power-actions     Allow confirmed reboot/poweroff in live mode
@@ -73,6 +74,7 @@ struct Args {
     fixture: Option<PathBuf>,
     providers: Option<PathBuf>,
     config: Option<PathBuf>,
+    dump_keybindings: bool,
     input: Option<String>,
     reduced_motion: bool,
     enable_power_actions: bool,
@@ -209,6 +211,15 @@ fn run() -> Result<(), String> {
         config.reduced_motion = true;
     }
     config.validate()?;
+    let keybindings = KeybindingRegistry::from_config(&config.keybindings)?;
+    if args.dump_keybindings {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&keybindings.dump())
+                .map_err(|error| format!("failed to serialize keybindings: {error}"))?
+        );
+        return Ok(());
+    }
 
     let mut snapshot = if let Some(path) = args.providers.as_ref() {
         load_fixture_snapshot(path)?
@@ -237,6 +248,7 @@ fn run() -> Result<(), String> {
             shell,
             config,
             snapshot,
+            keybindings,
             LivePolicy {
                 execute_provider_actions: args.providers.is_none(),
                 enable_power_actions: args.enable_power_actions,
@@ -316,6 +328,7 @@ fn run_live(
     mut shell: ShellState,
     config: ShellConfig,
     mut snapshot: FixtureSnapshot,
+    keybindings: KeybindingRegistry,
     policy: LivePolicy,
     initial_input: Option<&str>,
 ) -> Result<(), String> {
@@ -600,8 +613,8 @@ fn run_live(
                     redraw = true;
                 }
                 WaylandEvent::Key { key, pressed: true } => {
-                    if let Some(input) = semantic_from_wayland_key(key) {
-                        report = Some(shell.apply_semantic(input));
+                    if let Some(key_report) = dispatch_keybinding(&keybindings, &mut shell, &key) {
+                        report = Some(key_report);
                         redraw = true;
                     }
                 }
@@ -836,20 +849,6 @@ fn shell_hit_region(scene: &Scene, x: f64, y: f64) -> Option<ShellHitRegion> {
         region_id: format!("row:{item_id}"),
         item_id: item_id.to_owned(),
     })
-}
-
-fn semantic_from_wayland_key(key: WaylandKey) -> Option<SemanticInput> {
-    match key {
-        WaylandKey::Up => Some(SemanticInput::Up),
-        WaylandKey::Down => Some(SemanticInput::Down),
-        WaylandKey::Left => Some(SemanticInput::Left),
-        WaylandKey::Right => Some(SemanticInput::Right),
-        WaylandKey::Enter => Some(SemanticInput::Activate),
-        WaylandKey::Escape => Some(SemanticInput::Back),
-        WaylandKey::Backspace => Some(SemanticInput::Backspace),
-        WaylandKey::Text(text) => Some(SemanticInput::Text(text)),
-        WaylandKey::Raw(_) => None,
-    }
 }
 
 fn handle_live_report(
@@ -1570,6 +1569,7 @@ fn parse_args() -> Result<Args, String> {
             "--fixture" => parsed.fixture = Some(next_value(&mut args, "--fixture")?.into()),
             "--providers" => parsed.providers = Some(next_value(&mut args, "--providers")?.into()),
             "--config" => parsed.config = Some(next_value(&mut args, "--config")?.into()),
+            "--dump-keybindings" => parsed.dump_keybindings = true,
             "--input" => parsed.input = Some(next_value(&mut args, "--input")?),
             "--reduced-motion" => parsed.reduced_motion = true,
             "--enable-power-actions" => parsed.enable_power_actions = true,
@@ -1670,18 +1670,5 @@ mod tests {
             .hits
             .iter()
             .any(|hit| hit.item_id == "display.fullscreen" && hit.enabled && hit.actionable));
-    }
-
-    #[test]
-    fn wayland_key_mapping_keeps_semantic_navigation() {
-        assert_eq!(
-            semantic_from_wayland_key(WaylandKey::Down),
-            Some(SemanticInput::Down)
-        );
-        assert_eq!(
-            semantic_from_wayland_key(WaylandKey::Escape),
-            Some(SemanticInput::Back)
-        );
-        assert_eq!(semantic_from_wayland_key(WaylandKey::Raw(30)), None);
     }
 }

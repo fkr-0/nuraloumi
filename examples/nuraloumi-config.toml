@@ -19,6 +19,18 @@ reduced_motion = false
 outside_press = true
 after_one_shot_action = true
 
+# Built-in navigation and user bindings share one validated registry.
+# "global" means any keyboard-focused NuraLoumi transient menu, not a
+# compositor-wide shortcut.
+[keybindings]
+enabled = true
+
+[[keybindings.bindings]]
+id = "user.audio-up"
+keys = "Ctrl+Alt+Up"
+scope = "global"
+action = { id = "audio.adjust", delta = 5 }
+
 # Launcher entries still come exclusively from discovered XDG .desktop files.
 # Pinned entries appear once under Favorites, in this order. Unknown IDs are
 # ignored because launcher config never creates executable application entries.

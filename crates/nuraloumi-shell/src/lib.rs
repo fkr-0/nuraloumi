@@ -11,7 +11,12 @@ pub use nuraloumi_core::{
     SemanticInput,
 };
 
+mod keybindings;
 mod window_adapter;
+pub use keybindings::{
+    dispatch_keybinding, ActionSpec as KeybindingActionSpec, BindingOverride, BindingScope,
+    BindingSource, BindingView, KeyStroke, KeybindingConfig, KeybindingDump, KeybindingRegistry,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -74,6 +79,7 @@ pub struct ShellConfig {
     pub reduced_motion: bool,
     pub launcher: LauncherPreferences,
     pub menu_dismissal: MenuDismissalConfig,
+    pub keybindings: KeybindingConfig,
 }
 
 const SCENE_FRAME_INTERVAL_MS: u64 = 16;
@@ -221,6 +227,7 @@ impl Default for ShellConfig {
             reduced_motion: false,
             launcher: LauncherPreferences::default(),
             menu_dismissal: MenuDismissalConfig::default(),
+            keybindings: KeybindingConfig::default(),
         }
     }
 }
@@ -278,6 +285,7 @@ impl ShellConfig {
             ));
         }
         self.launcher.validate()?;
+        KeybindingRegistry::from_config(&self.keybindings)?;
         Ok(())
     }
 }

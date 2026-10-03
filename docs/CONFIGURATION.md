@@ -46,6 +46,15 @@ reduced_motion = false
 outside_press = true
 after_one_shot_action = true
 
+[keybindings]
+enabled = true
+
+[[keybindings.bindings]]
+id = "user.audio-up"
+keys = "Ctrl+Alt+Up"
+scope = "global"
+action = { id = "audio.adjust", delta = 5 }
+
 [launcher]
 pinned = [
   "foot.desktop",
@@ -129,6 +138,121 @@ control-center tab changes.
 
 This policy is based on semantic action kind rather than individual UI rows, so
 pointer, touch and keyboard activation share the same close behavior.
+
+## Keybindings
+
+Keybindings use one validated registry shared by built-in navigation and user
+configuration. The same canonical notation appears in configuration and in
+structured introspection.
+
+```toml
+[keybindings]
+enabled = true
+
+# Override a built-in by stable ID. Omitted scope/action inherit the built-in.
+[[keybindings.bindings]]
+id = "menu.down"
+keys = "Ctrl+J"
+
+# Add a new typed binding.
+[[keybindings.bindings]]
+id = "user.audio-up"
+keys = "Ctrl+Alt+Up"
+scope = "global"
+action = { id = "audio.adjust", delta = 5 }
+
+# Disable one built-in explicitly.
+[[keybindings.bindings]]
+id = "menu.escape"
+enabled = false
+```
+
+### Canonical notation
+
+Modifiers are emitted in `Ctrl+Alt+Shift+Super` order. The parser accepts
+`Control` as an alias for `Ctrl`, `Meta` as an alias for `Super`, and
+whitespace around components.
+
+Named keys include navigation keys, `Tab`, `Space`, `F1` through `F24`,
+letters/digits, stable punctuation names, and the supported XF86 audio and
+display-brightness keys. Raw numeric keycodes cannot be configured.
+
+Multi-stroke sequences such as `Super+K, W` are reserved for a later design
+stage and currently fail validation.
+
+### Scopes and precedence
+
+Supported scopes are:
+
+```text
+global
+panel
+menu
+launcher
+control-center
+windows
+applications
+tasks
+desktops
+```
+
+Specific launcher/control scopes resolve before `menu`, and `menu` resolves
+before `global`. Different IDs with the same canonical key and same scope are
+an error; declaration order never chooses a winner.
+
+`global` means every **keyboard-focused NuraLoumi transient menu**. It is not
+a compositor-global hotkey. The persistent panel intentionally has keyboard
+interactivity disabled, so desktop-wide shortcuts still belong in the
+compositor. The `panel` scope is reserved for a future explicitly
+keyboard-interactive panel mode.
+
+### Typed actions
+
+User bindings can target only the typed whitelist documented in
+`docs/KEYBINDINGS.md`: menu navigation/activation/backspace, menu-family
+transitions, launcher modes, control-center tabs, bounded audio/brightness
+adjustments, mute, Wi-Fi radio, and Bluetooth radio.
+
+There is no shell-command or generic arbitrary-action field. Resolved provider
+actions still pass through the same live/dry-run capability boundaries used by
+menu rows.
+
+### Search interaction
+
+While launcher search has text focus, unmodified printable keys remain text
+input; Shift may alter case/punctuation. `Ctrl`, `Alt`, or `Super` chords
+can still resolve as bindings, and navigation keys continue to use the built-in
+registry.
+
+### Overrides, disabling, and limits
+
+- A user entry whose `id` matches a built-in overrides that stable binding.
+  Missing `keys`, `scope`, or `action` inherit from the built-in.
+- An enabled custom ID must supply all three of those fields.
+- `enabled = false` on a binding disables that binding.
+- `[keybindings] enabled = false` disables user customization while retaining
+  the built-in keyboard baseline.
+- At most 128 user binding entries are accepted.
+- IDs are bounded to 128 bytes and use letters, digits, `.`, `-`, or `_`.
+- Key notation is bounded to 96 bytes.
+
+### Introspection
+
+Both shell binaries print the validated effective registry without opening a
+Wayland surface:
+
+```sh
+nuraloumi-menu --dump-keybindings
+nuraloumi-menu --config ~/.config/nuraloumi/config.toml --dump-keybindings
+nuraloumi-panel --dump-keybindings
+```
+
+The JSON schema `nuraloumi-keybindings/v1` contains binding ID, canonical
+keys, scope, typed action, source, enabled/effective state, and replacement
+provenance.
+
+See `docs/KEYBINDINGS.md` for the complete implemented single-action
+contract. Combined actions remain a later-stage design.
 
 ## Launcher preferences
 
