@@ -29,7 +29,7 @@ providers ──> shell adapters ──> semantic menu model ──> scene/layou
                                      pixman baseline / GPU optional
 ```
 
-The main boundaries are documented in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/CONTRACTS.md](docs/CONTRACTS.md).
+The main boundaries are documented in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/CONTRACTS.md](docs/CONTRACTS.md). The planned transparent/configurable keyboard model is specified separately in [docs/KEYBINDINGS.md](docs/KEYBINDINGS.md); it is a design contract, not yet a runtime feature.
 
 ## Build
 
