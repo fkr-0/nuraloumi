@@ -131,39 +131,20 @@ pub fn layout_menu<M: MenuSource, T: TextMeasurer>(
         clipped: content_height > body.height,
     };
 
-    let panel_radius = theme.panel_radius.min(10.0);
-    let mut paint = Vec::with_capacity(menu.len() * 5 + 10);
+    let mut paint = Vec::with_capacity(menu.len() * 5 + 8);
     paint.push(PaintNode::FillRect {
         rect: viewport.logical_rect(),
         color: theme.base,
     });
 
-    if !constrained {
-        paint.push(PaintNode::RoundedRect {
-            rect: Rect::new(panel.x + 2.0, panel.y + 4.0, panel.width, panel.height),
-            radius: panel_radius + 1.0,
-            fill: Fill::Solid(Color::rgba(0, 0, 0, 72)),
-            stroke: None,
-        });
-        paint.push(PaintNode::RoundedRect {
-            rect: Rect::new(panel.x + 1.0, panel.y + 2.0, panel.width, panel.height),
-            radius: panel_radius,
-            fill: Fill::Solid(Color::rgba(0, 0, 0, 42)),
-            stroke: None,
-        });
-    }
-
     let panel_fill = if constrained {
         Fill::Solid(theme.raised)
     } else {
-        Fill::VerticalGradient {
-            top: theme.overlay,
-            bottom: theme.raised,
-        }
+        Fill::Solid(theme.overlay)
     };
     paint.push(PaintNode::RoundedRect {
         rect: panel,
-        radius: theme.panel_radius,
+        radius: 0.0,
         fill: panel_fill,
         stroke: Some((theme.border, theme.border_width)),
     });
@@ -212,21 +193,30 @@ pub fn layout_menu<M: MenuSource, T: TextMeasurer>(
 
         if item.kind.actionable() {
             let fill = if pressed {
-                Color::rgba(theme.accent.r, theme.accent.g, theme.accent.b, 74)
+                Color::rgba(theme.accent.r, theme.accent.g, theme.accent.b, 58)
             } else if selected {
                 theme.selected
             } else {
                 theme.card
             };
+            let row_box = Rect::new(row.x + 6.0, row.y + 2.0, row.width - 12.0, row.height - 4.0);
             paint.push(PaintNode::RoundedRect {
-                rect: Rect::new(row.x + 6.0, row.y + 2.0, row.width - 12.0, row.height - 4.0),
-                radius: 7.0,
+                rect: row_box,
+                radius: 0.0,
                 fill: Fill::Solid(fill),
-                stroke: selected.then_some((
-                    Color::rgba(theme.accent.r, theme.accent.g, theme.accent.b, 92),
-                    1.0,
-                )),
+                stroke: selected.then_some((theme.border, 1.0)),
             });
+            if selected {
+                paint.push(PaintNode::FillRect {
+                    rect: Rect::new(
+                        row_box.x,
+                        row_box.y + 6.0,
+                        2.0,
+                        (row_box.height - 12.0).max(1.0),
+                    ),
+                    color: theme.accent,
+                });
+            }
         }
 
         match item.kind {
@@ -304,15 +294,15 @@ pub fn layout_menu<M: MenuSource, T: TextMeasurer>(
                     );
                     paint.push(PaintNode::RoundedRect {
                         rect: glyph_box,
-                        radius: 5.0,
+                        radius: 0.0,
                         fill: Fill::Solid(Color::rgba(
                             theme.accent.r,
                             theme.accent.g,
                             theme.accent.b,
-                            30,
+                            20,
                         )),
                         stroke: Some((
-                            Color::rgba(theme.accent.r, theme.accent.g, theme.accent.b, 96),
+                            Color::rgba(theme.accent.r, theme.accent.g, theme.accent.b, 64),
                             1.0,
                         )),
                     });

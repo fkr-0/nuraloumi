@@ -54,6 +54,30 @@ fn actionable_touch_targets_are_at_least_48_logical_pixels() {
 }
 
 #[test]
+fn dark_menu_visual_geometry_has_square_corners() {
+    use nuraloumi_render_cairo::PaintNode;
+
+    let scene = layout_menu(
+        &mixed_menu(),
+        &InteractionState {
+            selected_id: Some("action".into()),
+            ..Default::default()
+        },
+        Viewport::new(800.0, 600.0, 1.0),
+        &Theme::dark(),
+        &ToyText,
+        false,
+    );
+
+    let mut rounded = scene.paint.iter().filter_map(|node| match node {
+        PaintNode::RoundedRect { radius, .. } => Some(*radius),
+        _ => None,
+    });
+    assert!(rounded.clone().next().is_some());
+    assert!(rounded.all(|radius| radius == 0.0));
+}
+
+#[test]
 fn non_action_and_disabled_rows_never_activate() {
     let scene = layout_menu(
         &mixed_menu(),

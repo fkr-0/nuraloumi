@@ -181,25 +181,25 @@ const _: () = {
 
 pub const DARK_THEME: ThemeTokens = ThemeTokens {
     surfaces: SurfaceColors {
-        base: UiColor::rgb(0x11, 0x12, 0x18),
-        raised: UiColor::rgb(0x18, 0x19, 0x21),
-        overlay: UiColor::rgb(0x1c, 0x1d, 0x27),
-        card: UiColor::rgb(0x1f, 0x20, 0x2b),
-        selected: UiColor::rgb(0x3a, 0x2d, 0x5c),
+        base: UiColor::rgb(0x0b, 0x0d, 0x0f),
+        raised: UiColor::rgb(0x10, 0x12, 0x15),
+        overlay: UiColor::rgb(0x14, 0x17, 0x1b),
+        card: UiColor::rgb(0x17, 0x1a, 0x1f),
+        selected: UiColor::rgb(0x24, 0x29, 0x30),
     },
     text: TextColors {
-        primary: UiColor::rgb(0xf4, 0xf4, 0xf8),
-        secondary: UiColor::rgb(0xbe, 0xbf, 0xcc),
-        hint: UiColor::rgb(0x8e, 0x90, 0xa0),
-        accent: UiColor::rgb(0xa7, 0x8b, 0xfa),
-        warning: UiColor::rgb(0xfb, 0xbf, 0x24),
-        error: UiColor::rgb(0xf8, 0x71, 0x71),
+        primary: UiColor::rgb(0xe8, 0xea, 0xed),
+        secondary: UiColor::rgb(0xa9, 0xae, 0xb6),
+        hint: UiColor::rgb(0x7b, 0x81, 0x8a),
+        accent: UiColor::rgb(0x95, 0x9e, 0xac),
+        warning: UiColor::rgb(0xc9, 0xa2, 0x5d),
+        error: UiColor::rgb(0xd7, 0x78, 0x78),
     },
     border: BorderTokens {
         width: 1.0,
-        radius_small: 6.0,
-        radius_menu: 12.0,
-        color: UiColor::rgb(0x3f, 0x41, 0x51),
+        radius_small: 0.0,
+        radius_menu: 0.0,
+        color: UiColor::rgb(0x2c, 0x31, 0x37),
     },
 };
 
@@ -221,8 +221,8 @@ pub const LIGHT_THEME: ThemeTokens = ThemeTokens {
     },
     border: BorderTokens {
         width: 1.0,
-        radius_small: 6.0,
-        radius_menu: 12.0,
+        radius_small: 0.0,
+        radius_menu: 0.0,
         color: UiColor::rgb(0xd1, 0xd5, 0xdb),
     },
 };
@@ -275,6 +275,14 @@ mod tests {
                 assert!(contrast_ratio(theme.text.secondary, surface) >= 4.5);
             }
         }
+    }
+
+    #[test]
+    fn visual_corner_tokens_are_square() {
+        assert_eq!(DARK_THEME.border.radius_small, 0.0);
+        assert_eq!(DARK_THEME.border.radius_menu, 0.0);
+        assert_eq!(LIGHT_THEME.border.radius_small, 0.0);
+        assert_eq!(LIGHT_THEME.border.radius_menu, 0.0);
     }
 
     #[test]

@@ -1236,7 +1236,7 @@ fn build_panel_scene(
             );
             paint.push(PaintNode::RoundedRect {
                 rect: field,
-                radius: 8.0,
+                radius: 0.0,
                 fill: nuraloumi_render_cairo::Fill::Solid(theme.card),
                 stroke: Some((
                     if search.focused {
@@ -1284,11 +1284,9 @@ fn build_panel_scene(
         } else {
             Rect::new(rect.x + 6.0, rect.y + 8.0, 5.0, 5.0)
         };
-        paint.push(PaintNode::RoundedRect {
+        paint.push(PaintNode::FillRect {
             rect: marker,
-            radius: 2.5,
-            fill: nuraloumi_render_cairo::Fill::Solid(marker_color),
-            stroke: None,
+            color: marker_color,
         });
 
         let available = if horizontal {
@@ -2538,6 +2536,24 @@ mod tests {
         assert!(network.rect.right() < search.rect.x);
         assert!(search.rect.right() < audio.rect.x);
         assert_eq!(clock.rect.right(), scene.panel_rect.right());
+    }
+
+    #[test]
+    fn panel_visual_geometry_uses_square_corners() {
+        let snapshot = FixtureSnapshot::default();
+        let config = ShellConfig::default();
+        let scene = build_panel_scene(
+            &snapshot,
+            &config,
+            &PanelSearchView::default(),
+            (1280, config.panel_height, 1),
+            RenderTheme::dark(),
+        );
+
+        assert!(scene.paint.iter().all(|node| match node {
+            PaintNode::RoundedRect { radius, .. } => *radius == 0.0,
+            _ => true,
+        }));
     }
 
     #[test]
