@@ -95,7 +95,7 @@ See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for the full schema, preceden
 
 ## Releases
 
-Release history and compatibility notes are tracked in [CHANGELOG.md](CHANGELOG.md). The first tagged release is `0.0.1`.
+Release history and compatibility notes are tracked in [CHANGELOG.md](CHANGELOG.md). The current release line is `0.0.2`; `0.0.1` remains the first tagged release.
 
 ## Workspace
 
