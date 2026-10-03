@@ -1283,6 +1283,7 @@ fn refresh_application_snapshot(
                     generic_name: application.generic_name,
                     keywords: application.keywords,
                     launchable: application.launchable,
+                    pinned: false,
                 })
                 .collect();
             apply_launcher_preferences(&mut snapshot.applications, preferences);

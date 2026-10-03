@@ -468,6 +468,8 @@ pub struct ApplicationEntry {
     pub keywords: Vec<String>,
     #[serde(default)]
     pub launchable: bool,
+    #[serde(default)]
+    pub pinned: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -490,20 +492,21 @@ pub fn apply_launcher_preferences(
         .map(String::as_str)
         .collect::<BTreeSet<_>>();
     applications.retain(|application| !hidden.contains(application.id.as_str()));
-    for application in applications.iter_mut() {
-        if let Some(label) = preferences.labels.get(&application.id) {
-            application.label = label.clone();
-        }
-    }
-    if preferences.pinned.is_empty() {
-        return;
-    }
     let rank = preferences
         .pinned
         .iter()
         .enumerate()
         .map(|(index, id)| (id.as_str(), index))
         .collect::<BTreeMap<_, _>>();
+    for application in applications.iter_mut() {
+        if let Some(label) = preferences.labels.get(&application.id) {
+            application.label = label.clone();
+        }
+        application.pinned = rank.contains_key(application.id.as_str());
+    }
+    if rank.is_empty() {
+        return;
+    }
     let mut indexed = applications.drain(..).enumerate().collect::<Vec<_>>();
     indexed.sort_by_key(|(original, application)| {
         (
@@ -924,6 +927,7 @@ impl Default for FixtureSnapshot {
                     generic_name: Some("Terminal emulator".into()),
                     keywords: vec!["shell".into(), "console".into()],
                     launchable: true,
+                    pinned: false,
                 },
                 ApplicationEntry {
                     id: "thunar.desktop".into(),
@@ -931,6 +935,7 @@ impl Default for FixtureSnapshot {
                     generic_name: Some("File manager".into()),
                     keywords: vec!["files".into(), "folders".into()],
                     launchable: true,
+                    pinned: false,
                 },
                 ApplicationEntry {
                     id: "firefox.desktop".into(),
@@ -938,6 +943,7 @@ impl Default for FixtureSnapshot {
                     generic_name: Some("Web browser".into()),
                     keywords: vec!["web".into(), "internet".into()],
                     launchable: true,
+                    pinned: false,
                 },
             ],
             desktops: vec![
@@ -1163,45 +1169,68 @@ pub fn build_launcher_menu_for(snapshot: &FixtureSnapshot, mode: OverviewMode) -
     }
 
     if matches!(mode, OverviewMode::All | OverviewMode::Apps) {
+        let app_item = |application: &ApplicationEntry| {
+            let mut detail = Vec::new();
+            if let Some(generic_name) = &application.generic_name {
+                detail.push(generic_name.clone());
+            }
+            if !application.keywords.is_empty() {
+                detail.push(
+                    application
+                        .keywords
+                        .iter()
+                        .take(3)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(" · "),
+                );
+            }
+            let subtitle = if detail.is_empty() {
+                Some(application.id.as_str())
+            } else {
+                None
+            };
+            let joined_detail = (!detail.is_empty()).then(|| detail.join(" · "));
+            custom_action(
+                &format!("overview.app.{}", application.id),
+                &application.label,
+                joined_detail.as_deref().or(subtitle),
+                "app.launch",
+                &application.id,
+                application.launchable,
+            )
+        };
+
+        let pinned = snapshot
+            .applications
+            .iter()
+            .filter(|application| application.pinned)
+            .take(12)
+            .collect::<Vec<_>>();
+        if !pinned.is_empty() {
+            items.push(section("launcher.favorites", "Favorites"));
+            items.extend(pinned.into_iter().map(app_item));
+        }
+
+        let applications = snapshot
+            .applications
+            .iter()
+            .filter(|application| !application.pinned)
+            .take(32)
+            .collect::<Vec<_>>();
         items.push(section("launcher.apps", "Applications"));
-        if snapshot.applications.is_empty() {
+        if applications.is_empty() {
             items.push(status(
                 "launcher.apps.empty",
-                "No applications",
-                "Desktop-entry provider has no visible applications",
+                "No other applications",
+                if snapshot.applications.is_empty() {
+                    "Desktop-entry provider has no visible applications"
+                } else {
+                    "All visible applications are pinned as favorites"
+                },
             ));
         } else {
-            items.extend(snapshot.applications.iter().take(32).map(|application| {
-                let mut detail = Vec::new();
-                if let Some(generic_name) = &application.generic_name {
-                    detail.push(generic_name.clone());
-                }
-                if !application.keywords.is_empty() {
-                    detail.push(
-                        application
-                            .keywords
-                            .iter()
-                            .take(3)
-                            .cloned()
-                            .collect::<Vec<_>>()
-                            .join(" · "),
-                    );
-                }
-                let subtitle = if detail.is_empty() {
-                    Some(application.id.as_str())
-                } else {
-                    None
-                };
-                let joined_detail = (!detail.is_empty()).then(|| detail.join(" · "));
-                custom_action(
-                    &format!("overview.app.{}", application.id),
-                    &application.label,
-                    joined_detail.as_deref().or(subtitle),
-                    "app.launch",
-                    &application.id,
-                    application.launchable,
-                )
-            }));
+            items.extend(applications.into_iter().map(app_item));
         }
     }
 
@@ -2818,6 +2847,7 @@ mod tests {
                 generic_name: None,
                 keywords: vec![],
                 launchable: true,
+                pinned: false,
             },
             ApplicationEntry {
                 id: "b.desktop".into(),
@@ -2825,6 +2855,7 @@ mod tests {
                 generic_name: None,
                 keywords: vec![],
                 launchable: true,
+                pinned: false,
             },
             ApplicationEntry {
                 id: "c.desktop".into(),
@@ -2832,6 +2863,7 @@ mod tests {
                 generic_name: None,
                 keywords: vec![],
                 launchable: true,
+                pinned: false,
             },
         ];
         let mut preferences = LauncherPreferences {
@@ -2851,7 +2883,68 @@ mod tests {
             vec!["c.desktop", "a.desktop"]
         );
         assert_eq!(applications[0].label, "Pinned C");
+        assert!(applications[0].pinned);
+        assert!(!applications[1].pinned);
         assert!(applications.iter().all(|app| app.launchable));
+    }
+
+    #[test]
+    fn launcher_renders_pinned_apps_once_in_a_favorites_section() {
+        let mut snapshot = FixtureSnapshot::default();
+        let preferences = LauncherPreferences {
+            pinned: vec!["firefox.desktop".into(), "foot.desktop".into()],
+            ..LauncherPreferences::default()
+        };
+        apply_launcher_preferences(&mut snapshot.applications, &preferences);
+
+        let menu = build_launcher_menu_for(&snapshot, OverviewMode::Apps);
+        let section_labels = menu
+            .items
+            .iter()
+            .filter(|item| item.kind == MenuItemKind::Section)
+            .map(|item| item.label.as_str())
+            .collect::<Vec<_>>();
+        assert!(section_labels
+            .windows(2)
+            .any(|labels| labels == ["Favorites", "Applications"]));
+
+        let firefox_id = "overview.app.firefox.desktop";
+        let foot_id = "overview.app.foot.desktop";
+        assert_eq!(
+            menu.items
+                .iter()
+                .filter(|item| item.id == firefox_id)
+                .count(),
+            1
+        );
+        assert_eq!(
+            menu.items.iter().filter(|item| item.id == foot_id).count(),
+            1
+        );
+
+        let favorite_section = menu
+            .items
+            .iter()
+            .position(|item| item.id == "launcher.favorites")
+            .unwrap();
+        let application_section = menu
+            .items
+            .iter()
+            .position(|item| item.id == "launcher.apps")
+            .unwrap();
+        let firefox = menu
+            .items
+            .iter()
+            .position(|item| item.id == firefox_id)
+            .unwrap();
+        let foot = menu
+            .items
+            .iter()
+            .position(|item| item.id == foot_id)
+            .unwrap();
+        assert!(favorite_section < firefox);
+        assert!(firefox < foot);
+        assert!(foot < application_section);
     }
 
     #[test]
@@ -2998,6 +3091,7 @@ mod tests {
                 generic_name: Some("Graphical application".into()),
                 keywords: vec!["gui".into()],
                 launchable: true,
+                pinned: false,
             })
             .collect();
 

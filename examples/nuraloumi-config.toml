@@ -13,7 +13,8 @@ theme = "dark"
 reduced_motion = false
 
 # Launcher entries still come exclusively from discovered XDG .desktop files.
-# Unknown IDs are ignored for ordering/labels because they do not create apps.
+# Pinned entries appear once under Favorites, in this order. Unknown IDs are
+# ignored because launcher config never creates executable application entries.
 [launcher]
 pinned = [
   "foot.desktop",

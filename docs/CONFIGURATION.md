@@ -88,9 +88,9 @@ Unknown or malformed values fail configuration loading instead of being guessed.
 
 ### `launcher.pinned`
 
-A list of discovered desktop IDs in desired priority order. Matching entries move to the front while the original deterministic order of all other discovered entries is preserved.
+A list of discovered desktop IDs in desired favorite order. Matching entries are shown once in a dedicated **Favorites** section before the general **Applications** section. Non-pinned applications retain their deterministic desktop-entry discovery order.
 
-An ID that is not currently discovered does not create an application entry.
+An ID that is not currently discovered does not create an application entry. Pinned entries remain ordinary discovered XDG applications; the config only changes launcher presentation.
 
 ### `launcher.hidden`
 
