@@ -4,35 +4,37 @@
 
 NuraLoumi should feel like a compact instrument rather than a phone skin:
 - deep neutral surfaces;
-- violet accent;
+- muted steel accent;
 - thin structured borders;
+- square, flush geometry;
 - large calm touch targets;
 - strong typography hierarchy;
 - limited motion;
 - almost no decorative chrome.
 
 Reference dark palette:
-- base #111218
-- raised #181921
-- overlay #1c1d27
-- card #1f202b
-- selected #3a2d5c
-- primary text #f4f4f8
-- secondary text #bebfcc
-- hint #8e90a0
-- accent #a78bfa
-- warning #fbbf24
-- error #f87171
+- base #0b0d0f
+- raised #101215
+- overlay #14171b
+- card #171a1f
+- selected #242930
+- primary text #e8eaed
+- secondary text #a9aeb6
+- hint #7b818a
+- accent #959eac
+- warning #c9a25d
+- error #d77878
 
 ## Geometry
 
-- panel height: 48 logical px default.
-- primary menu row: 52 px; compact row: 40 px.
+- panel height: 40 logical px default.
+- primary menu row: at least 48 logical px; compact structural rows may be smaller.
 - menu width: 420-520 px depending on output width.
 - outer padding: 16 px.
-- card/menu radius: 10-12 px.
+- card/menu/search/status radius: 0 px.
 - border: 1 px.
-- shadow: one cheap offset/soft shadow only; disable on constrained mode.
+- shadows: none in the reference software-rendered path.
+- selected actionable row: darker fill plus a narrow muted-steel leading rail.
 - separator: 1 px with low opacity.
 
 ## Primary surfaces
@@ -47,18 +49,24 @@ Reference dark palette:
 ### Launcher sheet
 ```text
 ┌────────────────────────────────────────┐
-│ Apps                                   │
-│ ┌────────────────────────────────────┐ │
-│ │ Search applications…               │ │
-│ └────────────────────────────────────┘ │
+│ Launcher                               │
+│ Search applications and windows…       │
 ├────────────────────────────────────────┤
-│ Terminal                           ›   │
+│ Favorites                              │
+│ Firefox                                │
+│ Terminal                               │
+├────────────────────────────────────────┤
+│ Open windows                           │
+│ Firefox — project docs                 │
+│ Terminal — build                       │
+├────────────────────────────────────────┤
+│ Applications                           │
 │ Files                                  │
-│ Browser                                │
 │ Music                                  │
 ├────────────────────────────────────────┤
-│ Recent                                 │
-│ Project / file                         │
+│ More                                   │
+│ All applications · Window controls     │
+│ Tasks · Desktops · Settings · Power    │
 └────────────────────────────────────────┘
 ```
 
@@ -87,6 +95,8 @@ Reference dark palette:
 - Search input owns text keys only while focused.
 - Destructive actions always enter a confirmation model; renderer cannot bypass it.
 - Touch press has pressed feedback; activation occurs on release inside the same hit region.
+- Pointer/touch press outside a transient menu dismisses it by default; the persistent panel stays visible.
+- Successful app launch, window focus, or desktop switch dismisses a transient menu by default; continuous controls stay open.
 - Long press is reserved; do not overload it in 0.1.
 - Slider keyboard must remain fully usable without touch.
 
