@@ -143,7 +143,7 @@ fn argb_preview_overlay_changes_pixels_without_scene_mutation() {
         )
         .expect("preview overlay");
     let pixels = buffer.copy_argb32_bytes().expect("read raster");
-    assert!(pixels.chunks_exact(4).any(|pixel| pixel == marker));
+    assert!(pixels.as_chunks::<4>().0.contains(&marker));
     assert_eq!(scene.hits, original_hits);
 }
 
