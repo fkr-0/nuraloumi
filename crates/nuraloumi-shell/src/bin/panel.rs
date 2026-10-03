@@ -630,6 +630,7 @@ fn run_live(
                     &action_report,
                     nuraloumi_shell::ActionReport::SearchChanged { .. }
                 ) {
+                    menu.shell.refresh_family(menu.family, &snapshot)?;
                     panel_scene = None;
                 }
                 eprintln!(

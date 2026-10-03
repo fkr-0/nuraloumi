@@ -1087,6 +1087,15 @@ fn launcher_application_item(application: &ApplicationEntry) -> MenuItem {
 }
 
 pub fn build_launcher_menu_for(snapshot: &FixtureSnapshot, mode: OverviewMode) -> MenuModel {
+    build_launcher_menu_for_query(snapshot, mode, "")
+}
+
+fn build_launcher_menu_for_query(
+    snapshot: &FixtureSnapshot,
+    mode: OverviewMode,
+    query: &str,
+) -> MenuModel {
+    let searching = !query.trim().is_empty();
     let search_label = match mode {
         OverviewMode::All => "Search applications and windows…",
         OverviewMode::Windows => "Search open windows…",
@@ -1137,11 +1146,13 @@ pub fn build_launcher_menu_for(snapshot: &FixtureSnapshot, mode: OverviewMode) -
             .applications
             .iter()
             .filter(|application| application.pinned)
+            .map(launcher_application_item)
+            .filter(|item| !searching || nuraloumi_core::matches_query(item, query))
             .take(8)
             .collect::<Vec<_>>();
         if !pinned.is_empty() {
             items.push(section("launcher.favorites", "Favorites"));
-            items.extend(pinned.into_iter().map(launcher_application_item));
+            items.extend(pinned);
         }
     }
 
@@ -1164,36 +1175,53 @@ pub fn build_launcher_menu_for(snapshot: &FixtureSnapshot, mode: OverviewMode) -
                         .unwrap_or("Compositor does not advertise per-toplevel image capture"),
                 ));
             }
-            let window_limit = if mode == OverviewMode::All { 8 } else { 16 };
-            items.extend(snapshot.windows.iter().take(window_limit).map(|window| {
-                if mode == OverviewMode::Windows {
-                    window_control_item(window, format!("overview.window.{}", window.id))
-                } else {
-                    let subtitle = match (&window.app_id, window.focused) {
-                        (Some(app_id), true) => format!("Focused · {app_id}"),
-                        (Some(app_id), false) => app_id.clone(),
-                        (None, true) => "Focused".to_owned(),
-                        (None, false) => "Open window".to_owned(),
-                    };
-                    custom_action(
-                        &format!("overview.window.{}", window.id),
-                        &window.title,
-                        Some(&subtitle),
-                        "window.focus",
-                        &window.id,
-                        window.focusable,
-                    )
-                }
-            }));
+            let window_limit = if mode == OverviewMode::All && !searching {
+                8
+            } else {
+                16
+            };
+            items.extend(
+                snapshot
+                    .windows
+                    .iter()
+                    .map(|window| {
+                        if mode == OverviewMode::Windows {
+                            window_control_item(window, format!("overview.window.{}", window.id))
+                        } else {
+                            let subtitle = match (&window.app_id, window.focused) {
+                                (Some(app_id), true) => format!("Focused · {app_id}"),
+                                (Some(app_id), false) => app_id.clone(),
+                                (None, true) => "Focused".to_owned(),
+                                (None, false) => "Open window".to_owned(),
+                            };
+                            custom_action(
+                                &format!("overview.window.{}", window.id),
+                                &window.title,
+                                Some(&subtitle),
+                                "window.focus",
+                                &window.id,
+                                window.focusable,
+                            )
+                        }
+                    })
+                    .filter(|item| !searching || nuraloumi_core::matches_query(item, query))
+                    .take(window_limit),
+            );
         }
     }
 
     if matches!(mode, OverviewMode::All | OverviewMode::Apps) {
-        let application_limit = if mode == OverviewMode::All { 12 } else { 32 };
+        let application_limit = if mode == OverviewMode::All && !searching {
+            12
+        } else {
+            32
+        };
         let applications = snapshot
             .applications
             .iter()
             .filter(|application| !application.pinned)
+            .map(launcher_application_item)
+            .filter(|item| !searching || nuraloumi_core::matches_query(item, query))
             .take(application_limit)
             .collect::<Vec<_>>();
         items.push(section("launcher.apps", "Applications"));
@@ -1208,7 +1236,7 @@ pub fn build_launcher_menu_for(snapshot: &FixtureSnapshot, mode: OverviewMode) -
                 },
             ));
         } else {
-            items.extend(applications.into_iter().map(launcher_application_item));
+            items.extend(applications);
         }
     }
 
@@ -1225,8 +1253,9 @@ pub fn build_launcher_menu_for(snapshot: &FixtureSnapshot, mode: OverviewMode) -
                 snapshot
                     .tasks
                     .iter()
-                    .take(24)
-                    .map(|task| task_detail_item(task, format!("overview.task.{}", task.id))),
+                    .map(|task| task_detail_item(task, format!("overview.task.{}", task.id)))
+                    .filter(|item| !searching || nuraloumi_core::matches_query(item, query))
+                    .take(24),
             );
         }
     }
@@ -1245,7 +1274,6 @@ pub fn build_launcher_menu_for(snapshot: &FixtureSnapshot, mode: OverviewMode) -
                     .desktops
                     .iter()
                     .filter(|desktop| !desktop.hidden)
-                    .take(16)
                     .map(|desktop| {
                         let subtitle = match (
                             desktop.active,
@@ -1286,7 +1314,9 @@ pub fn build_launcher_menu_for(snapshot: &FixtureSnapshot, mode: OverviewMode) -
                                 snapshot.desktop_capabilities.switch && desktop.switchable,
                             )
                         }
-                    }),
+                    })
+                    .filter(|item| !searching || nuraloumi_core::matches_query(item, query))
+                    .take(16),
             );
         }
 
@@ -1342,6 +1372,14 @@ pub fn build_launcher_menu_for(snapshot: &FixtureSnapshot, mode: OverviewMode) -
                 Some("Switch workspaces and inspect desktop state"),
                 "overview.mode",
                 OverviewMode::Desktops.as_str(),
+                true,
+            ),
+            custom_action(
+                "launcher.more.tasks",
+                "Tasks",
+                Some("Inspect the read-only running task snapshot"),
+                "overview.mode",
+                OverviewMode::Tasks.as_str(),
                 true,
             ),
             custom_action(
@@ -2490,7 +2528,9 @@ impl ShellState {
         snapshot: &FixtureSnapshot,
     ) -> Result<(), String> {
         let menu = match family {
-            MenuFamily::Launcher => build_launcher_menu_for(snapshot, self.overview_mode),
+            MenuFamily::Launcher => {
+                build_launcher_menu_for_query(snapshot, self.overview_mode, &self.state.query)
+            }
             MenuFamily::ControlCenter => {
                 build_control_center_menu(snapshot, self.control_center_tab)
             }
@@ -2508,7 +2548,8 @@ impl ShellState {
             return Err("overview mode is only valid for the launcher surface".into());
         }
         self.overview_mode = mode;
-        self.refresh_menu(build_launcher_menu_for(snapshot, mode))
+        let menu = build_launcher_menu_for_query(snapshot, mode, &self.state.query);
+        self.refresh_menu(menu)
     }
 
     pub fn set_control_center_tab(
@@ -3125,6 +3166,18 @@ mod tests {
             .items
             .iter()
             .any(|item| item.id == "launcher.more.desktops"));
+        let tasks = menu
+            .items
+            .iter()
+            .find(|item| item.id == "launcher.more.tasks")
+            .expect("tasks route");
+        assert!(matches!(
+            tasks.action,
+            Some(MenuAction::Custom {
+                ref kind,
+                ref payload
+            }) if kind == "overview.mode" && payload == "tasks"
+        ));
         assert!(menu
             .items
             .iter()
@@ -3133,6 +3186,57 @@ mod tests {
             .items
             .iter()
             .any(|item| item.id == "launcher.more.power"));
+    }
+
+    #[test]
+    fn launcher_search_filters_full_snapshot_before_daily_caps() {
+        let mut snapshot = FixtureSnapshot::default();
+        snapshot.windows.clear();
+        snapshot.tasks.clear();
+        snapshot.desktops.clear();
+        snapshot.applications = (0..20)
+            .map(|index| ApplicationEntry {
+                id: format!("app-{index:02}.desktop"),
+                label: if index == 19 {
+                    "Needle App".into()
+                } else {
+                    format!("GUI App {index:02}")
+                },
+                generic_name: Some("Graphical application".into()),
+                keywords: if index == 19 {
+                    vec!["needle".into()]
+                } else {
+                    vec!["gui".into()]
+                },
+                launchable: true,
+                pinned: false,
+            })
+            .collect();
+
+        let mut shell = shell_with(build_launcher_menu_for(&snapshot, OverviewMode::All));
+        assert!(!shell
+            .menu
+            .items
+            .iter()
+            .any(|item| item.id == "overview.app.app-19.desktop"));
+
+        shell.apply_input(launcher_search_input());
+        assert!(matches!(
+            shell.apply_semantic(SemanticInput::Text("needle".into())),
+            ActionReport::SearchChanged { .. }
+        ));
+        shell
+            .refresh_family(MenuFamily::Launcher, &snapshot)
+            .expect("refresh filtered launcher");
+
+        assert_eq!(shell.state.query, "needle");
+        assert_eq!(
+            shell.state.selected_id.as_deref(),
+            Some("overview.app.app-19.desktop")
+        );
+        let visible = shell.state.visible_items(&shell.menu);
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].id, "overview.app.app-19.desktop");
     }
 
     #[test]

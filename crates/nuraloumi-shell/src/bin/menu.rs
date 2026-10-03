@@ -247,7 +247,11 @@ fn run() -> Result<(), String> {
     let mut reports = Vec::new();
     if let Some(input) = args.input.as_deref() {
         for step in input.split(',').filter(|step| !step.is_empty()) {
-            reports.push(shell.apply_input(parse_input(step)?));
+            let report = shell.apply_input(parse_input(step)?);
+            if matches!(report, ActionReport::SearchChanged { .. }) {
+                let _ = refresh_builtin_menu(&mut shell, &snapshot)?;
+            }
+            reports.push(report);
         }
     }
 
@@ -745,6 +749,10 @@ fn handle_live_report(
     policy: LivePolicy,
 ) -> Result<bool, String> {
     log_live_report(report)?;
+
+    if matches!(report, ActionReport::SearchChanged { .. }) {
+        let _ = refresh_builtin_menu(shell, snapshot)?;
+    }
 
     if let ActionReport::Dispatched {
         action: MenuAction::Custom { kind, payload },
