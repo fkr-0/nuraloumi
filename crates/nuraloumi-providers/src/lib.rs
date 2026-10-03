@@ -17,6 +17,7 @@ pub mod network;
 pub mod notifications;
 pub mod probe;
 pub mod processes;
+pub mod renderer;
 pub mod resources;
 pub mod session;
 

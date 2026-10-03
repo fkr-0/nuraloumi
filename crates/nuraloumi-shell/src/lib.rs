@@ -830,6 +830,10 @@ pub struct FixtureSnapshot {
     pub battery: ProviderValue,
     pub clock: ProviderValue,
     pub brightness: ProviderValue,
+    #[serde(default)]
+    pub renderer: Option<String>,
+    #[serde(default)]
+    pub renderer_switch_available: bool,
     #[serde(default = "default_brightness_writable")]
     pub brightness_writable: bool,
     #[serde(default = "default_bluetooth_value")]
@@ -892,6 +896,8 @@ impl Default for FixtureSnapshot {
                 value: Some("62%".into()),
                 message: None,
             },
+            renderer: None,
+            renderer_switch_available: false,
             brightness_writable: true,
             bluetooth: ProviderValue {
                 state: ValueState::Ready,
@@ -1672,6 +1678,7 @@ pub fn build_control_center_menu(snapshot: &FixtureSnapshot, tab: ControlCenterT
             ]);
         }
         ControlCenterTab::System => {
+            items.extend(renderer_items(snapshot));
             items.extend([
                 section("control.system.status", "System"),
                 provider_status("control.system.battery", "Battery", &snapshot.battery),
@@ -2284,6 +2291,7 @@ pub fn build_system_menu(snapshot: &FixtureSnapshot) -> MenuModel {
         ));
     }
 
+    items.extend(renderer_items(snapshot));
     items.extend([
         section("system.session", "Power"),
         confirm_action("system.suspend", "Suspend", "system.suspend"),
@@ -2431,6 +2439,30 @@ fn adjustable(id: &str, label: &str, action_id: &str, delta: i32, enabled: bool)
     item
 }
 
+fn renderer_items(snapshot: &FixtureSnapshot) -> Vec<MenuItem> {
+    let mut items = vec![status(
+        "renderer.current",
+        "Compositor renderer",
+        snapshot.renderer.as_deref().unwrap_or("Unknown"),
+    )];
+    for (mode, label, current) in [
+        ("pixman", "Pixman (software)", "Pixman"),
+        ("grate", "Grate EGL (experimental)", "Grate"),
+    ] {
+        let mut item = MenuItem::action(format!("renderer.{mode}"), label, MenuAction::destructive(
+            "Restart desktop?",
+            Some("This closes application windows. Boot defaults stay unchanged. Grate has known pixel differences; failed startup returns to Pixman.".into()),
+            MenuAction::Custom { kind: "renderer.switch".into(), payload: mode.into() },
+        )).with_subtitle("Restarts labwc and closes application windows");
+        if !snapshot.renderer_switch_available || snapshot.renderer.as_deref() == Some(current) {
+            item.enabled = false;
+            item.action = None;
+        }
+        items.push(item);
+    }
+    items
+}
+
 fn confirm_action(id: &str, label: &str, action_id: &str) -> MenuItem {
     MenuItem::action(
         id,
@@ -2569,6 +2601,31 @@ impl ShellState {
             pointer_pressed_region: None,
             touch_pressed_regions: BTreeMap::new(),
         })
+    }
+
+    /// Show the pending renderer confirmation without changing the action model.
+    pub fn renderer_presentation_menu(&self) -> MenuModel {
+        let mut menu = self.menu.clone();
+        if let Some(id) = self
+            .pending_confirmation
+            .as_deref()
+            .filter(|id| id.starts_with("renderer."))
+        {
+            if let Some(index) = menu.items.iter().position(|item| item.id == id) {
+                menu.items[index].label = "Confirm desktop restart?".into();
+                menu.items[index].subtitle =
+                    Some("Closes windows. Activate again; Esc cancels.".into());
+                menu.items.insert(
+                    index,
+                    status(
+                        "renderer.confirmation.warning",
+                        "Grate is experimental; known pixel differences",
+                        "Failed startup returns to Pixman. Boot unchanged.",
+                    ),
+                );
+            }
+        }
+        menu
     }
 
     pub fn refresh_menu(&mut self, menu: MenuModel) -> Result<(), String> {
@@ -2848,6 +2905,19 @@ pub fn panel_affordances(snapshot: &FixtureSnapshot) -> Vec<PanelAffordance> {
             state: snapshot.battery.state,
         },
         PanelAffordance {
+            id: "renderer".into(),
+            label: snapshot
+                .renderer
+                .clone()
+                .unwrap_or_else(|| "Unknown".into()),
+            value: None,
+            state: if snapshot.renderer.is_some() {
+                ValueState::Ready
+            } else {
+                ValueState::Unavailable
+            },
+        },
+        PanelAffordance {
             id: "clock".into(),
             label: "Clock".into(),
             value: snapshot.clock.value.clone(),
@@ -2902,6 +2972,63 @@ pub fn live_backend_status() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pending_renderer_confirmation_is_visible_and_cancelable() {
+        let snapshot = FixtureSnapshot {
+            renderer: Some("Pixman".into()),
+            renderer_switch_available: true,
+            ..FixtureSnapshot::default()
+        };
+        let mut shell = shell_with(build_system_menu(&snapshot));
+        shell.state.selected_id = Some("renderer.grate".into());
+        assert!(matches!(
+            shell.apply_semantic(SemanticInput::Activate),
+            ActionReport::ConfirmationRequired { .. }
+        ));
+        let presentation = shell.renderer_presentation_menu();
+        let row = presentation
+            .items
+            .iter()
+            .find(|item| item.id == "renderer.grate")
+            .unwrap();
+        assert_eq!(row.label, "Confirm desktop restart?");
+        assert!(row.subtitle.as_deref().unwrap().contains("Closes windows"));
+        assert!(presentation
+            .items
+            .iter()
+            .any(|item| item.id == "renderer.confirmation.warning"));
+        shell.apply_semantic(SemanticInput::Back);
+        assert!(shell.pending_confirmation.is_none());
+        assert!(!shell
+            .renderer_presentation_menu()
+            .items
+            .iter()
+            .any(|item| item.id == "renderer.confirmation.warning"));
+    }
+
+    #[test]
+    fn renderer_switch_is_confirmed_and_requires_capability() {
+        let mut snapshot = FixtureSnapshot::default();
+        assert!(renderer_items(&snapshot)
+            .iter()
+            .skip(1)
+            .all(|item| !item.enabled && item.action.is_none()));
+        snapshot.renderer = Some("Pixman".into());
+        snapshot.renderer_switch_available = true;
+        let items = renderer_items(&snapshot);
+        assert!(!items[1].enabled);
+        assert!(
+            matches!(&items[2].action, Some(MenuAction::Confirm { confirmation, .. }) if confirmation.body.as_deref().is_some_and(|message| message.contains("closes application windows")))
+        );
+        let affordances = panel_affordances(&snapshot);
+        let clock = affordances
+            .iter()
+            .position(|item| item.id == "clock")
+            .unwrap();
+        assert_eq!(affordances[clock - 1].id, "renderer");
+        assert_eq!(affordances[clock - 1].label, "Pixman");
+    }
 
     fn shell_with(menu: MenuModel) -> ShellState {
         ShellState::new(menu, false).expect("valid test menu")

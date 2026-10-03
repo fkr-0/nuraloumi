@@ -1345,6 +1345,8 @@ fn fixture_snapshot_from_probe(probe: &ProbeSnapshot) -> FixtureSnapshot {
             brightness_value,
             &probe.backlight.issues,
         ),
+        renderer: None,
+        renderer_switch_available: false,
         brightness_writable,
         bluetooth: probe_value(
             &probe.bluetooth.meta,

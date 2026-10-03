@@ -104,6 +104,7 @@ OPTIONS:
     --dump-keybindings         Print effective keybinding registry as JSON and exit
     --open <family>            Open launcher|control-center|network|audio|system initially
     --reduced-motion           Force reduced-motion state
+    --enable-renderer-switch   Allow confirmed compositor restart in live mode
     --enable-power-actions     Allow confirmed suspend/reboot/poweroff in live mode
     -h, --help                 Show this help
 
@@ -124,6 +125,7 @@ struct Args {
     open: Option<String>,
     reduced_motion: bool,
     enable_power_actions: bool,
+    enable_renderer_switch: bool,
 }
 
 fn refresh_workspace_snapshot(snapshot: &mut FixtureSnapshot, backend: &WaylandBackend) {
@@ -180,6 +182,7 @@ struct LiveMenu {
 struct LivePolicy {
     execute_provider_actions: bool,
     enable_power_actions: bool,
+    enable_renderer_switch: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -230,6 +233,9 @@ fn run() -> Result<(), String> {
     if args.enable_power_actions && !args.live {
         return Err("--enable-power-actions requires --live".into());
     }
+    if args.enable_renderer_switch && !args.live {
+        return Err("--enable-renderer-switch requires --live".into());
+    }
     let mut config = load_config_or_default(args.config.as_deref())?;
     if args.reduced_motion {
         config.reduced_motion = true;
@@ -263,6 +269,7 @@ fn run() -> Result<(), String> {
             LivePolicy {
                 execute_provider_actions: args.providers.is_none(),
                 enable_power_actions: args.enable_power_actions,
+                enable_renderer_switch: args.enable_renderer_switch,
             },
             defer_live_provider_refresh,
         );
@@ -842,7 +849,11 @@ fn run_live(
                                     }
                                 }
                                 if !app_reused {
-                                    match execute_live_action(action, policy.enable_power_actions) {
+                                    match execute_live_action(
+                                        action,
+                                        policy.enable_power_actions,
+                                        policy.enable_renderer_switch,
+                                    ) {
                                         Ok(Some(result)) => {
                                             eprintln!(
                                             "nuraloumi-provider-result: executed={} dry_run={} message={}",
@@ -859,6 +870,7 @@ fn run_live(
                                                     refresh_probe_snapshot(
                                                         &mut snapshot,
                                                         &ProbeSnapshot::live(),
+                                                        policy.enable_renderer_switch,
                                                     );
                                                     refresh_window_snapshot(
                                                         &mut snapshot,
@@ -884,6 +896,7 @@ fn run_live(
                                                 refresh_probe_snapshot(
                                                     &mut snapshot,
                                                     &ProbeSnapshot::live(),
+                                                    policy.enable_renderer_switch,
                                                 );
                                                 refresh_window_snapshot(&mut snapshot, &backend);
                                                 refresh_workspace_snapshot(&mut snapshot, &backend);
@@ -956,7 +969,7 @@ fn run_live(
                 .expect("finished live provider probe must exist")
                 .join()
                 .map_err(|_| "initial live provider probe panicked".to_owned())?;
-            refresh_probe_snapshot(&mut snapshot, &probe);
+            refresh_probe_snapshot(&mut snapshot, &probe, policy.enable_renderer_switch);
             apply_application_snapshot(&mut snapshot, applications, &config.launcher);
             apply_process_snapshot(&mut snapshot, tasks);
             if policy.execute_provider_actions {
@@ -1266,9 +1279,10 @@ fn render_menu_and_present(
         ShellTheme::Dark => &DARK_THEME,
         ShellTheme::Light => &LIGHT_THEME,
     };
+    let presentation_menu = shell.renderer_presentation_menu();
     let (scene, mut buffer) = render_menu_follow_selection(
         renderer,
-        &shell.menu,
+        &presentation_menu,
         &shell.state,
         viewport,
         theme_tokens,
@@ -1592,6 +1606,7 @@ fn panel_affordance_rects(
             "network" => Some(310.0),
             "audio" => Some(140.0),
             "battery" => Some(180.0),
+            "renderer" => Some(96.0),
             "clock" => Some(118.0),
             _ => None,
         }
@@ -1607,7 +1622,7 @@ fn panel_affordance_rects(
         .sum();
     let right_total: f64 = affordances
         .iter()
-        .filter(|item| matches!(item.id.as_str(), "audio" | "battery" | "clock"))
+        .filter(|item| matches!(item.id.as_str(), "audio" | "battery" | "renderer" | "clock"))
         .filter_map(|item| width_for(&item.id))
         .sum();
     let center_available = panel_rect.width - left_total - right_total;
@@ -1705,7 +1720,7 @@ fn panel_target_for_id(id: &str) -> Option<PanelTarget> {
             false,
             Some(ControlCenterTab::Media),
         ),
-        "battery" | "clock" => (
+        "battery" | "renderer" | "clock" => (
             MenuFamily::ControlCenter,
             false,
             Some(ControlCenterTab::System),
@@ -1803,6 +1818,9 @@ fn fixture_snapshot_from_probe(probe: &ProbeSnapshot) -> FixtureSnapshot {
             brightness_value,
             &probe.backlight.issues,
         ),
+        renderer: Some(nuraloumi_providers::renderer::running_renderer().into()),
+        renderer_switch_available: std::path::Path::new("/usr/local/sbin/sl101-renderer-switch")
+            .exists(),
         brightness_writable,
         bluetooth: probe_value(
             &probe.bluetooth.meta,
@@ -1855,7 +1873,11 @@ fn fixture_snapshot_from_probe(probe: &ProbeSnapshot) -> FixtureSnapshot {
     }
 }
 
-fn refresh_probe_snapshot(snapshot: &mut FixtureSnapshot, probe: &ProbeSnapshot) {
+fn refresh_probe_snapshot(
+    snapshot: &mut FixtureSnapshot,
+    probe: &ProbeSnapshot,
+    enable_renderer_switch: bool,
+) {
     let tasks = std::mem::take(&mut snapshot.tasks);
     let applications = std::mem::take(&mut snapshot.applications);
     let windows = std::mem::take(&mut snapshot.windows);
@@ -1869,6 +1891,7 @@ fn refresh_probe_snapshot(snapshot: &mut FixtureSnapshot, probe: &ProbeSnapshot)
     let notifications = snapshot.notifications.clone();
     let notification_history = snapshot.notification_history.clone();
     *snapshot = fixture_snapshot_from_probe(probe);
+    snapshot.renderer_switch_available &= enable_renderer_switch;
     snapshot.tasks = tasks;
     snapshot.applications = applications;
     snapshot.windows = windows;
@@ -2379,8 +2402,17 @@ fn window_control_capabilities(backend: &WaylandCapabilities) -> WindowControlCa
 fn execute_live_action(
     action: &MenuAction,
     enable_power_actions: bool,
+    enable_renderer_switch: bool,
 ) -> Result<Option<ActionResult>, String> {
     let result = match action {
+        MenuAction::Custom { kind, payload } if kind == "renderer.switch" => {
+            nuraloumi_providers::renderer::request_switch(
+                &mut SystemCommandRunner,
+                payload,
+                enable_renderer_switch,
+            )
+            .map_err(|error| error.to_string())?
+        }
         MenuAction::Custom { kind, payload } if kind == "app.launch" => {
             ApplicationProvider::system()
                 .execute(ApplicationAction::Launch {
@@ -2552,6 +2584,7 @@ fn parse_args() -> Result<Args, String> {
             "--open" => parsed.open = Some(next_value(&mut args, "--open")?),
             "--reduced-motion" => parsed.reduced_motion = true,
             "--enable-power-actions" => parsed.enable_power_actions = true,
+            "--enable-renderer-switch" => parsed.enable_renderer_switch = true,
             other => return Err(format!("unknown argument {other:?}; use --help")),
         }
     }
@@ -2741,6 +2774,7 @@ mod tests {
             &MenuAction::Activate {
                 id: "system.poweroff".into(),
             },
+            false,
             false,
         )
         .expect("dry-run session action should be valid")

@@ -1,0 +1,2 @@
+# Approved SL101 renderer controls
+Show the actual labwc renderer beside the clock. Open System controls with Pixman and experimental Grate choices. Confirm that restarting labwc closes applications. Use a root-owned helper with fixed modes and a nonblocking qualification lock. Keep boot defaults unchanged; roll failed Grate startup back to Pixman. Compositor acceleration does not assert browser acceleration or pixel qualification.
