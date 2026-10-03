@@ -34,9 +34,10 @@ use crate::{
     shm::{BufferKey, ShmBuffers},
     types::{semantic_key, sorted_touch_ids},
     workspace::WorkspaceStore,
-    BackendCapabilities, BackendError, BackendEvent, Frame, MenuConfig, OutputId, OutputInfo,
-    OutputTransform, PanelConfig, PanelEdge, PlatformEvent, Result, SurfaceId, ToplevelEvent,
-    ToplevelId, ToplevelInfo, ToplevelSource, WorkspaceEvent, WorkspaceId, WorkspaceInfo,
+    BackendCapabilities, BackendError, BackendEvent, DismissBackdropConfig, Frame, MenuConfig,
+    OutputId, OutputInfo, OutputTransform, PanelConfig, PanelEdge, PlatformEvent, Result,
+    SurfaceId, ToplevelEvent, ToplevelId, ToplevelInfo, ToplevelSource, WorkspaceEvent,
+    WorkspaceId, WorkspaceInfo,
 };
 
 struct OutputRecord {
@@ -284,6 +285,29 @@ impl WaylandBackend {
         )
     }
 
+    /// Create a transparent, full-output overlay intended to receive input that
+    /// lands outside a higher transient menu surface.
+    ///
+    /// Create this surface immediately before the menu so the menu stacks above
+    /// it. The shell must present an ARGB buffer after Configure before relying
+    /// on it for input. Non-negative margins can leave a persistent panel strip
+    /// uncovered and interactive.
+    pub fn create_dismiss_backdrop(&mut self, config: DismissBackdropConfig) -> Result<SurfaceId> {
+        validate_dismiss_backdrop_config(&config)?;
+        self.create_layer_surface(
+            config.output,
+            0,
+            0,
+            config.namespace,
+            LayerRole::DismissBackdrop {
+                margin_top: config.margin_top,
+                margin_right: config.margin_right,
+                margin_bottom: config.margin_bottom,
+                margin_left: config.margin_left,
+            },
+        )
+    }
+
     fn create_layer_surface(
         &mut self,
         output: Option<OutputId>,
@@ -316,10 +340,7 @@ impl WaylandBackend {
         let id = SurfaceId(self.state.next_surface_id);
         let surface = compositor.create_surface(&self.qh, id);
 
-        let layer_kind = match role {
-            LayerRole::Panel { .. } => zwlr_layer_shell_v1::Layer::Top,
-            LayerRole::Menu { .. } => zwlr_layer_shell_v1::Layer::Overlay,
-        };
+        let layer_kind = layer_kind(role);
         let layer = layer_shell.get_layer_surface(
             &surface,
             output_proxy.as_ref(),
@@ -337,8 +358,6 @@ impl WaylandBackend {
             } => {
                 layer.set_anchor(panel_anchor(edge));
                 layer.set_exclusive_zone(exclusive_zone);
-                layer
-                    .set_keyboard_interactivity(zwlr_layer_surface_v1::KeyboardInteractivity::None);
             }
             LayerRole::Menu {
                 margin_top,
@@ -348,11 +367,19 @@ impl WaylandBackend {
                     zwlr_layer_surface_v1::Anchor::Top | zwlr_layer_surface_v1::Anchor::Left,
                 );
                 layer.set_margin(margin_top, 0, 0, margin_left);
-                layer.set_keyboard_interactivity(
-                    zwlr_layer_surface_v1::KeyboardInteractivity::Exclusive,
-                );
+            }
+            LayerRole::DismissBackdrop {
+                margin_top,
+                margin_right,
+                margin_bottom,
+                margin_left,
+            } => {
+                layer.set_anchor(dismiss_backdrop_anchor());
+                layer.set_margin(margin_top, margin_right, margin_bottom, margin_left);
+                layer.set_exclusive_zone(0);
             }
         }
+        layer.set_keyboard_interactivity(layer_keyboard_interactivity(role));
 
         self.state.surfaces.insert(
             id,
@@ -562,6 +589,12 @@ enum LayerRole {
     },
     Menu {
         margin_top: i32,
+        margin_left: i32,
+    },
+    DismissBackdrop {
+        margin_top: i32,
+        margin_right: i32,
+        margin_bottom: i32,
         margin_left: i32,
     },
 }
@@ -978,6 +1011,48 @@ fn validate_menu_config(config: &MenuConfig) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+fn validate_dismiss_backdrop_config(config: &DismissBackdropConfig) -> Result<()> {
+    if [
+        config.margin_top,
+        config.margin_right,
+        config.margin_bottom,
+        config.margin_left,
+    ]
+    .into_iter()
+    .any(|margin| margin < 0)
+    {
+        return Err(BackendError::InvalidSurfaceConfig(
+            "dismiss backdrop margins must be non-negative".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn layer_kind(role: LayerRole) -> zwlr_layer_shell_v1::Layer {
+    match role {
+        LayerRole::Panel { .. } => zwlr_layer_shell_v1::Layer::Top,
+        LayerRole::Menu { .. } | LayerRole::DismissBackdrop { .. } => {
+            zwlr_layer_shell_v1::Layer::Overlay
+        }
+    }
+}
+
+fn layer_keyboard_interactivity(role: LayerRole) -> zwlr_layer_surface_v1::KeyboardInteractivity {
+    match role {
+        LayerRole::Menu { .. } => zwlr_layer_surface_v1::KeyboardInteractivity::Exclusive,
+        LayerRole::Panel { .. } | LayerRole::DismissBackdrop { .. } => {
+            zwlr_layer_surface_v1::KeyboardInteractivity::None
+        }
+    }
+}
+
+fn dismiss_backdrop_anchor() -> zwlr_layer_surface_v1::Anchor {
+    zwlr_layer_surface_v1::Anchor::Top
+        | zwlr_layer_surface_v1::Anchor::Right
+        | zwlr_layer_surface_v1::Anchor::Bottom
+        | zwlr_layer_surface_v1::Anchor::Left
 }
 
 fn panel_size(edge: PanelEdge, thickness: u32) -> (u32, u32) {
@@ -1544,8 +1619,50 @@ mod tests {
             validate_menu_config(&menu),
             Err(BackendError::InvalidSurfaceConfig(_))
         ));
+
+        let backdrop = DismissBackdropConfig {
+            margin_top: -1,
+            ..DismissBackdropConfig::default()
+        };
+        assert!(matches!(
+            validate_dismiss_backdrop_config(&backdrop),
+            Err(BackendError::InvalidSurfaceConfig(_))
+        ));
         assert!(validate_panel_config(&PanelConfig::default()).is_ok());
         assert!(validate_menu_config(&MenuConfig::default()).is_ok());
+        assert!(validate_dismiss_backdrop_config(&DismissBackdropConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn dismiss_backdrop_plan_is_full_output_overlay_without_keyboard_focus() {
+        let role = LayerRole::DismissBackdrop {
+            margin_top: 48,
+            margin_right: 0,
+            margin_bottom: 0,
+            margin_left: 0,
+        };
+        assert!(matches!(
+            layer_kind(role),
+            zwlr_layer_shell_v1::Layer::Overlay
+        ));
+        assert!(matches!(
+            layer_keyboard_interactivity(role),
+            zwlr_layer_surface_v1::KeyboardInteractivity::None
+        ));
+
+        let anchor = dismiss_backdrop_anchor();
+        assert!(anchor.contains(zwlr_layer_surface_v1::Anchor::Top));
+        assert!(anchor.contains(zwlr_layer_surface_v1::Anchor::Right));
+        assert!(anchor.contains(zwlr_layer_surface_v1::Anchor::Bottom));
+        assert!(anchor.contains(zwlr_layer_surface_v1::Anchor::Left));
+
+        assert!(matches!(
+            layer_keyboard_interactivity(LayerRole::Menu {
+                margin_top: 0,
+                margin_left: 0,
+            }),
+            zwlr_layer_surface_v1::KeyboardInteractivity::Exclusive
+        ));
     }
 
     #[test]

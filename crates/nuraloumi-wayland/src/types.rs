@@ -254,6 +254,35 @@ impl Default for MenuConfig {
     }
 }
 
+/// Transparent overlay surface intended to sit immediately below a transient
+/// menu and receive pointer/touch events that land outside the menu itself.
+///
+/// With all margins at zero, the compositor sizes the surface to the complete
+/// selected output. A shell may reserve its persistent panel strip by setting
+/// the corresponding non-negative edge margin.
+#[derive(Clone, Debug)]
+pub struct DismissBackdropConfig {
+    pub margin_top: i32,
+    pub margin_right: i32,
+    pub margin_bottom: i32,
+    pub margin_left: i32,
+    pub output: Option<OutputId>,
+    pub namespace: String,
+}
+
+impl Default for DismissBackdropConfig {
+    fn default() -> Self {
+        Self {
+            margin_top: 0,
+            margin_right: 0,
+            margin_bottom: 0,
+            margin_left: 0,
+            output: None,
+            namespace: "nuraloumi-dismiss-backdrop".to_owned(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Frame<'a> {
     pub width: u32,

@@ -52,6 +52,15 @@ request, avoiding invalid layer-shell size/anchor combinations.
 Menu/sheet surfaces use the overlay layer, top/left anchoring, margins, and
 Exclusive keyboard interactivity while the transient menu is visible.
 
+For genuine outside-click/touch dismissal, create_dismiss_backdrop provides a
+separate transparent overlay surface sized by layer-shell to the selected
+output. It uses all-edge anchoring, no exclusive zone, and no keyboard
+interactivity. Create it immediately before the menu so the menu stacks above
+the backdrop; present a transparent ARGB frame once it is configured. The
+backdrop then receives pointer/touch input outside the menu instead of relying
+on menu-local hit testing. Non-negative edge margins can keep a persistent
+panel strip uncovered.
+
 ## Input and outputs
 
 Wayland pointer and touch coordinates are already wl_surface-local logical
