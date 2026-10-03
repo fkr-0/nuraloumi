@@ -133,6 +133,33 @@ impl BackendCapabilities {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Modifiers {
+    pub ctrl: bool,
+    pub alt: bool,
+    pub shift: bool,
+    pub super_key: bool,
+}
+
+impl Modifiers {
+    pub const fn is_empty(self) -> bool {
+        !self.ctrl && !self.alt && !self.shift && !self.super_key
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MediaKey {
+    AudioMute,
+    AudioLowerVolume,
+    AudioRaiseVolume,
+    AudioPrevious,
+    AudioPlayPause,
+    AudioNext,
+    AudioStop,
+    MonBrightnessDown,
+    MonBrightnessUp,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Key {
     Up,
@@ -142,8 +169,13 @@ pub enum Key {
     Enter,
     Escape,
     Backspace,
+    Tab,
+    Space,
+    Function(u8),
+    Media(MediaKey),
     Text(String),
     Raw(u32),
+    Modified { key: Box<Key>, modifiers: Modifiers },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -534,7 +566,22 @@ pub(crate) fn semantic_key(key: u32, shift: bool) -> Key {
     match key {
         1 => Key::Escape,
         14 => Key::Backspace,
+        15 => Key::Tab,
         28 => Key::Enter,
+        57 => Key::Space,
+        59..=68 => Key::Function((key - 58) as u8),
+        87 => Key::Function(11),
+        88 => Key::Function(12),
+        113 => Key::Media(MediaKey::AudioMute),
+        114 => Key::Media(MediaKey::AudioLowerVolume),
+        115 => Key::Media(MediaKey::AudioRaiseVolume),
+        163 => Key::Media(MediaKey::AudioNext),
+        164 => Key::Media(MediaKey::AudioPlayPause),
+        165 => Key::Media(MediaKey::AudioPrevious),
+        166 => Key::Media(MediaKey::AudioStop),
+        183..=194 => Key::Function((key - 170) as u8),
+        224 => Key::Media(MediaKey::MonBrightnessDown),
+        225 => Key::Media(MediaKey::MonBrightnessUp),
         103 => Key::Up,
         105 => Key::Left,
         106 => Key::Right,
@@ -653,6 +700,21 @@ mod tests {
         assert_eq!(semantic_key(28, false), Key::Enter);
         assert_eq!(semantic_key(1, false), Key::Escape);
         assert_eq!(semantic_key(14, false), Key::Backspace);
+        assert_eq!(semantic_key(15, false), Key::Tab);
+        assert_eq!(semantic_key(57, false), Key::Space);
+        assert_eq!(semantic_key(59, false), Key::Function(1));
+        assert_eq!(semantic_key(88, false), Key::Function(12));
+        assert_eq!(semantic_key(183, false), Key::Function(13));
+        assert_eq!(semantic_key(194, false), Key::Function(24));
+        assert_eq!(
+            semantic_key(115, false),
+            Key::Media(MediaKey::AudioRaiseVolume)
+        );
+        assert_eq!(
+            semantic_key(224, false),
+            Key::Media(MediaKey::MonBrightnessDown)
+        );
         assert_eq!(semantic_key(30, true), Key::Text("A".to_owned()));
+        assert!(Modifiers::default().is_empty());
     }
 }

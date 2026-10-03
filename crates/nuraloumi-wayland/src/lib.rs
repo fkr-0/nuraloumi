@@ -23,8 +23,8 @@ pub use thumbnail::{
 };
 pub use types::{
     normalize_output_point, BackendCapabilities, BackendEvent, DismissBackdropConfig, Frame, Key,
-    MenuConfig, OutputId, OutputInfo, OutputTransform, PanelConfig, PanelEdge, PixelFormat,
-    PlatformEvent, Point, SurfaceId,
+    MediaKey, MenuConfig, Modifiers, OutputId, OutputInfo, OutputTransform, PanelConfig, PanelEdge,
+    PixelFormat, PlatformEvent, Point, SurfaceId,
 };
 pub use workspace::{
     WorkspaceCapabilities, WorkspaceEvent, WorkspaceId, WorkspaceInfo, WorkspaceState,

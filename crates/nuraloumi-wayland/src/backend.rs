@@ -35,8 +35,8 @@ use crate::{
     types::{semantic_key, sorted_touch_ids},
     workspace::WorkspaceStore,
     BackendCapabilities, BackendError, BackendEvent, DismissBackdropConfig, Frame, MenuConfig,
-    OutputId, OutputInfo, OutputTransform, PanelConfig, PanelEdge, PlatformEvent, Result,
-    SurfaceId, ToplevelEvent, ToplevelId, ToplevelInfo, ToplevelSource, WorkspaceEvent,
+    Modifiers, OutputId, OutputInfo, OutputTransform, PanelConfig, PanelEdge, PlatformEvent,
+    Result, SurfaceId, ToplevelEvent, ToplevelId, ToplevelInfo, ToplevelSource, WorkspaceEvent,
     WorkspaceId, WorkspaceInfo,
 };
 
@@ -98,7 +98,7 @@ struct BackendState {
     keyboard_surface: Option<SurfaceId>,
     touch_surfaces: HashMap<i32, SurfaceId>,
     active_touches: BTreeSet<i32>,
-    shift_down: bool,
+    modifier_keys: BTreeSet<u32>,
     foreign_toplevel: ForeignToplevelStore,
     workspace: WorkspaceStore,
 }
@@ -1271,7 +1271,7 @@ impl Dispatch<wl_seat::WlSeat, ()> for BackendState {
                     release_keyboard(keyboard);
                 }
                 state.keyboard_surface = None;
-                state.shift_down = false;
+                state.modifier_keys.clear();
             }
 
             if has_touch && state.touch.is_none() {
@@ -1415,7 +1415,10 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for BackendState {
             wl_keyboard::Event::Enter { surface, .. } => {
                 state.keyboard_surface = find_surface(state, &surface);
             }
-            wl_keyboard::Event::Leave { .. } => state.keyboard_surface = None,
+            wl_keyboard::Event::Leave { .. } => {
+                state.keyboard_surface = None;
+                state.modifier_keys.clear();
+            }
             wl_keyboard::Event::Key {
                 key,
                 state: key_state,
@@ -1425,10 +1428,17 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for BackendState {
                     return;
                 };
                 let pressed = matches!(key_state, wl_keyboard::KeyState::Pressed);
-                if key == 42 || key == 54 {
-                    state.shift_down = pressed;
-                }
-                let semantic = semantic_key(key, state.shift_down);
+                update_modifier_key(&mut state.modifier_keys, key, pressed);
+                let modifiers = modifiers_from_keys(&state.modifier_keys);
+                let semantic = semantic_key(key, modifiers.shift);
+                let semantic = if modifiers.is_empty() {
+                    semantic
+                } else {
+                    crate::Key::Modified {
+                        key: Box::new(semantic),
+                        modifiers,
+                    }
+                };
                 state.events.push_back(BackendEvent {
                     surface: state.keyboard_surface,
                     event: PlatformEvent::Key {
@@ -1457,6 +1467,30 @@ fn release_pointer(pointer: wl_pointer::WlPointer) {
 fn release_keyboard(keyboard: wl_keyboard::WlKeyboard) {
     if keyboard.version() >= 3 && keyboard.is_alive() {
         keyboard.release();
+    }
+}
+
+fn update_modifier_key(keys: &mut BTreeSet<u32>, key: u32, pressed: bool) {
+    if !is_modifier_key(key) {
+        return;
+    }
+    if pressed {
+        keys.insert(key);
+    } else {
+        keys.remove(&key);
+    }
+}
+
+fn is_modifier_key(key: u32) -> bool {
+    matches!(key, 29 | 42 | 54 | 56 | 97 | 100 | 125 | 126)
+}
+
+fn modifiers_from_keys(keys: &BTreeSet<u32>) -> Modifiers {
+    Modifiers {
+        ctrl: keys.contains(&29) || keys.contains(&97),
+        alt: keys.contains(&56) || keys.contains(&100),
+        shift: keys.contains(&42) || keys.contains(&54),
+        super_key: keys.contains(&125) || keys.contains(&126),
     }
 }
 
@@ -1515,7 +1549,7 @@ fn release_input_devices(state: &mut BackendState) {
     }
     state.pointer_surface = None;
     state.keyboard_surface = None;
-    state.shift_down = false;
+    state.modifier_keys.clear();
     cancel_active_touches(state);
 }
 
@@ -1577,6 +1611,39 @@ fn update_one_surface_scale(state: &mut BackendState, id: SurfaceId) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn modifier_tracking_handles_both_sides_without_stuck_state() {
+        let mut keys = BTreeSet::new();
+        update_modifier_key(&mut keys, 29, true);
+        update_modifier_key(&mut keys, 97, true);
+        update_modifier_key(&mut keys, 42, true);
+        update_modifier_key(&mut keys, 56, true);
+        update_modifier_key(&mut keys, 125, true);
+
+        assert_eq!(
+            modifiers_from_keys(&keys),
+            Modifiers {
+                ctrl: true,
+                alt: true,
+                shift: true,
+                super_key: true,
+            }
+        );
+
+        update_modifier_key(&mut keys, 29, false);
+        assert!(modifiers_from_keys(&keys).ctrl);
+        update_modifier_key(&mut keys, 97, false);
+        assert!(!modifiers_from_keys(&keys).ctrl);
+
+        update_modifier_key(&mut keys, 42, false);
+        update_modifier_key(&mut keys, 56, false);
+        update_modifier_key(&mut keys, 125, false);
+        assert!(modifiers_from_keys(&keys).is_empty());
+
+        update_modifier_key(&mut keys, 30, true);
+        assert!(keys.is_empty());
+    }
 
     #[test]
     fn panel_defaults_do_not_request_keyboard_focus() {
