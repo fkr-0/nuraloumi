@@ -409,8 +409,8 @@ fn wlr_capabilities(version: u32) -> ToplevelCapabilities {
 
 pub(crate) fn parse_wlr_state(bytes: &[u8]) -> ToplevelState {
     let mut state = ToplevelState::default();
-    for raw in bytes.chunks_exact(4) {
-        let value = u32::from_ne_bytes([raw[0], raw[1], raw[2], raw[3]]);
+    for raw in bytes.as_chunks::<4>().0 {
+        let value = u32::from_ne_bytes(*raw);
         match value {
             0 => state.maximized = true,
             1 => state.minimized = true,

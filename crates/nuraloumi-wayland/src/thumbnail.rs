@@ -599,7 +599,7 @@ fn capture_one(
     }
 
     if format == wl_shm::Format::Xrgb8888 {
-        for pixel in buffer.map.chunks_exact_mut(4) {
+        for pixel in buffer.map.as_chunks_mut::<4>().0 {
             pixel[3] = 0xff;
         }
     }
