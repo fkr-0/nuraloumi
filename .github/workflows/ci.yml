@@ -12,6 +12,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes pkg-config libcairo2-dev libwayland-dev
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
