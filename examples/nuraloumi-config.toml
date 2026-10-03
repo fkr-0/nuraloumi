@@ -1,0 +1,33 @@
+# NuraLoumi user configuration example.
+#
+# Copy to:
+#   $XDG_CONFIG_HOME/nuraloumi/config.toml
+# or, when XDG_CONFIG_HOME is unset/non-absolute:
+#   $HOME/.config/nuraloumi/config.toml
+
+panel_edge = "top"
+panel_height = 40
+menu_width = 448
+row_height = 48
+theme = "dark"
+reduced_motion = false
+
+# Launcher entries still come exclusively from discovered XDG .desktop files.
+# Unknown IDs are ignored for ordering/labels because they do not create apps.
+[launcher]
+pinned = [
+  "foot.desktop",
+  "firefox.desktop",
+]
+hidden = [
+  "org.example.LegacyTool.desktop",
+]
+
+[launcher.labels]
+"foot.desktop" = "Terminal"
+"firefox.desktop" = "Web"
+
+# Exact compositor app_id aliases used only for conservative existing-window
+# reuse. Multiple matching windows intentionally fall back to a normal launch.
+[launcher.app_id_aliases]
+"firefox.desktop" = ["firefox", "firefox-esr"]
