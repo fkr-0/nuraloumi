@@ -1224,7 +1224,7 @@ fn build_panel_scene(
     }];
     let mut hits = Vec::with_capacity(affordances.len());
 
-    for (index, (affordance, rect)) in affordances.iter().zip(slot_rects.into_iter()).enumerate() {
+    for (index, (affordance, rect)) in affordances.iter().zip(slot_rects).enumerate() {
         let index = index as f64;
         if affordance.id == "search" {
             let field = Rect::new(
