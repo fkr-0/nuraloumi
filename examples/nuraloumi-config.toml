@@ -12,6 +12,13 @@ row_height = 48
 theme = "dark"
 reduced_motion = false
 
+# Transient menus close when pressing/touching outside the visible sheet and
+# after successful one-shot actions such as app launch/window focus/workspace
+# switch. Continuous controls such as brightness or volume remain open.
+[menu_dismissal]
+outside_press = true
+after_one_shot_action = true
+
 # Launcher entries still come exclusively from discovered XDG .desktop files.
 # Pinned entries appear once under Favorites, in this order. Unknown IDs are
 # ignored because launcher config never creates executable application entries.

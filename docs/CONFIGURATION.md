@@ -42,6 +42,10 @@ row_height = 48
 theme = "dark"
 reduced_motion = false
 
+[menu_dismissal]
+outside_press = true
+after_one_shot_action = true
+
 [launcher]
 pinned = [
   "foot.desktop",
@@ -83,6 +87,48 @@ cp examples/nuraloumi-config.toml "$config_root/nuraloumi/config.toml"
 | `reduced_motion` | boolean | `false` | boolean |
 
 Unknown or malformed values fail configuration loading instead of being guessed.
+
+## Transient menu dismissal
+
+The persistent panel is never part of transient-menu dismissal. When a
+panel-owned menu opens, NuraLoumi can place a transparent layer-shell backdrop
+behind that menu while leaving the panel strip uncovered.
+
+### `menu_dismissal.outside_press`
+
+Default: `true`.
+
+When enabled:
+
+- pointer press or touch-down on the transparent backdrop closes the transient
+  menu;
+- pointer press or touch-down on blank, non-actionable space inside the menu
+  also closes it;
+- the static panel remains visible and interactive;
+- presses are ignored for dismissal while menu entry animation is still
+  blocking hit testing, preventing an opening animation from being mistaken for
+  a blank-space click.
+
+Set it to `false` to keep transient menus open until an explicit menu action,
+Escape/back navigation, or compositor close.
+
+### `menu_dismissal.after_one_shot_action`
+
+Default: `true`.
+
+When enabled, a successfully completed action that navigates away from the
+current menu closes the transient menu:
+
+- application launch;
+- window focus;
+- desktop/workspace switch.
+
+Continuous or in-menu controls stay open. This includes brightness and volume
+adjustments, toggles, `menu.open`, launcher overview-mode changes, and
+control-center tab changes.
+
+This policy is based on semantic action kind rather than individual UI rows, so
+pointer, touch and keyboard activation share the same close behavior.
 
 ## Launcher preferences
 

@@ -8,11 +8,13 @@ use nuraloumi_providers::{
 };
 use nuraloumi_render_cairo::{CairoRenderer, RenderOptions, Scene, Viewport};
 use nuraloumi_shell::{
-    apply_launcher_preferences, build_family, execute_window_command, launcher_search_input,
+    apply_launcher_preferences, blank_press_requests_dismiss, build_family,
+    dismiss_backdrop_margins, execute_window_command, launcher_search_input,
     load_config_or_default, load_fixture_snapshot, load_menu, parse_desktop_command, parse_family,
-    parse_window_command, render_menu_follow_selection, resolve_app_activation, window_entries,
-    ActionReport, AppActivation, ApplicationEntry as ShellApplicationEntry, BluetoothDeviceEntry,
-    ControlCenterTab, DesktopCommand, DesktopControlCapabilities, DesktopEntry, FixtureSnapshot,
+    parse_window_command, render_menu_follow_selection, resolve_app_activation,
+    successful_action_requests_dismiss, window_entries, ActionReport, AppActivation,
+    ApplicationEntry as ShellApplicationEntry, BluetoothDeviceEntry, ControlCenterTab,
+    DesktopCommand, DesktopControlCapabilities, DesktopEntry, FixtureSnapshot,
     HitRegion as ShellHitRegion, MediaPlayerEntry as ShellMediaPlayerEntry, MenuAction, MenuFamily,
     NotificationHistoryEntry as ShellNotificationHistoryEntry, OverviewMode,
     PlatformEvent as ShellPlatformEvent, ProviderValue, SceneTransitionClock, SemanticInput,
@@ -22,9 +24,9 @@ use nuraloumi_shell::{
 };
 use nuraloumi_wayland::{
     capture_toplevel_thumbnails_with_timeout, BackendCapabilities as WaylandCapabilities,
-    BackendError, Frame, Key as WaylandKey, MenuConfig as WaylandMenuConfig, PixelFormat,
-    PlatformEvent as WaylandEvent, SurfaceId, ToplevelThumbnailReport, ToplevelThumbnailRequest,
-    WaylandBackend, WorkspaceId,
+    BackendError, DismissBackdropConfig, Frame, Key as WaylandKey, MenuConfig as WaylandMenuConfig,
+    PixelFormat, PlatformEvent as WaylandEvent, SurfaceId, ToplevelThumbnailReport,
+    ToplevelThumbnailRequest, WaylandBackend, WorkspaceId,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -367,16 +369,40 @@ fn run_live(
         })
         .unwrap_or(640);
 
-    let surface = backend
-        .create_menu(WaylandMenuConfig {
-            width: requested_width,
-            height: requested_height,
-            margin_top: config.panel_height as i32,
-            margin_left: 0,
-            output: output.as_ref().map(|output| output.id),
-            namespace: "nuraloumi-menu".into(),
-        })
-        .map_err(|error| format!("failed to create menu surface: {error}"))?;
+    let dismiss_surface = if config.menu_dismissal.outside_press {
+        let (margin_top, margin_right, margin_bottom, margin_left) =
+            dismiss_backdrop_margins(config.panel_edge, config.panel_height);
+        Some(
+            backend
+                .create_dismiss_backdrop(DismissBackdropConfig {
+                    margin_top,
+                    margin_right,
+                    margin_bottom,
+                    margin_left,
+                    output: output.as_ref().map(|output| output.id),
+                    namespace: "nuraloumi-menu-dismiss".into(),
+                })
+                .map_err(|error| format!("failed to create menu dismiss backdrop: {error}"))?,
+        )
+    } else {
+        None
+    };
+    let surface = match backend.create_menu(WaylandMenuConfig {
+        width: requested_width,
+        height: requested_height,
+        margin_top: config.panel_height as i32,
+        margin_left: 0,
+        output: output.as_ref().map(|output| output.id),
+        namespace: "nuraloumi-menu".into(),
+    }) {
+        Ok(surface) => surface,
+        Err(error) => {
+            if let Some(dismiss_surface) = dismiss_surface {
+                let _ = backend.destroy_surface(dismiss_surface);
+            }
+            return Err(format!("failed to create menu surface: {error}"));
+        }
+    };
 
     let renderer = CairoRenderer::default();
     let theme_tokens = match config.theme {
@@ -445,6 +471,38 @@ fn run_live(
         let events: Vec<_> = backend.drain_events().collect();
 
         for event in events {
+            if let Some(dismiss_surface) = dismiss_surface {
+                if event.surface == Some(dismiss_surface) {
+                    match event.event {
+                        WaylandEvent::Configure {
+                            width,
+                            height,
+                            scale,
+                        } => {
+                            present_transparent_surface(
+                                &mut backend,
+                                dismiss_surface,
+                                width,
+                                height,
+                                scale,
+                            )?;
+                        }
+                        WaylandEvent::PointerButton { pressed: true, .. }
+                        | WaylandEvent::TouchDown { .. }
+                            if config.menu_dismissal.outside_press =>
+                        {
+                            close_live_surfaces(&mut backend, surface, Some(dismiss_surface))?;
+                            return Ok(());
+                        }
+                        WaylandEvent::Close => {
+                            close_live_surfaces(&mut backend, surface, Some(dismiss_surface))?;
+                            return Ok(());
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+            }
             if event.surface.is_some() && event.surface != Some(surface) {
                 continue;
             }
@@ -472,6 +530,16 @@ fn run_live(
                                 .and_then(|scene| shell_hit_region(scene, x, y))
                         })
                         .flatten();
+                    if pressed
+                        && blank_press_requests_dismiss(
+                            config.menu_dismissal,
+                            input_enabled,
+                            region.is_some(),
+                        )
+                    {
+                        close_live_surfaces(&mut backend, surface, dismiss_surface)?;
+                        return Ok(());
+                    }
                     report = shell.handle_platform_event(ShellPlatformEvent::PointerButton {
                         region,
                         pressed,
@@ -489,6 +557,14 @@ fn run_live(
                                 .and_then(|scene| shell_hit_region(scene, x, y))
                         })
                         .flatten();
+                    if blank_press_requests_dismiss(
+                        config.menu_dismissal,
+                        input_enabled,
+                        region.is_some(),
+                    ) {
+                        close_live_surfaces(&mut backend, surface, dismiss_surface)?;
+                        return Ok(());
+                    }
                     touch_regions.insert(id, region.clone());
                     report =
                         shell.handle_platform_event(ShellPlatformEvent::TouchDown { id, region });
@@ -530,12 +606,7 @@ fn run_live(
                     }
                 }
                 WaylandEvent::Close => {
-                    backend
-                        .destroy_surface(surface)
-                        .map_err(|error| format!("failed to destroy menu surface: {error}"))?;
-                    backend
-                        .flush()
-                        .map_err(|error| format!("failed to flush Wayland connection: {error}"))?;
+                    close_live_surfaces(&mut backend, surface, dismiss_surface)?;
                     return Ok(());
                 }
                 _ => {}
@@ -557,12 +628,7 @@ fn run_live(
                     &config,
                     policy,
                 )? {
-                    backend
-                        .destroy_surface(surface)
-                        .map_err(|error| format!("failed to destroy menu surface: {error}"))?;
-                    backend
-                        .flush()
-                        .map_err(|error| format!("failed to flush Wayland connection: {error}"))?;
+                    close_live_surfaces(&mut backend, surface, dismiss_surface)?;
                     return Ok(());
                 }
                 if scene_changed {
@@ -572,12 +638,7 @@ fn run_live(
             }
 
             if shell.closed {
-                backend
-                    .destroy_surface(surface)
-                    .map_err(|error| format!("failed to destroy menu surface: {error}"))?;
-                backend
-                    .flush()
-                    .map_err(|error| format!("failed to flush Wayland connection: {error}"))?;
+                close_live_surfaces(&mut backend, surface, dismiss_surface)?;
                 return Ok(());
             }
 
@@ -719,6 +780,57 @@ fn render_and_present(
     }
 }
 
+fn present_transparent_surface(
+    backend: &mut WaylandBackend,
+    surface: SurfaceId,
+    width: u32,
+    height: u32,
+    scale: i32,
+) -> Result<(), String> {
+    let scale = u32::try_from(scale.max(1)).map_err(|_| "invalid surface scale".to_owned())?;
+    let width = width
+        .checked_mul(scale)
+        .ok_or_else(|| "dismiss backdrop width overflow".to_owned())?;
+    let height = height
+        .checked_mul(scale)
+        .ok_or_else(|| "dismiss backdrop height overflow".to_owned())?;
+    let byte_len = usize::try_from(width)
+        .ok()
+        .and_then(|width| {
+            usize::try_from(height)
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| "dismiss backdrop buffer is too large".to_owned())?;
+    let pixels = vec![0_u8; byte_len];
+    match backend.present(
+        surface,
+        Frame::packed(width, height, PixelFormat::Argb8888, &pixels),
+    ) {
+        Ok(()) | Err(BackendError::WouldBlock) => Ok(()),
+        Err(error) => Err(format!("failed to present dismiss backdrop: {error}")),
+    }
+}
+
+fn close_live_surfaces(
+    backend: &mut WaylandBackend,
+    surface: SurfaceId,
+    dismiss_surface: Option<SurfaceId>,
+) -> Result<(), String> {
+    backend
+        .destroy_surface(surface)
+        .map_err(|error| format!("failed to destroy menu surface: {error}"))?;
+    if let Some(dismiss_surface) = dismiss_surface {
+        backend
+            .destroy_surface(dismiss_surface)
+            .map_err(|error| format!("failed to destroy menu dismiss backdrop: {error}"))?;
+    }
+    backend
+        .flush()
+        .map_err(|error| format!("failed to flush Wayland connection: {error}"))
+}
+
 fn shell_hit_region(scene: &Scene, x: f64, y: f64) -> Option<ShellHitRegion> {
     scene.hit_test(x, y).map(|item_id| ShellHitRegion {
         region_id: format!("row:{item_id}"),
@@ -783,6 +895,8 @@ fn handle_live_report(
 
     if policy.execute_provider_actions {
         if let ActionReport::Dispatched { action, .. } = report {
+            let close_after_success =
+                successful_action_requests_dismiss(config.menu_dismissal, action);
             if let Some(command) = parse_desktop_command(action, snapshot)? {
                 match command {
                     DesktopCommand::Switch { desktop_id } => {
@@ -790,6 +904,10 @@ fn handle_live_report(
                         backend
                             .activate_workspace(id)
                             .map_err(|error| error.to_string())?;
+                        if !close_after_success {
+                            refresh_workspace_snapshot(snapshot, backend);
+                            refresh_builtin_menu(shell, snapshot)?;
+                        }
                     }
                     DesktopCommand::MoveWindow { .. } => {
                         return Err(
@@ -798,26 +916,26 @@ fn handle_live_report(
                         );
                     }
                 }
-                return Ok(false);
+                return Ok(close_after_success);
             }
             if let Some(command) = parse_window_command(action, &snapshot.windows)? {
-                let close_after_focus = matches!(command, WindowCommand::Focus(_));
+                let focused = matches!(command, WindowCommand::Focus(_));
                 execute_window_command(backend, command)?;
-                if close_after_focus {
+                if focused {
                     backend
                         .roundtrip()
                         .map_err(|error| format!("toplevel focus roundtrip failed: {error}"))?;
                 }
-                return Ok(close_after_focus);
+                if !close_after_success {
+                    refresh_window_snapshot(snapshot, backend);
+                    refresh_builtin_menu(shell, snapshot)?;
+                }
+                return Ok(close_after_success);
             }
-            let app_launch = matches!(
-                action,
-                MenuAction::Custom { kind, .. } if kind == "app.launch"
-            );
             if let MenuAction::Custom { kind, payload } = action {
                 if kind == "app.launch" {
                     match resolve_app_activation(payload, &snapshot.windows, &config.launcher) {
-                        AppActivation::AlreadyFocused => return Ok(true),
+                        AppActivation::AlreadyFocused => return Ok(close_after_success),
                         AppActivation::FocusWindow(window_id) => {
                             let focus = MenuAction::Custom {
                                 kind: "window.focus".into(),
@@ -831,7 +949,11 @@ fn handle_live_report(
                             backend.roundtrip().map_err(|error| {
                                 format!("toplevel focus roundtrip failed: {error}")
                             })?;
-                            return Ok(true);
+                            if !close_after_success {
+                                refresh_window_snapshot(snapshot, backend);
+                                refresh_builtin_menu(shell, snapshot)?;
+                            }
+                            return Ok(close_after_success);
                         }
                         AppActivation::Launch => {}
                     }
@@ -847,7 +969,7 @@ fn handle_live_report(
                         "nuraloumi-provider-result: executed={} dry_run={} message={}",
                         result.executed, result.dry_run, result.message
                     );
-                    if app_launch && result.executed {
+                    if close_after_success && result.executed {
                         return Ok(true);
                     }
                     if refresh_lazy_control_action(snapshot, action) {

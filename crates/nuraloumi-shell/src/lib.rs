@@ -47,6 +47,22 @@ pub struct LauncherPreferences {
     pub app_id_aliases: BTreeMap<String, Vec<String>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MenuDismissalConfig {
+    pub outside_press: bool,
+    pub after_one_shot_action: bool,
+}
+
+impl Default for MenuDismissalConfig {
+    fn default() -> Self {
+        Self {
+            outside_press: true,
+            after_one_shot_action: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ShellConfig {
@@ -57,6 +73,7 @@ pub struct ShellConfig {
     pub theme: Theme,
     pub reduced_motion: bool,
     pub launcher: LauncherPreferences,
+    pub menu_dismissal: MenuDismissalConfig,
 }
 
 const SCENE_FRAME_INTERVAL_MS: u64 = 16;
@@ -203,8 +220,41 @@ impl Default for ShellConfig {
             theme: Theme::Dark,
             reduced_motion: false,
             launcher: LauncherPreferences::default(),
+            menu_dismissal: MenuDismissalConfig::default(),
         }
     }
+}
+
+pub fn dismiss_backdrop_margins(edge: PanelEdge, panel_height: u32) -> (i32, i32, i32, i32) {
+    let height = i32::try_from(panel_height).unwrap_or(i32::MAX);
+    match edge {
+        PanelEdge::Top => (height, 0, 0, 0),
+        PanelEdge::Right => (0, height, 0, 0),
+        PanelEdge::Bottom => (0, 0, height, 0),
+        PanelEdge::Left => (0, 0, 0, height),
+    }
+}
+
+pub fn blank_press_requests_dismiss(
+    policy: MenuDismissalConfig,
+    input_enabled: bool,
+    hit_region_present: bool,
+) -> bool {
+    policy.outside_press && input_enabled && !hit_region_present
+}
+
+pub fn successful_action_requests_dismiss(
+    policy: MenuDismissalConfig,
+    action: &MenuAction,
+) -> bool {
+    policy.after_one_shot_action
+        && matches!(
+            action,
+            MenuAction::Custom { kind, .. }
+                if kind == "app.launch"
+                    || kind == "window.focus"
+                    || kind == "desktop.switch"
+        )
 }
 
 impl ShellConfig {
@@ -2896,7 +2946,90 @@ mod tests {
         assert_eq!(config.row_height, 48);
         assert_eq!(config.panel_edge, PanelEdge::Top);
         assert_eq!(config.launcher, LauncherPreferences::default());
+        assert_eq!(config.menu_dismissal, MenuDismissalConfig::default());
+        assert!(config.menu_dismissal.outside_press);
+        assert!(config.menu_dismissal.after_one_shot_action);
         config.validate().expect("defaults valid");
+    }
+
+    #[test]
+    fn dismissal_config_deserializes_and_backdrop_margins_follow_panel_edge() {
+        let config: ShellConfig = toml::from_str(
+            r#"
+panel_edge = "right"
+
+[menu_dismissal]
+outside_press = false
+after_one_shot_action = true
+"#,
+        )
+        .expect("dismissal config parses");
+        assert!(!config.menu_dismissal.outside_press);
+        assert!(config.menu_dismissal.after_one_shot_action);
+        assert_eq!(dismiss_backdrop_margins(PanelEdge::Top, 40), (40, 0, 0, 0));
+        assert_eq!(
+            dismiss_backdrop_margins(PanelEdge::Right, 40),
+            (0, 40, 0, 0)
+        );
+        assert_eq!(
+            dismiss_backdrop_margins(PanelEdge::Bottom, 40),
+            (0, 0, 40, 0)
+        );
+        assert_eq!(dismiss_backdrop_margins(PanelEdge::Left, 40), (0, 0, 0, 40));
+    }
+
+    #[test]
+    fn dismissal_policy_distinguishes_blank_presses_and_one_shot_actions() {
+        let policy = MenuDismissalConfig::default();
+        assert!(blank_press_requests_dismiss(policy, true, false));
+        assert!(!blank_press_requests_dismiss(policy, true, true));
+        assert!(!blank_press_requests_dismiss(policy, false, false));
+
+        for kind in ["app.launch", "window.focus", "desktop.switch"] {
+            assert!(successful_action_requests_dismiss(
+                policy,
+                &MenuAction::Custom {
+                    kind: kind.into(),
+                    payload: "example".into(),
+                }
+            ));
+        }
+        for action in [
+            MenuAction::Adjust {
+                id: "display.brightness".into(),
+                delta: 5,
+            },
+            MenuAction::Toggle {
+                id: "audio.mute".into(),
+            },
+            MenuAction::Custom {
+                kind: "menu.open".into(),
+                payload: "audio".into(),
+            },
+            MenuAction::Custom {
+                kind: "overview.mode".into(),
+                payload: "apps".into(),
+            },
+            MenuAction::Custom {
+                kind: "control.tab".into(),
+                payload: "display".into(),
+            },
+        ] {
+            assert!(!successful_action_requests_dismiss(policy, &action));
+        }
+
+        let disabled = MenuDismissalConfig {
+            outside_press: false,
+            after_one_shot_action: false,
+        };
+        assert!(!blank_press_requests_dismiss(disabled, true, false));
+        assert!(!successful_action_requests_dismiss(
+            disabled,
+            &MenuAction::Custom {
+                kind: "app.launch".into(),
+                payload: "firefox.desktop".into(),
+            }
+        ));
     }
 
     #[test]
