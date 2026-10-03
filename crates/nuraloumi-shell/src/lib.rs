@@ -1054,57 +1054,95 @@ pub fn build_launcher_menu() -> MenuModel {
     build_launcher_menu_for(&FixtureSnapshot::default(), OverviewMode::All)
 }
 
-pub fn build_launcher_menu_for(snapshot: &FixtureSnapshot, mode: OverviewMode) -> MenuModel {
-    let mut items = vec![
-        status(
-            "launcher.search",
-            "Search windows, apps, tasks and desktops…",
-            "Type while search is focused",
-        ),
-        section("launcher.views", "Overview"),
-    ];
+fn launcher_application_item(application: &ApplicationEntry) -> MenuItem {
+    let mut detail = Vec::new();
+    if let Some(generic_name) = &application.generic_name {
+        detail.push(generic_name.clone());
+    }
+    if !application.keywords.is_empty() {
+        detail.push(
+            application
+                .keywords
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(" · "),
+        );
+    }
+    let subtitle = if detail.is_empty() {
+        Some(application.id.as_str())
+    } else {
+        None
+    };
+    let joined_detail = (!detail.is_empty()).then(|| detail.join(" · "));
+    custom_action(
+        &format!("overview.app.{}", application.id),
+        &application.label,
+        joined_detail.as_deref().or(subtitle),
+        "app.launch",
+        &application.id,
+        application.launchable,
+    )
+}
 
-    for candidate in [
-        OverviewMode::All,
-        OverviewMode::Windows,
-        OverviewMode::Apps,
-        OverviewMode::Tasks,
-        OverviewMode::Desktops,
-    ] {
-        let selected = candidate == mode;
-        let label = match candidate {
-            OverviewMode::All => "All",
-            OverviewMode::Windows => "Windows",
-            OverviewMode::Apps => "Apps",
-            OverviewMode::Tasks => "Tasks",
-            OverviewMode::Desktops => "Desktops",
-        };
-        items.push(custom_action(
-            &format!("overview.mode.{}", candidate.as_str()),
-            label,
-            Some(if selected {
-                "Selected view"
-            } else {
-                "Switch view"
-            }),
-            "overview.mode",
-            candidate.as_str(),
-            !selected,
-        ));
+pub fn build_launcher_menu_for(snapshot: &FixtureSnapshot, mode: OverviewMode) -> MenuModel {
+    let search_label = match mode {
+        OverviewMode::All => "Search applications and windows…",
+        OverviewMode::Windows => "Search open windows…",
+        OverviewMode::Apps => "Search applications…",
+        OverviewMode::Tasks => "Search running tasks…",
+        OverviewMode::Desktops => "Search desktops…",
+    };
+    let mut items = vec![status(
+        "launcher.search",
+        search_label,
+        "Type while search is focused",
+    )];
+
+    if mode != OverviewMode::All {
+        items.push(section("launcher.views", "View"));
+        for candidate in [
+            OverviewMode::All,
+            OverviewMode::Windows,
+            OverviewMode::Apps,
+            OverviewMode::Tasks,
+            OverviewMode::Desktops,
+        ] {
+            let selected = candidate == mode;
+            let label = match candidate {
+                OverviewMode::All => "Launcher",
+                OverviewMode::Windows => "Windows",
+                OverviewMode::Apps => "Applications",
+                OverviewMode::Tasks => "Tasks",
+                OverviewMode::Desktops => "Desktops",
+            };
+            items.push(custom_action(
+                &format!("overview.mode.{}", candidate.as_str()),
+                label,
+                Some(if selected {
+                    "Selected view"
+                } else {
+                    "Switch view"
+                }),
+                "overview.mode",
+                candidate.as_str(),
+                !selected,
+            ));
+        }
     }
 
-    if mode == OverviewMode::All {
-        items.extend([
-            section("launcher.controls", "Desktop"),
-            custom_action(
-                "launcher.control-center",
-                "Control Center",
-                Some("Media · network · display · system · notifications"),
-                "menu.open",
-                "control-center",
-                true,
-            ),
-        ]);
+    if matches!(mode, OverviewMode::All | OverviewMode::Apps) {
+        let pinned = snapshot
+            .applications
+            .iter()
+            .filter(|application| application.pinned)
+            .take(8)
+            .collect::<Vec<_>>();
+        if !pinned.is_empty() {
+            items.push(section("launcher.favorites", "Favorites"));
+            items.extend(pinned.into_iter().map(launcher_application_item));
+        }
     }
 
     if matches!(mode, OverviewMode::All | OverviewMode::Windows) {
@@ -1116,7 +1154,7 @@ pub fn build_launcher_menu_for(snapshot: &FixtureSnapshot, mode: OverviewMode) -
                 "Compositor reported no mapped toplevels",
             ));
         } else {
-            if !snapshot.window_thumbnails_available {
+            if mode == OverviewMode::Windows && !snapshot.window_thumbnails_available {
                 items.push(status(
                     "launcher.windows.previews",
                     "Window previews unavailable",
@@ -1126,7 +1164,8 @@ pub fn build_launcher_menu_for(snapshot: &FixtureSnapshot, mode: OverviewMode) -
                         .unwrap_or("Compositor does not advertise per-toplevel image capture"),
                 ));
             }
-            items.extend(snapshot.windows.iter().take(16).map(|window| {
+            let window_limit = if mode == OverviewMode::All { 8 } else { 16 };
+            items.extend(snapshot.windows.iter().take(window_limit).map(|window| {
                 if mode == OverviewMode::Windows {
                     window_control_item(window, format!("overview.window.{}", window.id))
                 } else {
@@ -1149,7 +1188,31 @@ pub fn build_launcher_menu_for(snapshot: &FixtureSnapshot, mode: OverviewMode) -
         }
     }
 
-    if matches!(mode, OverviewMode::All | OverviewMode::Tasks) {
+    if matches!(mode, OverviewMode::All | OverviewMode::Apps) {
+        let application_limit = if mode == OverviewMode::All { 12 } else { 32 };
+        let applications = snapshot
+            .applications
+            .iter()
+            .filter(|application| !application.pinned)
+            .take(application_limit)
+            .collect::<Vec<_>>();
+        items.push(section("launcher.apps", "Applications"));
+        if applications.is_empty() {
+            items.push(status(
+                "launcher.apps.empty",
+                "No other applications",
+                if snapshot.applications.is_empty() {
+                    "Desktop-entry provider has no visible applications"
+                } else {
+                    "All visible applications are pinned as favorites"
+                },
+            ));
+        } else {
+            items.extend(applications.into_iter().map(launcher_application_item));
+        }
+    }
+
+    if mode == OverviewMode::Tasks {
         items.push(section("launcher.tasks", "Running tasks"));
         if snapshot.tasks.is_empty() {
             items.push(status(
@@ -1168,73 +1231,7 @@ pub fn build_launcher_menu_for(snapshot: &FixtureSnapshot, mode: OverviewMode) -
         }
     }
 
-    if matches!(mode, OverviewMode::All | OverviewMode::Apps) {
-        let app_item = |application: &ApplicationEntry| {
-            let mut detail = Vec::new();
-            if let Some(generic_name) = &application.generic_name {
-                detail.push(generic_name.clone());
-            }
-            if !application.keywords.is_empty() {
-                detail.push(
-                    application
-                        .keywords
-                        .iter()
-                        .take(3)
-                        .cloned()
-                        .collect::<Vec<_>>()
-                        .join(" · "),
-                );
-            }
-            let subtitle = if detail.is_empty() {
-                Some(application.id.as_str())
-            } else {
-                None
-            };
-            let joined_detail = (!detail.is_empty()).then(|| detail.join(" · "));
-            custom_action(
-                &format!("overview.app.{}", application.id),
-                &application.label,
-                joined_detail.as_deref().or(subtitle),
-                "app.launch",
-                &application.id,
-                application.launchable,
-            )
-        };
-
-        let pinned = snapshot
-            .applications
-            .iter()
-            .filter(|application| application.pinned)
-            .take(12)
-            .collect::<Vec<_>>();
-        if !pinned.is_empty() {
-            items.push(section("launcher.favorites", "Favorites"));
-            items.extend(pinned.into_iter().map(app_item));
-        }
-
-        let applications = snapshot
-            .applications
-            .iter()
-            .filter(|application| !application.pinned)
-            .take(32)
-            .collect::<Vec<_>>();
-        items.push(section("launcher.apps", "Applications"));
-        if applications.is_empty() {
-            items.push(status(
-                "launcher.apps.empty",
-                "No other applications",
-                if snapshot.applications.is_empty() {
-                    "Desktop-entry provider has no visible applications"
-                } else {
-                    "All visible applications are pinned as favorites"
-                },
-            ));
-        } else {
-            items.extend(applications.into_iter().map(app_item));
-        }
-    }
-
-    if matches!(mode, OverviewMode::All | OverviewMode::Desktops) {
+    if mode == OverviewMode::Desktops {
         items.push(section("launcher.desktops", "Desktops"));
         if !snapshot.desktop_capabilities.list || snapshot.desktops.is_empty() {
             items.push(status(
@@ -1293,38 +1290,89 @@ pub fn build_launcher_menu_for(snapshot: &FixtureSnapshot, mode: OverviewMode) -
             );
         }
 
-        if mode == OverviewMode::Desktops {
-            if let Some(window) = snapshot.windows.iter().find(|window| window.focused) {
-                items.push(section("launcher.desktop.move", "Move active window"));
-                if !snapshot.desktop_capabilities.move_window {
-                    items.push(status(
-                        "launcher.desktop.move.unavailable",
-                        "Window move unavailable",
-                        "Current standard Wayland protocols do not expose window-to-workspace membership/control",
-                    ));
-                }
-                for desktop in snapshot.desktops.iter().take(16) {
-                    let payload = serde_json::to_string(&DesktopMovePayload {
-                        window_id: window.id.clone(),
-                        desktop_id: desktop.id.clone(),
-                    })
-                    .expect("desktop move payload is serializable");
-                    items.push(custom_action(
-                        &format!("overview.move.{}.{}", window.id, desktop.id),
-                        &desktop.label,
-                        Some(&window.title),
-                        "desktop.move_window",
-                        &payload,
-                        snapshot.desktop_capabilities.move_window,
-                    ));
-                }
+        if let Some(window) = snapshot.windows.iter().find(|window| window.focused) {
+            items.push(section("launcher.desktop.move", "Move active window"));
+            if !snapshot.desktop_capabilities.move_window {
+                items.push(status(
+                    "launcher.desktop.move.unavailable",
+                    "Window move unavailable",
+                    "Current standard Wayland protocols do not expose window-to-workspace membership/control",
+                ));
+            }
+            for desktop in snapshot.desktops.iter().take(16) {
+                let payload = serde_json::to_string(&DesktopMovePayload {
+                    window_id: window.id.clone(),
+                    desktop_id: desktop.id.clone(),
+                })
+                .expect("desktop move payload is serializable");
+                items.push(custom_action(
+                    &format!("overview.move.{}.{}", window.id, desktop.id),
+                    &desktop.label,
+                    Some(&window.title),
+                    "desktop.move_window",
+                    &payload,
+                    snapshot.desktop_capabilities.move_window,
+                ));
             }
         }
     }
 
+    if mode == OverviewMode::All {
+        items.extend([
+            section("launcher.more", "More"),
+            custom_action(
+                "launcher.more.apps",
+                "All applications",
+                Some("Browse every discovered desktop application"),
+                "overview.mode",
+                OverviewMode::Apps.as_str(),
+                true,
+            ),
+            custom_action(
+                "launcher.more.windows",
+                "Window controls",
+                Some("Focus, fullscreen and close open windows"),
+                "overview.mode",
+                OverviewMode::Windows.as_str(),
+                true,
+            ),
+            custom_action(
+                "launcher.more.desktops",
+                "Desktops",
+                Some("Switch workspaces and inspect desktop state"),
+                "overview.mode",
+                OverviewMode::Desktops.as_str(),
+                true,
+            ),
+            custom_action(
+                "launcher.more.settings",
+                "Settings",
+                Some("Media · network · display · system · notifications"),
+                "menu.open",
+                "control-center",
+                true,
+            ),
+            custom_action(
+                "launcher.more.power",
+                "Power",
+                Some("Suspend, reboot and power controls"),
+                "menu.open",
+                "power",
+                true,
+            ),
+        ]);
+    }
+
+    let title = match mode {
+        OverviewMode::All => "Launcher",
+        OverviewMode::Windows => "Windows",
+        OverviewMode::Apps => "Applications",
+        OverviewMode::Tasks => "Tasks",
+        OverviewMode::Desktops => "Desktops",
+    };
     MenuModel {
         id: "launcher".into(),
-        title: "Overview".into(),
+        title: title.into(),
         items,
     }
 }
@@ -3008,17 +3056,17 @@ mod tests {
         let mut shell = shell_with(build_launcher_menu());
         assert_eq!(
             shell.state.selected_id.as_deref(),
-            Some("overview.mode.windows")
+            Some("overview.window.terminal")
         );
         shell.apply_semantic(SemanticInput::Up);
         assert_eq!(
             shell.state.selected_id.as_deref(),
-            Some("overview.app.firefox.desktop")
+            Some("launcher.more.power")
         );
         shell.apply_semantic(SemanticInput::Down);
         assert_eq!(
             shell.state.selected_id.as_deref(),
-            Some("overview.mode.windows")
+            Some("overview.window.terminal")
         );
     }
 
@@ -3037,10 +3085,10 @@ mod tests {
     }
 
     #[test]
-    fn super_menu_all_view_unifies_windows_apps_tasks_and_desktops() {
+    fn default_launcher_prioritizes_daily_use_and_links_to_advanced_views() {
         let snapshot = FixtureSnapshot::default();
         let menu = build_launcher_menu_for(&snapshot, OverviewMode::All);
-        assert_eq!(menu.title, "Overview");
+        assert_eq!(menu.title, "Launcher");
         assert!(menu
             .items
             .iter()
@@ -3057,25 +3105,69 @@ mod tests {
                 ref payload
             }) if kind == "app.launch" && payload == "foot.desktop"
         ));
-        let task = menu
+        assert!(!menu
             .items
             .iter()
-            .find(|item| item.id == "overview.task.labwc")
-            .expect("running task");
-        assert!(task.action.is_none());
-        assert_eq!(task.kind, MenuItemKind::Submenu);
-        assert!(task
-            .children
-            .iter()
-            .any(|item| item.id == "overview.task.labwc.state"));
-        assert!(task
-            .children
-            .iter()
-            .any(|item| item.id == "overview.task.labwc.pid"));
-        assert!(menu
+            .any(|item| item.id == "overview.task.labwc"));
+        assert!(!menu
             .items
             .iter()
             .any(|item| item.id == "overview.desktop.1"));
+        assert!(menu
+            .items
+            .iter()
+            .any(|item| item.id == "launcher.more.apps"));
+        assert!(menu
+            .items
+            .iter()
+            .any(|item| item.id == "launcher.more.windows"));
+        assert!(menu
+            .items
+            .iter()
+            .any(|item| item.id == "launcher.more.desktops"));
+        assert!(menu
+            .items
+            .iter()
+            .any(|item| item.id == "launcher.more.settings"));
+        assert!(menu
+            .items
+            .iter()
+            .any(|item| item.id == "launcher.more.power"));
+    }
+
+    #[test]
+    fn default_launcher_orders_favorites_windows_apps_then_more() {
+        let mut snapshot = FixtureSnapshot::default();
+        let preferences = LauncherPreferences {
+            pinned: vec!["firefox.desktop".into()],
+            ..LauncherPreferences::default()
+        };
+        apply_launcher_preferences(&mut snapshot.applications, &preferences);
+
+        let menu = build_launcher_menu_for(&snapshot, OverviewMode::All);
+        let favorite = menu
+            .items
+            .iter()
+            .position(|item| item.id == "launcher.favorites")
+            .expect("favorites section");
+        let windows = menu
+            .items
+            .iter()
+            .position(|item| item.id == "launcher.windows")
+            .expect("windows section");
+        let applications = menu
+            .items
+            .iter()
+            .position(|item| item.id == "launcher.apps")
+            .expect("applications section");
+        let more = menu
+            .items
+            .iter()
+            .position(|item| item.id == "launcher.more")
+            .expect("more section");
+        assert!(favorite < windows);
+        assert!(windows < applications);
+        assert!(applications < more);
     }
 
     #[test]

@@ -93,6 +93,10 @@ Launcher configuration remains a preference layer over discovered XDG desktop en
 
 See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for the full schema, precedence, validation, and safety rules.
 
+## Releases
+
+Release history and compatibility notes are tracked in [CHANGELOG.md](CHANGELOG.md). The first tagged release is `0.0.1`.
+
 ## Workspace
 
 ```text

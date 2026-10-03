@@ -134,7 +134,7 @@ dependencies = [
 
 [[package]]
 name = "nuraloumi-core"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -142,11 +142,11 @@ dependencies = [
 
 [[package]]
 name = "nuraloumi-providers"
-version = "0.1.0"
+version = "0.0.1"
 
 [[package]]
 name = "nuraloumi-render-cairo"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "cairo-rs",
  "nuraloumi-core",
@@ -154,7 +154,7 @@ dependencies = [
 
 [[package]]
 name = "nuraloumi-shell"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "nuraloumi-core",
  "nuraloumi-providers",
@@ -167,7 +167,7 @@ dependencies = [
 
 [[package]]
 name = "nuraloumi-wayland"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "memmap2",
  "rustix",
@@ -178,7 +178,7 @@ dependencies = [
 
 [[package]]
 name = "nuraloumi-xtask"
-version = "0.1.0"
+version = "0.0.1"
 
 [[package]]
 name = "pkg-config"
