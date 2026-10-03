@@ -4,7 +4,12 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-const RUNTIME_BINARIES: &[&str] = &["nuraloumi-panel", "nuraloumi-menu", "nuraloumi-probe"];
+const RUNTIME_BINARIES: &[&str] = &[
+    "nuraloumi-panel",
+    "nuraloumi-menu",
+    "nuraloumi-thumbnail-helper",
+    "nuraloumi-probe",
+];
 
 pub fn host_triple(root: &Path) -> Result<String, String> {
     let output = run_checked("rustc", &["-vV"], root)?;
@@ -139,23 +144,21 @@ pub fn stage_package(
     let mut staged_bins = Vec::new();
     for name in RUNTIME_BINARIES {
         let source = binaries_dir.join(name);
-        if source.is_file() {
-            let destination = bin_dir.join(name);
-            fs::copy(&source, &destination).map_err(|error| {
-                format!(
-                    "copy runtime binary {} -> {}: {error}",
-                    source.display(),
-                    destination.display()
-                )
-            })?;
-            staged_bins.push((*name).to_owned());
+        if !source.is_file() {
+            return Err(format!(
+                "required runtime release binary missing: {}; run the complete target release build first",
+                source.display()
+            ));
         }
-    }
-    if staged_bins.is_empty() {
-        return Err(format!(
-            "no runtime release binaries found in {}; run build-release after runtime lanes land",
-            binaries_dir.display()
-        ));
+        let destination = bin_dir.join(name);
+        fs::copy(&source, &destination).map_err(|error| {
+            format!(
+                "copy runtime binary {} -> {}: {error}",
+                source.display(),
+                destination.display()
+            )
+        })?;
+        staged_bins.push((*name).to_owned());
     }
 
     copy_required(&root.join("packaging/README.md"), &stage.join("README.md"))?;
@@ -326,16 +329,11 @@ fn create_deterministic_tar(root: &Path, stage: &Path, tar_path: &Path) -> Resul
     if !command_available("tar", root) {
         return Err("tar is required to create the deterministic package archive".to_owned());
     }
-    let parent = stage
-        .parent()
-        .ok_or_else(|| format!("package stage has no parent: {}", stage.display()))?;
-    let name = stage
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| format!("invalid package stage name: {}", stage.display()))?;
-
     let tar_path_text = tar_path.to_string_lossy();
-    let parent_text = parent.to_string_lossy();
+    let stage_text = stage.to_string_lossy();
+    // Archive the stage contents from a canonical "." root. The caller's
+    // chosen output directory name is intentionally excluded from tar headers
+    // so byte-identical package payloads produce byte-identical archives.
     let args = [
         "--sort=name",
         "--mtime=@0",
@@ -346,8 +344,8 @@ fn create_deterministic_tar(root: &Path, stage: &Path, tar_path: &Path) -> Resul
         "-cf",
         tar_path_text.as_ref(),
         "-C",
-        parent_text.as_ref(),
-        name,
+        stage_text.as_ref(),
+        ".",
     ];
     run_checked("tar", &args, root)?;
     Ok(())
@@ -355,7 +353,9 @@ fn create_deterministic_tar(root: &Path, stage: &Path, tar_path: &Path) -> Resul
 
 #[cfg(test)]
 mod tests {
-    use super::{archive_path, collect_files, workspace_version};
+    use super::{
+        archive_path, collect_files, create_deterministic_tar, workspace_version, RUNTIME_BINARIES,
+    };
     use std::fs;
     use std::path::PathBuf;
 
@@ -376,6 +376,43 @@ mod tests {
         )
         .expect("write manifest");
         assert_eq!(workspace_version(&root).expect("version"), "0.1.0");
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn runtime_package_requires_thumbnail_helper() {
+        assert_eq!(
+            RUNTIME_BINARIES,
+            [
+                "nuraloumi-panel",
+                "nuraloumi-menu",
+                "nuraloumi-thumbnail-helper",
+                "nuraloumi-probe",
+            ]
+        );
+    }
+
+    #[test]
+    fn deterministic_tar_does_not_depend_on_stage_directory_name() {
+        let root = temp_dir("deterministic-tar");
+        let stage_a = root.join("stage-a");
+        let stage_b = root.join("different-stage-name");
+        for stage in [&stage_a, &stage_b] {
+            fs::create_dir_all(stage.join("bin")).expect("create stage tree");
+            fs::write(stage.join("README.md"), b"same package\n").expect("write readme");
+            fs::write(stage.join("bin/nuraloumi-panel"), b"same binary bytes")
+                .expect("write binary");
+        }
+
+        let tar_a = root.join("a.tar");
+        let tar_b = root.join("b.tar");
+        create_deterministic_tar(&root, &stage_a, &tar_a).expect("tar stage a");
+        create_deterministic_tar(&root, &stage_b, &tar_b).expect("tar stage b");
+        assert_eq!(
+            fs::read(&tar_a).expect("read tar a"),
+            fs::read(&tar_b).expect("read tar b")
+        );
+
         fs::remove_dir_all(root).expect("cleanup");
     }
 

@@ -3,40 +3,92 @@ use nuraloumi_providers::{
     ActionProvider, ActionResult, ApplicationAction, ApplicationProvider, ApplicationSnapshot,
     AudioAction, AudioProvider, BacklightAction, BacklightProvider, BluetoothAction,
     BluetoothProvider, Health, MediaAction, MediaProvider, NetworkAction, NetworkProvider,
-    NotificationAction, NotificationProvider, ProbeSnapshot, Provider, SessionAction,
-    SessionProvider, SnapshotMeta, SystemCommandRunner,
+    NotificationAction, NotificationProvider, ProbeSnapshot, ProcessProvider, ProcessSnapshot,
+    Provider, SessionAction, SessionProvider, SnapshotMeta, SystemCommandRunner,
 };
 use nuraloumi_render_cairo::{
     CairoRenderer, Color, HitRegion as RenderHitRegion, PaintNode, Point, Rect, RenderOptions,
     RowKind, Scene, ScrollWindow, TextStyle, Theme as RenderTheme, Viewport,
 };
 use nuraloumi_shell::{
-    build_family, execute_window_command, launcher_search_input, load_config,
-    load_fixture_snapshot, panel_affordances, parse_desktop_command, parse_family,
-    parse_window_command, window_entries, ActionReport, ApplicationEntry as ShellApplicationEntry,
+    apply_launcher_preferences, build_family, execute_window_command, launcher_search_input,
+    load_config_or_default, load_fixture_snapshot, panel_affordances, parse_desktop_command,
+    parse_family, parse_window_command, render_menu_follow_selection, resolve_app_activation,
+    window_entries, ActionReport, AppActivation, ApplicationEntry as ShellApplicationEntry,
     BluetoothDeviceEntry, ControlCenterTab, DesktopCommand, DesktopControlCapabilities,
     DesktopEntry, FixtureSnapshot, HitRegion as ShellHitRegion,
     MediaPlayerEntry as ShellMediaPlayerEntry, MenuAction, MenuFamily,
     NotificationHistoryEntry as ShellNotificationHistoryEntry, OverviewMode, PanelAffordance,
     PanelController, PanelEdge as ShellPanelEdge, PlatformEvent as ShellPlatformEvent,
     ProviderValue, SceneTransitionClock, SemanticInput, ShellConfig, ShellState,
-    Theme as ShellTheme, ValueState, WifiNetworkEntry, WindowControlCapabilities,
-    WindowThumbnailEntry,
+    TaskEntry as ShellTaskEntry, Theme as ShellTheme, ValueState, WifiNetworkEntry, WindowCommand,
+    WindowControlCapabilities, WindowThumbnailEntry,
 };
 use nuraloumi_wayland::{
-    capture_toplevel_thumbnails_with_timeout, BackendCapabilities as WaylandCapabilities,
-    BackendError, Frame, Key as WaylandKey, MenuConfig as WaylandMenuConfig,
-    PanelConfig as WaylandPanelConfig, PanelEdge as WaylandPanelEdge, PixelFormat,
-    PlatformEvent as WaylandEvent, SurfaceId, ToplevelThumbnailReport, ToplevelThumbnailRequest,
+    BackendCapabilities as WaylandCapabilities, BackendError, Frame, Key as WaylandKey,
+    MenuConfig as WaylandMenuConfig, PanelConfig as WaylandPanelConfig,
+    PanelEdge as WaylandPanelEdge, PixelFormat, PlatformEvent as WaylandEvent, SurfaceId,
     WaylandBackend, WorkspaceId,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::env;
+use std::io::Write;
 use std::path::PathBuf;
-use std::process::ExitCode;
+use std::process::{Command, ExitCode, Stdio};
 
 const PANEL_MENU_GAP: u32 = 6;
+
+// musl's ARM `round` object in the generated SL101 sysroot uses d16, which is
+// outside Tegra20's VFPv3-D16 register file. Cairo preview painting reaches
+// f64::round() only after a thumbnail is available, so provide a target-local
+// IEEE-754 implementation that performs the rounding decision in integer bits.
+// Host builds keep the platform libc implementation.
+#[cfg(target_arch = "arm")]
+#[no_mangle]
+pub extern "C" fn round(value: f64) -> f64 {
+    sl101_round_bits(value)
+}
+
+#[cfg(any(test, target_arch = "arm"))]
+fn sl101_round_bits(value: f64) -> f64 {
+    const SIGN: u64 = 1_u64 << 63;
+    const EXPONENT_MASK: u64 = 0x7ff;
+    const FRACTION_BITS: i32 = 52;
+    const EXPONENT_BIAS: i32 = 1023;
+
+    let bits = value.to_bits();
+    let raw_exponent = ((bits >> FRACTION_BITS) & EXPONENT_MASK) as i32;
+    if raw_exponent == EXPONENT_MASK as i32 {
+        return value;
+    }
+    let exponent = raw_exponent - EXPONENT_BIAS;
+    if exponent >= FRACTION_BITS {
+        return value;
+    }
+    if exponent < 0 {
+        let sign = bits & SIGN;
+        if exponent == -1 {
+            return f64::from_bits(sign | (u64::from(EXPONENT_BIAS as u32) << FRACTION_BITS));
+        }
+        return f64::from_bits(sign);
+    }
+
+    let fractional_bits = (FRACTION_BITS - exponent) as u32;
+    let fractional_mask = (1_u64 << fractional_bits) - 1;
+    let fraction = bits & fractional_mask;
+    if fraction == 0 {
+        return value;
+    }
+    let half = 1_u64 << (fractional_bits - 1);
+    let truncated = bits & !fractional_mask;
+    let rounded = if fraction >= half {
+        truncated + (1_u64 << fractional_bits)
+    } else {
+        truncated
+    };
+    f64::from_bits(rounded)
+}
 
 const HELP: &str = r#"nuraloumi-panel — NuraLoumi top panel
 
@@ -174,22 +226,19 @@ fn run() -> Result<(), String> {
     if args.enable_power_actions && !args.live {
         return Err("--enable-power-actions requires --live".into());
     }
-    let mut config = if let Some(path) = args.config.as_ref() {
-        load_config(path)?
-    } else {
-        ShellConfig::default()
-    };
+    let mut config = load_config_or_default(args.config.as_deref())?;
     if args.reduced_motion {
         config.reduced_motion = true;
     }
     config.validate()?;
 
     let defer_live_provider_refresh = should_defer_live_provider_refresh(&args);
-    let snapshot = if let Some(path) = args.providers.as_ref() {
+    let mut snapshot = if let Some(path) = args.providers.as_ref() {
         load_fixture_snapshot(path)?
     } else {
         FixtureSnapshot::default()
     };
+    apply_launcher_preferences(&mut snapshot.applications, &config.launcher);
 
     if args.live {
         let initial_family = args.open.as_deref().map(parse_family).transpose()?;
@@ -291,11 +340,12 @@ fn run_live(
         std::thread::spawn(|| {
             let probe = ProbeSnapshot::live();
             let applications = ApplicationProvider::system().snapshot();
-            (probe, applications)
+            let tasks = ProcessProvider::system().snapshot();
+            (probe, applications, tasks)
         })
     });
     let mut thumbnail_probe: Option<
-        std::thread::JoinHandle<Result<ToplevelThumbnailReport, String>>,
+        std::thread::JoinHandle<Result<ThumbnailHelperReport, String>>,
     > = None;
     let mut thumbnail_probe_started = false;
 
@@ -644,49 +694,108 @@ fn run_live(
                             } else if let Some(command) =
                                 parse_window_command(action, &snapshot.windows)?
                             {
+                                let close_after_focus = matches!(command, WindowCommand::Focus(_));
                                 execute_window_command(&mut backend, command)?;
-                                redraw = true;
+                                if close_after_focus {
+                                    backend.roundtrip().map_err(|error| {
+                                        format!("toplevel focus roundtrip failed: {error}")
+                                    })?;
+                                    close = true;
+                                } else {
+                                    redraw = true;
+                                }
                             } else {
                                 let app_launch = matches!(
                                     action,
                                     MenuAction::Custom { kind, .. } if kind == "app.launch"
                                 );
-                                match execute_live_action(action, policy.enable_power_actions) {
-                                    Ok(Some(result)) => {
-                                        eprintln!(
-                                        "nuraloumi-provider-result: executed={} dry_run={} message={}",
-                                        result.executed, result.dry_run, result.message
-                                    );
-                                        let lazy_control =
-                                            refresh_lazy_control_action(&mut snapshot, action);
-                                        if !lazy_control && !app_launch {
-                                            refresh_probe_snapshot(
-                                                &mut snapshot,
-                                                &ProbeSnapshot::live(),
-                                            );
-                                            refresh_window_snapshot(&mut snapshot, &backend);
-                                            refresh_workspace_snapshot(&mut snapshot, &backend);
+                                let mut app_reused = false;
+                                if let MenuAction::Custom { kind, payload } = action {
+                                    if kind == "app.launch" {
+                                        match resolve_app_activation(
+                                            payload,
+                                            &snapshot.windows,
+                                            &config.launcher,
+                                        ) {
+                                            AppActivation::AlreadyFocused => {
+                                                close = true;
+                                                app_reused = true;
+                                            }
+                                            AppActivation::FocusWindow(window_id) => {
+                                                let focus = MenuAction::Custom {
+                                                    kind: "window.focus".into(),
+                                                    payload: window_id,
+                                                };
+                                                let command =
+                                                    parse_window_command(&focus, &snapshot.windows)?
+                                                        .ok_or_else(|| {
+                                                            "resolved app focus did not produce a window command"
+                                                                .to_owned()
+                                                        })?;
+                                                execute_window_command(&mut backend, command)?;
+                                                backend.roundtrip().map_err(|error| {
+                                                    format!(
+                                                        "toplevel focus roundtrip failed: {error}"
+                                                    )
+                                                })?;
+                                                close = true;
+                                                app_reused = true;
+                                            }
+                                            AppActivation::Launch => {}
                                         }
-                                        menu.shell.refresh_family(menu.family, &snapshot)?;
-                                        panel_scene = None;
-                                        redraw = true;
                                     }
-                                    Ok(None) => {}
-                                    Err(error) => {
-                                        eprintln!("nuraloumi-provider-error: {error}");
-                                        let lazy_control =
-                                            refresh_lazy_control_action(&mut snapshot, action);
-                                        if !lazy_control && !app_launch {
-                                            refresh_probe_snapshot(
-                                                &mut snapshot,
-                                                &ProbeSnapshot::live(),
-                                            );
-                                            refresh_window_snapshot(&mut snapshot, &backend);
-                                            refresh_workspace_snapshot(&mut snapshot, &backend);
+                                }
+                                if !app_reused {
+                                    match execute_live_action(action, policy.enable_power_actions) {
+                                        Ok(Some(result)) => {
+                                            eprintln!(
+                                            "nuraloumi-provider-result: executed={} dry_run={} message={}",
+                                            result.executed, result.dry_run, result.message
+                                        );
+                                            if app_launch && result.executed {
+                                                close = true;
+                                            } else {
+                                                let lazy_control = refresh_lazy_control_action(
+                                                    &mut snapshot,
+                                                    action,
+                                                );
+                                                if !lazy_control {
+                                                    refresh_probe_snapshot(
+                                                        &mut snapshot,
+                                                        &ProbeSnapshot::live(),
+                                                    );
+                                                    refresh_window_snapshot(
+                                                        &mut snapshot,
+                                                        &backend,
+                                                    );
+                                                    refresh_workspace_snapshot(
+                                                        &mut snapshot,
+                                                        &backend,
+                                                    );
+                                                }
+                                                menu.shell
+                                                    .refresh_family(menu.family, &snapshot)?;
+                                                panel_scene = None;
+                                                redraw = true;
+                                            }
                                         }
-                                        menu.shell.refresh_family(menu.family, &snapshot)?;
-                                        panel_scene = None;
-                                        redraw = true;
+                                        Ok(None) => {}
+                                        Err(error) => {
+                                            eprintln!("nuraloumi-provider-error: {error}");
+                                            let lazy_control =
+                                                refresh_lazy_control_action(&mut snapshot, action);
+                                            if !lazy_control && !app_launch {
+                                                refresh_probe_snapshot(
+                                                    &mut snapshot,
+                                                    &ProbeSnapshot::live(),
+                                                );
+                                                refresh_window_snapshot(&mut snapshot, &backend);
+                                                refresh_workspace_snapshot(&mut snapshot, &backend);
+                                            }
+                                            menu.shell.refresh_family(menu.family, &snapshot)?;
+                                            panel_scene = None;
+                                            redraw = true;
+                                        }
                                     }
                                 }
                             }
@@ -746,13 +855,14 @@ fn run_live(
                 .as_ref()
                 .is_some_and(|probe| probe.is_finished())
         {
-            let (probe, applications) = live_provider_probe
+            let (probe, applications, tasks) = live_provider_probe
                 .take()
                 .expect("finished live provider probe must exist")
                 .join()
                 .map_err(|_| "initial live provider probe panicked".to_owned())?;
             refresh_probe_snapshot(&mut snapshot, &probe);
-            apply_application_snapshot(&mut snapshot, applications);
+            apply_application_snapshot(&mut snapshot, applications, &config.launcher);
+            apply_process_snapshot(&mut snapshot, tasks);
             if policy.execute_provider_actions {
                 refresh_window_snapshot(&mut snapshot, &backend);
                 refresh_workspace_snapshot(&mut snapshot, &backend);
@@ -1030,25 +1140,16 @@ fn render_menu_and_present(
         ShellTheme::Dark => &DARK_THEME,
         ShellTheme::Light => &LIGHT_THEME,
     };
-    let rendered = match transition {
-        Some(transition) => renderer.render_core_transition(
-            &shell.menu,
-            &shell.state,
-            viewport,
-            theme_tokens,
-            RenderOptions::default(),
-            transition,
-        ),
-        None => renderer.render_core(
-            &shell.menu,
-            &shell.state,
-            viewport,
-            theme_tokens,
-            RenderOptions::default(),
-        ),
-    };
-    let (scene, mut buffer) =
-        rendered.map_err(|error| format!("Cairo menu render failed: {error}"))?;
+    let (scene, mut buffer) = render_menu_follow_selection(
+        renderer,
+        &shell.menu,
+        &shell.state,
+        viewport,
+        theme_tokens,
+        RenderOptions::default(),
+        transition,
+    )
+    .map_err(|error| format!("Cairo menu render failed: {error}"))?;
     paint_window_thumbnail_overlays(&scene, &mut buffer, snapshot)?;
     present_buffer(backend, surface, &mut buffer)?;
     Ok(scene)
@@ -1612,6 +1713,7 @@ fn fixture_snapshot_from_probe(probe: &ProbeSnapshot) -> FixtureSnapshot {
 }
 
 fn refresh_probe_snapshot(snapshot: &mut FixtureSnapshot, probe: &ProbeSnapshot) {
+    let tasks = std::mem::take(&mut snapshot.tasks);
     let applications = std::mem::take(&mut snapshot.applications);
     let windows = std::mem::take(&mut snapshot.windows);
     let window_thumbnails = std::mem::take(&mut snapshot.window_thumbnails);
@@ -1624,6 +1726,7 @@ fn refresh_probe_snapshot(snapshot: &mut FixtureSnapshot, probe: &ProbeSnapshot)
     let notifications = snapshot.notifications.clone();
     let notification_history = snapshot.notification_history.clone();
     *snapshot = fixture_snapshot_from_probe(probe);
+    snapshot.tasks = tasks;
     snapshot.applications = applications;
     snapshot.windows = windows;
     snapshot.window_thumbnails = window_thumbnails;
@@ -1640,6 +1743,7 @@ fn refresh_probe_snapshot(snapshot: &mut FixtureSnapshot, probe: &ProbeSnapshot)
 fn apply_application_snapshot(
     snapshot: &mut FixtureSnapshot,
     applications: Result<ApplicationSnapshot, nuraloumi_providers::ProviderError>,
+    preferences: &nuraloumi_shell::LauncherPreferences,
 ) {
     match applications {
         Ok(applications) => {
@@ -1654,10 +1758,36 @@ fn apply_application_snapshot(
                     launchable: application.launchable,
                 })
                 .collect();
+            apply_launcher_preferences(&mut snapshot.applications, preferences);
         }
         Err(error) => {
             eprintln!("nuraloumi-application-provider-error: {error}");
             snapshot.applications.clear();
+        }
+    }
+}
+
+fn apply_process_snapshot(
+    snapshot: &mut FixtureSnapshot,
+    processes: Result<ProcessSnapshot, nuraloumi_providers::ProviderError>,
+) {
+    match processes {
+        Ok(processes) => {
+            snapshot.tasks = processes
+                .processes
+                .into_iter()
+                .map(|process| ShellTaskEntry {
+                    id: process.id,
+                    label: process.label,
+                    state: process.state,
+                    cpu_percent: process.cpu_percent,
+                    memory_mib: process.memory_mib,
+                })
+                .collect();
+        }
+        Err(error) => {
+            eprintln!("nuraloumi-process-provider-error: {error}");
+            snapshot.tasks.clear();
         }
     }
 }
@@ -1765,34 +1895,276 @@ fn refresh_window_snapshot(snapshot: &mut FixtureSnapshot, backend: &WaylandBack
     });
 }
 
+#[derive(Clone, Debug)]
+struct ThumbnailHelperRequest {
+    key: String,
+    title: String,
+    app_id: Option<String>,
+    protocol_identifier: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ThumbnailHelperCapabilities {
+    ext_foreign_toplevel_list: bool,
+    foreign_toplevel_capture_source: bool,
+    image_copy_capture: bool,
+    shm: bool,
+}
+
+impl ThumbnailHelperCapabilities {
+    fn available(self) -> bool {
+        self.ext_foreign_toplevel_list
+            && self.foreign_toplevel_capture_source
+            && self.image_copy_capture
+            && self.shm
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ThumbnailHelperThumbnail {
+    key: String,
+    width: u32,
+    height: u32,
+    pixels: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ThumbnailHelperReport {
+    capabilities: ThumbnailHelperCapabilities,
+    thumbnails: Vec<ThumbnailHelperThumbnail>,
+    issues: Vec<String>,
+}
+
+const THUMBNAIL_HELPER_REQUEST_MAGIC: &[u8; 8] = b"NLTHRQ01";
+const THUMBNAIL_HELPER_RESPONSE_MAGIC: &[u8; 8] = b"NLTHRS01";
+const THUMBNAIL_HELPER_MAX_STRING_BYTES: usize = 4096;
+const THUMBNAIL_HELPER_MAX_ISSUES: usize = 16;
+const THUMBNAIL_HELPER_MAX_THUMBNAILS: usize = 4;
+const THUMBNAIL_HELPER_MAX_PIXEL_BYTES: usize = 16 * 1024 * 1024;
+
 fn start_window_thumbnail_probe(
     backend: &WaylandBackend,
-) -> Option<std::thread::JoinHandle<Result<ToplevelThumbnailReport, String>>> {
+) -> Option<std::thread::JoinHandle<Result<ThumbnailHelperReport, String>>> {
     let mut windows = backend.toplevels();
     windows.sort_by_key(|window| !window.state.activated);
     let requests = windows
         .into_iter()
         .take(4)
-        .map(|window| ToplevelThumbnailRequest {
+        .map(|window| ThumbnailHelperRequest {
             key: window.id.to_string(),
             title: window.title,
             app_id: window.app_id,
             protocol_identifier: window.protocol_identifier,
         })
         .collect::<Vec<_>>();
-    (!requests.is_empty()).then(|| {
-        std::thread::spawn(move || {
-            capture_toplevel_thumbnails_with_timeout(
-                &requests,
-                std::time::Duration::from_millis(350),
+    (!requests.is_empty())
+        .then(|| std::thread::spawn(move || run_window_thumbnail_helper(&requests)))
+}
+
+fn run_window_thumbnail_helper(
+    requests: &[ThumbnailHelperRequest],
+) -> Result<ThumbnailHelperReport, String> {
+    let request_bytes = encode_thumbnail_helper_request(requests)?;
+    let current_exe =
+        env::current_exe().map_err(|error| format!("resolve panel executable failed: {error}"))?;
+    let parent = current_exe
+        .parent()
+        .ok_or_else(|| "panel executable has no parent directory".to_owned())?;
+    let helper = parent.join("nuraloumi-thumbnail-helper");
+    let mut child = Command::new(&helper)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| {
+            format!(
+                "start thumbnail helper {} failed: {error}",
+                helper.display()
             )
-        })
+        })?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| "thumbnail helper stdin unavailable".to_owned())?
+        .write_all(&request_bytes)
+        .map_err(|error| format!("write thumbnail helper request failed: {error}"))?;
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("wait for thumbnail helper failed: {error}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "thumbnail helper exited with {}: {}",
+            output.status,
+            stderr.trim()
+        ));
+    }
+    decode_thumbnail_helper_report(&output.stdout)
+}
+
+fn encode_thumbnail_helper_request(requests: &[ThumbnailHelperRequest]) -> Result<Vec<u8>, String> {
+    if requests.len() > THUMBNAIL_HELPER_MAX_THUMBNAILS {
+        return Err(format!(
+            "thumbnail helper accepts at most {THUMBNAIL_HELPER_MAX_THUMBNAILS} requests"
+        ));
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(THUMBNAIL_HELPER_REQUEST_MAGIC);
+    push_helper_u32(&mut out, requests.len())?;
+    for request in requests {
+        push_helper_string(&mut out, &request.key)?;
+        push_helper_string(&mut out, &request.title)?;
+        push_helper_optional_string(&mut out, request.app_id.as_deref())?;
+        push_helper_optional_string(&mut out, request.protocol_identifier.as_deref())?;
+    }
+    Ok(out)
+}
+
+fn decode_thumbnail_helper_report(bytes: &[u8]) -> Result<ThumbnailHelperReport, String> {
+    let mut cursor = ThumbnailHelperCursor::new(bytes);
+    cursor.expect_magic(THUMBNAIL_HELPER_RESPONSE_MAGIC)?;
+    let mask = cursor.read_u8()?;
+    let capabilities = ThumbnailHelperCapabilities {
+        ext_foreign_toplevel_list: mask & 1 != 0,
+        foreign_toplevel_capture_source: mask & 2 != 0,
+        image_copy_capture: mask & 4 != 0,
+        shm: mask & 8 != 0,
+    };
+    let issue_count = cursor.read_u32()? as usize;
+    if issue_count > THUMBNAIL_HELPER_MAX_ISSUES {
+        return Err(format!(
+            "thumbnail helper returned {issue_count} issues, limit is {THUMBNAIL_HELPER_MAX_ISSUES}"
+        ));
+    }
+    let mut issues = Vec::with_capacity(issue_count);
+    for _ in 0..issue_count {
+        issues.push(cursor.read_string()?);
+    }
+    let thumbnail_count = cursor.read_u32()? as usize;
+    if thumbnail_count > THUMBNAIL_HELPER_MAX_THUMBNAILS {
+        return Err(format!(
+            "thumbnail helper returned {thumbnail_count} thumbnails, limit is {THUMBNAIL_HELPER_MAX_THUMBNAILS}"
+        ));
+    }
+    let mut thumbnails = Vec::with_capacity(thumbnail_count);
+    for _ in 0..thumbnail_count {
+        let key = cursor.read_string()?;
+        let width = cursor.read_u32()?;
+        let height = cursor.read_u32()?;
+        let pixel_len = cursor.read_u32()? as usize;
+        if pixel_len > THUMBNAIL_HELPER_MAX_PIXEL_BYTES {
+            return Err(format!(
+                "thumbnail helper pixel payload {pixel_len} exceeds {THUMBNAIL_HELPER_MAX_PIXEL_BYTES}"
+            ));
+        }
+        let pixels = cursor.read_bytes(pixel_len)?.to_vec();
+        thumbnails.push(ThumbnailHelperThumbnail {
+            key,
+            width,
+            height,
+            pixels,
+        });
+    }
+    cursor.expect_end()?;
+    Ok(ThumbnailHelperReport {
+        capabilities,
+        thumbnails,
+        issues,
     })
+}
+
+fn push_helper_u32(out: &mut Vec<u8>, value: usize) -> Result<(), String> {
+    let value = u32::try_from(value).map_err(|_| "thumbnail helper request length exceeds u32")?;
+    out.extend_from_slice(&value.to_le_bytes());
+    Ok(())
+}
+
+fn push_helper_string(out: &mut Vec<u8>, value: &str) -> Result<(), String> {
+    if value.len() > THUMBNAIL_HELPER_MAX_STRING_BYTES {
+        return Err(format!(
+            "thumbnail helper request string is {} bytes, limit is {THUMBNAIL_HELPER_MAX_STRING_BYTES}",
+            value.len()
+        ));
+    }
+    push_helper_u32(out, value.len())?;
+    out.extend_from_slice(value.as_bytes());
+    Ok(())
+}
+
+fn push_helper_optional_string(out: &mut Vec<u8>, value: Option<&str>) -> Result<(), String> {
+    match value {
+        Some(value) => push_helper_string(out, value),
+        None => {
+            out.extend_from_slice(&u32::MAX.to_le_bytes());
+            Ok(())
+        }
+    }
+}
+
+struct ThumbnailHelperCursor<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> ThumbnailHelperCursor<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, offset: 0 }
+    }
+
+    fn expect_magic(&mut self, expected: &[u8; 8]) -> Result<(), String> {
+        if self.read_bytes(expected.len())? != expected {
+            return Err("thumbnail helper response magic mismatch".to_owned());
+        }
+        Ok(())
+    }
+
+    fn read_u8(&mut self) -> Result<u8, String> {
+        Ok(self.read_bytes(1)?[0])
+    }
+
+    fn read_u32(&mut self) -> Result<u32, String> {
+        let bytes: [u8; 4] = self
+            .read_bytes(4)?
+            .try_into()
+            .map_err(|_| "thumbnail helper response u32 decode failed")?;
+        Ok(u32::from_le_bytes(bytes))
+    }
+
+    fn read_string(&mut self) -> Result<String, String> {
+        let len = self.read_u32()? as usize;
+        if len > THUMBNAIL_HELPER_MAX_STRING_BYTES {
+            return Err(format!(
+                "thumbnail helper response string length {len} exceeds {THUMBNAIL_HELPER_MAX_STRING_BYTES}"
+            ));
+        }
+        String::from_utf8(self.read_bytes(len)?.to_vec())
+            .map_err(|_| "thumbnail helper response string is not UTF-8".to_owned())
+    }
+
+    fn read_bytes(&mut self, len: usize) -> Result<&'a [u8], String> {
+        let end = self
+            .offset
+            .checked_add(len)
+            .ok_or_else(|| "thumbnail helper response length overflow".to_owned())?;
+        let bytes = self
+            .bytes
+            .get(self.offset..end)
+            .ok_or_else(|| "thumbnail helper response truncated".to_owned())?;
+        self.offset = end;
+        Ok(bytes)
+    }
+
+    fn expect_end(&self) -> Result<(), String> {
+        if self.offset != self.bytes.len() {
+            return Err("thumbnail helper response has trailing bytes".to_owned());
+        }
+        Ok(())
+    }
 }
 
 fn apply_window_thumbnail_report(
     snapshot: &mut FixtureSnapshot,
-    result: Result<ToplevelThumbnailReport, String>,
+    result: Result<ThumbnailHelperReport, String>,
 ) {
     match result {
         Ok(report) => {
@@ -2212,6 +2584,19 @@ mod tests {
         .expect("poweroff should map to a session action");
         assert!(!result.executed);
         assert!(result.dry_run);
+    }
+
+    #[test]
+    fn sl101_round_bits_matches_rust_round_semantics() {
+        for value in [
+            -2.75_f64, -2.5, -2.49, -1.5, -0.5, -0.49, -0.0, 0.0, 0.49, 0.5, 1.5, 2.49, 2.5, 2.75,
+            1024.5,
+        ] {
+            assert_eq!(sl101_round_bits(value).to_bits(), value.round().to_bits());
+        }
+        assert!(sl101_round_bits(f64::NAN).is_nan());
+        assert_eq!(sl101_round_bits(f64::INFINITY), f64::INFINITY);
+        assert_eq!(sl101_round_bits(f64::NEG_INFINITY), f64::NEG_INFINITY);
     }
 
     #[test]

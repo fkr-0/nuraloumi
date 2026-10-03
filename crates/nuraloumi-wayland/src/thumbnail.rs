@@ -77,6 +77,263 @@ pub struct ToplevelThumbnailReport {
     pub issues: Vec<String>,
 }
 
+#[allow(dead_code)]
+pub mod helper_wire {
+    use super::*;
+
+    const HELPER_REQUEST_MAGIC: &[u8; 8] = b"NLTHRQ01";
+    const HELPER_RESPONSE_MAGIC: &[u8; 8] = b"NLTHRS01";
+    const MAX_HELPER_REQUESTS: usize = 4;
+    const MAX_HELPER_ISSUES: usize = 16;
+    const MAX_HELPER_STRING_BYTES: usize = 4096;
+
+    pub fn encode_thumbnail_helper_request(
+        requests: &[ToplevelThumbnailRequest],
+    ) -> Result<Vec<u8>, String> {
+        if requests.len() > MAX_HELPER_REQUESTS {
+            return Err(format!(
+                "thumbnail helper accepts at most {MAX_HELPER_REQUESTS} requests"
+            ));
+        }
+        let mut out = Vec::new();
+        out.extend_from_slice(HELPER_REQUEST_MAGIC);
+        push_u32(&mut out, requests.len())?;
+        for request in requests {
+            push_string(&mut out, &request.key)?;
+            push_string(&mut out, &request.title)?;
+            push_optional_string(&mut out, request.app_id.as_deref())?;
+            push_optional_string(&mut out, request.protocol_identifier.as_deref())?;
+        }
+        Ok(out)
+    }
+
+    pub fn decode_thumbnail_helper_request(
+        bytes: &[u8],
+    ) -> Result<Vec<ToplevelThumbnailRequest>, String> {
+        let mut cursor = HelperCursor::new(bytes);
+        cursor.expect_magic(HELPER_REQUEST_MAGIC)?;
+        let count = cursor.read_u32()? as usize;
+        if count > MAX_HELPER_REQUESTS {
+            return Err(format!(
+                "thumbnail helper request count {count} exceeds {MAX_HELPER_REQUESTS}"
+            ));
+        }
+        let mut requests = Vec::with_capacity(count);
+        for _ in 0..count {
+            requests.push(ToplevelThumbnailRequest {
+                key: cursor.read_string()?,
+                title: cursor.read_string()?,
+                app_id: cursor.read_optional_string()?,
+                protocol_identifier: cursor.read_optional_string()?,
+            });
+        }
+        cursor.expect_end()?;
+        Ok(requests)
+    }
+
+    pub fn encode_thumbnail_helper_report(
+        report: &ToplevelThumbnailReport,
+    ) -> Result<Vec<u8>, String> {
+        if report.issues.len() > MAX_HELPER_ISSUES {
+            return Err(format!(
+                "thumbnail helper issue count {} exceeds {MAX_HELPER_ISSUES}",
+                report.issues.len()
+            ));
+        }
+        if report.thumbnails.len() > MAX_HELPER_REQUESTS {
+            return Err(format!(
+                "thumbnail helper thumbnail count {} exceeds {MAX_HELPER_REQUESTS}",
+                report.thumbnails.len()
+            ));
+        }
+        let mut out = Vec::new();
+        out.extend_from_slice(HELPER_RESPONSE_MAGIC);
+        let capabilities = report.capabilities;
+        let mask = u8::from(capabilities.ext_foreign_toplevel_list)
+            | (u8::from(capabilities.foreign_toplevel_capture_source) << 1)
+            | (u8::from(capabilities.image_copy_capture) << 2)
+            | (u8::from(capabilities.shm) << 3);
+        out.push(mask);
+        push_u32(&mut out, report.issues.len())?;
+        for issue in &report.issues {
+            push_string(&mut out, issue)?;
+        }
+        push_u32(&mut out, report.thumbnails.len())?;
+        for thumbnail in &report.thumbnails {
+            push_string(&mut out, &thumbnail.key)?;
+            out.extend_from_slice(&thumbnail.width.to_le_bytes());
+            out.extend_from_slice(&thumbnail.height.to_le_bytes());
+            push_u32(&mut out, thumbnail.pixels.len())?;
+            out.extend_from_slice(&thumbnail.pixels);
+        }
+        Ok(out)
+    }
+
+    pub fn decode_thumbnail_helper_report(bytes: &[u8]) -> Result<ToplevelThumbnailReport, String> {
+        let mut cursor = HelperCursor::new(bytes);
+        cursor.expect_magic(HELPER_RESPONSE_MAGIC)?;
+        let mask = cursor.read_u8()?;
+        let capabilities = ToplevelThumbnailCapabilities {
+            ext_foreign_toplevel_list: mask & 1 != 0,
+            foreign_toplevel_capture_source: mask & 2 != 0,
+            image_copy_capture: mask & 4 != 0,
+            shm: mask & 8 != 0,
+        };
+        let issue_count = cursor.read_u32()? as usize;
+        if issue_count > MAX_HELPER_ISSUES {
+            return Err(format!(
+                "thumbnail helper issue count {issue_count} exceeds {MAX_HELPER_ISSUES}"
+            ));
+        }
+        let mut issues = Vec::with_capacity(issue_count);
+        for _ in 0..issue_count {
+            issues.push(cursor.read_string()?);
+        }
+        let thumbnail_count = cursor.read_u32()? as usize;
+        if thumbnail_count > MAX_HELPER_REQUESTS {
+            return Err(format!(
+                "thumbnail helper thumbnail count {thumbnail_count} exceeds {MAX_HELPER_REQUESTS}"
+            ));
+        }
+        let mut thumbnails = Vec::with_capacity(thumbnail_count);
+        for _ in 0..thumbnail_count {
+            let key = cursor.read_string()?;
+            let width = cursor.read_u32()?;
+            let height = cursor.read_u32()?;
+            let pixel_len = cursor.read_u32()? as usize;
+            if pixel_len > MAX_SOURCE_BYTES as usize {
+                return Err(format!(
+                    "thumbnail helper pixel payload {pixel_len} exceeds {MAX_SOURCE_BYTES} bytes"
+                ));
+            }
+            let pixels = cursor.read_bytes(pixel_len)?.to_vec();
+            thumbnails.push(ToplevelThumbnail {
+                key,
+                width,
+                height,
+                pixels,
+            });
+        }
+        cursor.expect_end()?;
+        Ok(ToplevelThumbnailReport {
+            capabilities,
+            thumbnails,
+            issues,
+        })
+    }
+
+    fn push_u32(out: &mut Vec<u8>, value: usize) -> Result<(), String> {
+        let value = u32::try_from(value).map_err(|_| "thumbnail helper length exceeds u32")?;
+        out.extend_from_slice(&value.to_le_bytes());
+        Ok(())
+    }
+
+    fn push_string(out: &mut Vec<u8>, value: &str) -> Result<(), String> {
+        if value.len() > MAX_HELPER_STRING_BYTES {
+            return Err(format!(
+                "thumbnail helper string is {} bytes, limit is {MAX_HELPER_STRING_BYTES}",
+                value.len()
+            ));
+        }
+        push_u32(out, value.len())?;
+        out.extend_from_slice(value.as_bytes());
+        Ok(())
+    }
+
+    fn push_optional_string(out: &mut Vec<u8>, value: Option<&str>) -> Result<(), String> {
+        match value {
+            Some(value) => push_string(out, value),
+            None => {
+                out.extend_from_slice(&u32::MAX.to_le_bytes());
+                Ok(())
+            }
+        }
+    }
+
+    struct HelperCursor<'a> {
+        bytes: &'a [u8],
+        offset: usize,
+    }
+
+    impl<'a> HelperCursor<'a> {
+        fn new(bytes: &'a [u8]) -> Self {
+            Self { bytes, offset: 0 }
+        }
+
+        fn expect_magic(&mut self, expected: &[u8; 8]) -> Result<(), String> {
+            if self.read_bytes(expected.len())? != expected {
+                return Err("thumbnail helper wire magic mismatch".to_owned());
+            }
+            Ok(())
+        }
+
+        fn read_u8(&mut self) -> Result<u8, String> {
+            let byte = *self
+                .read_bytes(1)?
+                .first()
+                .ok_or_else(|| "thumbnail helper wire truncated".to_owned())?;
+            Ok(byte)
+        }
+
+        fn read_u32(&mut self) -> Result<u32, String> {
+            let bytes: [u8; 4] = self
+                .read_bytes(4)?
+                .try_into()
+                .map_err(|_| "thumbnail helper u32 decode failed")?;
+            Ok(u32::from_le_bytes(bytes))
+        }
+
+        fn read_string(&mut self) -> Result<String, String> {
+            let len = self.read_u32()? as usize;
+            if len > MAX_HELPER_STRING_BYTES {
+                return Err(format!(
+                    "thumbnail helper string length {len} exceeds {MAX_HELPER_STRING_BYTES}"
+                ));
+            }
+            let bytes = self.read_bytes(len)?;
+            String::from_utf8(bytes.to_vec())
+                .map_err(|_| "thumbnail helper string is not UTF-8".to_owned())
+        }
+
+        fn read_optional_string(&mut self) -> Result<Option<String>, String> {
+            let len = self.read_u32()?;
+            if len == u32::MAX {
+                return Ok(None);
+            }
+            let len = len as usize;
+            if len > MAX_HELPER_STRING_BYTES {
+                return Err(format!(
+                "thumbnail helper optional string length {len} exceeds {MAX_HELPER_STRING_BYTES}"
+            ));
+            }
+            let bytes = self.read_bytes(len)?;
+            String::from_utf8(bytes.to_vec())
+                .map(Some)
+                .map_err(|_| "thumbnail helper optional string is not UTF-8".to_owned())
+        }
+
+        fn read_bytes(&mut self, len: usize) -> Result<&'a [u8], String> {
+            let end = self
+                .offset
+                .checked_add(len)
+                .ok_or_else(|| "thumbnail helper wire length overflow".to_owned())?;
+            let bytes = self
+                .bytes
+                .get(self.offset..end)
+                .ok_or_else(|| "thumbnail helper wire truncated".to_owned())?;
+            self.offset = end;
+            Ok(bytes)
+        }
+
+        fn expect_end(&self) -> Result<(), String> {
+            if self.offset != self.bytes.len() {
+                return Err("thumbnail helper wire has trailing bytes".to_owned());
+            }
+            Ok(())
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 struct ListedToplevel {
     handle: Option<ExtForeignToplevelHandleV1>,
@@ -395,6 +652,7 @@ fn validate_source_size(width: u32, height: u32) -> Result<(), String> {
     source_byte_len(width, height).map(|_| ())
 }
 
+#[allow(unexpected_cfgs)]
 fn downsample_argb32(
     source: &[u8],
     width: u32,
@@ -405,14 +663,32 @@ fn downsample_argb32(
     if max_edge == 0 {
         return Err("thumbnail max edge must be non-zero".to_owned());
     }
-    let scale = f64::from(max_edge) / f64::from(width.max(height));
-    let (target_width, target_height) = if scale >= 1.0 {
-        (width, height)
-    } else {
-        (
-            (f64::from(width) * scale).round().max(1.0) as u32,
-            (f64::from(height) * scale).round().max(1.0) as u32,
-        )
+    #[cfg(not(nuraloumi_thumbnail_helper))]
+    let (target_width, target_height) = {
+        let scale = f64::from(max_edge) / f64::from(width.max(height));
+        if scale >= 1.0 {
+            (width, height)
+        } else {
+            (
+                (f64::from(width) * scale).round().max(1.0) as u32,
+                (f64::from(height) * scale).round().max(1.0) as u32,
+            )
+        }
+    };
+    #[cfg(nuraloumi_thumbnail_helper)]
+    let (target_width, target_height) = {
+        let largest = width.max(height);
+        if largest <= max_edge {
+            (width, height)
+        } else {
+            let rounded_scale = |value: u32| -> u32 {
+                let numerator = u64::from(value) * u64::from(max_edge) + u64::from(largest / 2);
+                u32::try_from(numerator / u64::from(largest))
+                    .unwrap_or(u32::MAX)
+                    .max(1)
+            };
+            (rounded_scale(width), rounded_scale(height))
+        }
     };
     let source_stride = width as usize * 4;
     let required = source_stride
@@ -917,5 +1193,43 @@ mod tests {
             ..complete
         }
         .available());
+    }
+
+    #[test]
+    fn helper_wire_round_trips_requests_and_reports() {
+        let requests = vec![ToplevelThumbnailRequest {
+            key: "tl:1".into(),
+            title: "Terminal".into(),
+            app_id: Some("foot".into()),
+            protocol_identifier: Some("stable-1".into()),
+        }];
+        let request_bytes =
+            helper_wire::encode_thumbnail_helper_request(&requests).expect("encode request");
+        assert_eq!(
+            helper_wire::decode_thumbnail_helper_request(&request_bytes).expect("decode request"),
+            requests
+        );
+
+        let report = ToplevelThumbnailReport {
+            capabilities: ToplevelThumbnailCapabilities {
+                ext_foreign_toplevel_list: true,
+                foreign_toplevel_capture_source: true,
+                image_copy_capture: true,
+                shm: true,
+            },
+            thumbnails: vec![ToplevelThumbnail {
+                key: "tl:1".into(),
+                width: 2,
+                height: 1,
+                pixels: vec![1, 2, 3, 4, 5, 6, 7, 8],
+            }],
+            issues: vec!["bounded warning".into()],
+        };
+        let response_bytes =
+            helper_wire::encode_thumbnail_helper_report(&report).expect("encode report");
+        assert_eq!(
+            helper_wire::decode_thumbnail_helper_report(&response_bytes).expect("decode report"),
+            report
+        );
     }
 }

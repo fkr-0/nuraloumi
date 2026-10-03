@@ -13,10 +13,10 @@ pub use nuraloumi_core::{
 
 mod window_adapter;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
-use std::fs;
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+use std::{env, fs};
 pub use window_adapter::{
     execute_window_command, parse_window_command, window_entries, WindowCommand,
     WindowControlCapabilities,
@@ -38,6 +38,15 @@ pub enum Theme {
     Light,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LauncherPreferences {
+    pub pinned: Vec<String>,
+    pub hidden: Vec<String>,
+    pub labels: BTreeMap<String, String>,
+    pub app_id_aliases: BTreeMap<String, Vec<String>>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ShellConfig {
@@ -47,6 +56,7 @@ pub struct ShellConfig {
     pub row_height: u32,
     pub theme: Theme,
     pub reduced_motion: bool,
+    pub launcher: LauncherPreferences,
 }
 
 const SCENE_FRAME_INTERVAL_MS: u64 = 16;
@@ -104,6 +114,85 @@ impl SceneTransitionClock {
     }
 }
 
+/// Compute the renderer scroll offset needed to keep the current semantic
+/// selection fully visible. The renderer deliberately keeps scroll state out
+/// of the semantic core, so the shell derives it from stable row identities.
+///
+/// Geometry comes from the public Cairo layout metrics. Keeping this here makes
+/// keyboard iteration and touch hit-testing agree even for long launcher
+/// snapshots on the 800px-tall SL101 display.
+pub fn selection_follow_scroll_offset(
+    menu: &MenuModel,
+    state: &MenuState,
+    viewport: nuraloumi_render_cairo::Viewport,
+) -> f64 {
+    let metrics = nuraloumi_render_cairo::LayoutMetrics::default();
+    let visible = state.visible_items(menu);
+    let row_height = |item: &MenuItem| match item.kind {
+        MenuItemKind::Action | MenuItemKind::Submenu | MenuItemKind::Checkable => {
+            metrics.primary_row_height.max(48.0)
+        }
+        MenuItemKind::Section | MenuItemKind::Status => metrics.compact_row_height,
+        MenuItemKind::Separator => metrics.separator_row_height,
+    };
+    let content_height = visible.iter().map(|item| row_height(item)).sum::<f64>();
+    let max_panel_height =
+        (viewport.height - metrics.outer_margin * 2.0).max(metrics.header_height);
+    let panel_height = (metrics.header_height + content_height).min(max_panel_height);
+    let body_height = (panel_height - metrics.header_height).max(0.0);
+    let max_offset = (content_height - body_height).max(0.0);
+    if max_offset <= 0.0 {
+        return 0.0;
+    }
+
+    let Some(selected_id) = state.selected_id.as_deref() else {
+        return 0.0;
+    };
+    let mut top = 0.0;
+    for item in visible {
+        let height = row_height(item);
+        if item.id == selected_id {
+            return (top + height - body_height).clamp(0.0, max_offset);
+        }
+        top += height;
+    }
+    0.0
+}
+
+/// Render a semantic menu while following its current selection through a
+/// clipped viewport. This is the common live-menu path for both the standalone
+/// menu and panel-owned launcher.
+pub fn render_menu_follow_selection(
+    renderer: &nuraloumi_render_cairo::CairoRenderer,
+    menu: &MenuModel,
+    state: &MenuState,
+    viewport: nuraloumi_render_cairo::Viewport,
+    tokens: &nuraloumi_core::ThemeTokens,
+    options: nuraloumi_render_cairo::RenderOptions,
+    transition: Option<nuraloumi_core::Transition>,
+) -> Result<
+    (
+        nuraloumi_render_cairo::Scene,
+        nuraloumi_render_cairo::RenderedBuffer,
+    ),
+    String,
+> {
+    let adapter = nuraloumi_render_cairo::CoreMenuAdapter::new(menu, state);
+    let interaction = nuraloumi_render_cairo::InteractionState {
+        selected_id: state.selected_id.clone(),
+        pressed_id: None,
+        scroll_offset: selection_follow_scroll_offset(menu, state, viewport),
+    };
+    let theme = nuraloumi_render_cairo::Theme::from(tokens);
+    let scene = renderer.build_scene(&adapter, &interaction, viewport, &theme, options);
+    let buffer = match transition {
+        Some(transition) => renderer.render_scene_transition(&scene, transition),
+        None => renderer.render_scene(&scene),
+    }
+    .map_err(|error| error.to_string())?;
+    Ok((scene, buffer))
+}
+
 impl Default for ShellConfig {
     fn default() -> Self {
         Self {
@@ -113,6 +202,7 @@ impl Default for ShellConfig {
             row_height: 48,
             theme: Theme::Dark,
             reduced_motion: false,
+            launcher: LauncherPreferences::default(),
         }
     }
 }
@@ -137,8 +227,66 @@ impl ShellConfig {
                 self.row_height
             ));
         }
+        self.launcher.validate()?;
         Ok(())
     }
+}
+
+impl LauncherPreferences {
+    fn validate(&self) -> Result<(), String> {
+        const MAX_IDS: usize = 64;
+        if self.pinned.len() > MAX_IDS
+            || self.hidden.len() > MAX_IDS
+            || self.labels.len() > MAX_IDS
+            || self.app_id_aliases.len() > MAX_IDS
+        {
+            return Err(
+                "launcher preference collections may contain at most 64 desktop IDs".into(),
+            );
+        }
+        for id in self
+            .pinned
+            .iter()
+            .chain(self.hidden.iter())
+            .chain(self.labels.keys())
+            .chain(self.app_id_aliases.keys())
+        {
+            validate_launcher_desktop_id(id)?;
+        }
+        for label in self.labels.values() {
+            if label.trim().is_empty()
+                || label.chars().count() > 128
+                || label.contains(['\0', '\n', '\r'])
+            {
+                return Err("launcher labels must be non-empty and at most 128 characters".into());
+            }
+        }
+        for aliases in self.app_id_aliases.values() {
+            if aliases.len() > 8 {
+                return Err("launcher app-id alias lists may contain at most 8 entries".into());
+            }
+            for alias in aliases {
+                if alias.is_empty() || alias.len() > 128 || alias.contains(['\0', '\n', '\r', '/'])
+                {
+                    return Err(
+                        "launcher app-id aliases must be simple non-empty identifiers".into(),
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn validate_launcher_desktop_id(id: &str) -> Result<(), String> {
+    if id.is_empty()
+        || id.len() > 512
+        || !id.ends_with(".desktop")
+        || id.contains(['\0', '\n', '\r', '/'])
+    {
+        return Err(format!("invalid launcher desktop ID {id:?}"));
+    }
+    Ok(())
 }
 
 pub fn load_config(path: impl AsRef<Path>) -> Result<ShellConfig, String> {
@@ -148,6 +296,39 @@ pub fn load_config(path: impl AsRef<Path>) -> Result<ShellConfig, String> {
     let config: ShellConfig = parse_by_extension(path, &text)?;
     config.validate()?;
     Ok(config)
+}
+
+pub fn load_config_or_default(explicit: Option<&Path>) -> Result<ShellConfig, String> {
+    if let Some(path) = explicit {
+        return load_config(path);
+    }
+    let xdg = env::var_os("XDG_CONFIG_HOME").map(PathBuf::from);
+    let home = env::var_os("HOME").map(PathBuf::from);
+    load_config_from_sources(None, xdg.as_deref(), home.as_deref())
+}
+
+fn load_config_from_sources(
+    explicit: Option<&Path>,
+    xdg_config_home: Option<&Path>,
+    home: Option<&Path>,
+) -> Result<ShellConfig, String> {
+    if let Some(path) = explicit {
+        return load_config(path);
+    }
+    let root = xdg_config_home
+        .filter(|path| path.is_absolute())
+        .map(Path::to_path_buf)
+        .or_else(|| home.map(|path| path.join(".config")));
+    let Some(root) = root else {
+        return Ok(ShellConfig::default());
+    };
+    for name in ["config.toml", "config.json"] {
+        let candidate = root.join("nuraloumi").join(name);
+        if candidate.exists() {
+            return load_config(candidate);
+        }
+    }
+    Ok(ShellConfig::default())
 }
 
 pub fn load_menu(path: impl AsRef<Path>) -> Result<MenuModel, String> {
@@ -289,6 +470,90 @@ pub struct ApplicationEntry {
     pub launchable: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AppActivation {
+    Launch,
+    FocusWindow(String),
+    AlreadyFocused,
+}
+
+pub fn apply_launcher_preferences(
+    applications: &mut Vec<ApplicationEntry>,
+    preferences: &LauncherPreferences,
+) {
+    if preferences == &LauncherPreferences::default() {
+        return;
+    }
+    let hidden = preferences
+        .hidden
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    applications.retain(|application| !hidden.contains(application.id.as_str()));
+    for application in applications.iter_mut() {
+        if let Some(label) = preferences.labels.get(&application.id) {
+            application.label = label.clone();
+        }
+    }
+    if preferences.pinned.is_empty() {
+        return;
+    }
+    let rank = preferences
+        .pinned
+        .iter()
+        .enumerate()
+        .map(|(index, id)| (id.as_str(), index))
+        .collect::<BTreeMap<_, _>>();
+    let mut indexed = applications.drain(..).enumerate().collect::<Vec<_>>();
+    indexed.sort_by_key(|(original, application)| {
+        (
+            rank.get(application.id.as_str())
+                .copied()
+                .unwrap_or(usize::MAX),
+            *original,
+        )
+    });
+    applications.extend(indexed.into_iter().map(|(_, application)| application));
+}
+
+pub fn resolve_app_activation(
+    desktop_id: &str,
+    windows: &[WindowEntry],
+    preferences: &LauncherPreferences,
+) -> AppActivation {
+    let Some(stem) = desktop_id
+        .strip_suffix(".desktop")
+        .filter(|stem| !stem.is_empty())
+    else {
+        return AppActivation::Launch;
+    };
+    if stem.contains('/') || stem.contains(['\0', '\n', '\r']) {
+        return AppActivation::Launch;
+    }
+    let mut identities = BTreeSet::from([stem]);
+    if let Some(aliases) = preferences.app_id_aliases.get(desktop_id) {
+        identities.extend(aliases.iter().map(String::as_str));
+    }
+    let mut matches = windows.iter().filter(|window| {
+        window.focusable
+            && window
+                .app_id
+                .as_deref()
+                .is_some_and(|app_id| identities.contains(app_id))
+    });
+    let Some(window) = matches.next() else {
+        return AppActivation::Launch;
+    };
+    if matches.next().is_some() {
+        return AppActivation::Launch;
+    }
+    if window.focused {
+        AppActivation::AlreadyFocused
+    } else {
+        AppActivation::FocusWindow(window.id.clone())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MediaPlayerEntry {
     pub id: String,
@@ -369,6 +634,7 @@ pub enum OverviewMode {
     All,
     Windows,
     Apps,
+    Tasks,
     Desktops,
 }
 
@@ -378,6 +644,7 @@ impl OverviewMode {
             Self::All => "all",
             Self::Windows => "windows",
             Self::Apps => "apps",
+            Self::Tasks => "tasks",
             Self::Desktops => "desktops",
         }
     }
@@ -387,6 +654,7 @@ impl OverviewMode {
             "all" => Ok(Self::All),
             "windows" | "window" => Ok(Self::Windows),
             "apps" | "applications" => Ok(Self::Apps),
+            "tasks" | "task" | "processes" | "process" => Ok(Self::Tasks),
             "desktops" | "desktop" | "workspaces" | "workspace" => Ok(Self::Desktops),
             other => Err(format!("unknown overview mode {other:?}")),
         }
@@ -784,7 +1052,7 @@ pub fn build_launcher_menu_for(snapshot: &FixtureSnapshot, mode: OverviewMode) -
     let mut items = vec![
         status(
             "launcher.search",
-            "Search windows, apps and desktops…",
+            "Search windows, apps, tasks and desktops…",
             "Type while search is focused",
         ),
         section("launcher.views", "Overview"),
@@ -794,6 +1062,7 @@ pub fn build_launcher_menu_for(snapshot: &FixtureSnapshot, mode: OverviewMode) -
         OverviewMode::All,
         OverviewMode::Windows,
         OverviewMode::Apps,
+        OverviewMode::Tasks,
         OverviewMode::Desktops,
     ] {
         let selected = candidate == mode;
@@ -801,6 +1070,7 @@ pub fn build_launcher_menu_for(snapshot: &FixtureSnapshot, mode: OverviewMode) -
             OverviewMode::All => "All",
             OverviewMode::Windows => "Windows",
             OverviewMode::Apps => "Apps",
+            OverviewMode::Tasks => "Tasks",
             OverviewMode::Desktops => "Desktops",
         };
         items.push(custom_action(
@@ -851,21 +1121,44 @@ pub fn build_launcher_menu_for(snapshot: &FixtureSnapshot, mode: OverviewMode) -
                 ));
             }
             items.extend(snapshot.windows.iter().take(16).map(|window| {
-                let subtitle = match (&window.app_id, window.focused) {
-                    (Some(app_id), true) => format!("Focused · {app_id}"),
-                    (Some(app_id), false) => app_id.clone(),
-                    (None, true) => "Focused".to_owned(),
-                    (None, false) => "Open window".to_owned(),
-                };
-                custom_action(
-                    &format!("overview.window.{}", window.id),
-                    &window.title,
-                    Some(&subtitle),
-                    "window.focus",
-                    &window.id,
-                    window.focusable,
-                )
+                if mode == OverviewMode::Windows {
+                    window_control_item(window, format!("overview.window.{}", window.id))
+                } else {
+                    let subtitle = match (&window.app_id, window.focused) {
+                        (Some(app_id), true) => format!("Focused · {app_id}"),
+                        (Some(app_id), false) => app_id.clone(),
+                        (None, true) => "Focused".to_owned(),
+                        (None, false) => "Open window".to_owned(),
+                    };
+                    custom_action(
+                        &format!("overview.window.{}", window.id),
+                        &window.title,
+                        Some(&subtitle),
+                        "window.focus",
+                        &window.id,
+                        window.focusable,
+                    )
+                }
             }));
+        }
+    }
+
+    if matches!(mode, OverviewMode::All | OverviewMode::Tasks) {
+        items.push(section("launcher.tasks", "Running tasks"));
+        if snapshot.tasks.is_empty() {
+            items.push(status(
+                "launcher.tasks.empty",
+                "No task snapshot",
+                "Read-only process provider has not reported tasks yet",
+            ));
+        } else {
+            items.extend(
+                snapshot
+                    .tasks
+                    .iter()
+                    .take(24)
+                    .map(|task| task_detail_item(task, format!("overview.task.{}", task.id))),
+            );
         }
     }
 
@@ -1554,9 +1847,9 @@ pub fn build_tasks_menu(snapshot: &FixtureSnapshot) -> MenuModel {
     let mut items = vec![
         section("tasks.summary", "Tasks"),
         status(
-            "tasks.concept",
-            "Conceptual task viewer",
-            "Fixture snapshot only · inspect actions do not kill processes",
+            "tasks.source",
+            "Read-only process snapshot",
+            "Live /proc inspection · task rows never signal or kill processes",
         ),
     ];
 
@@ -1567,23 +1860,13 @@ pub fn build_tasks_menu(snapshot: &FixtureSnapshot) -> MenuModel {
             "Process/task provider is not connected",
         ));
     } else {
-        items.extend(snapshot.tasks.iter().take(32).map(|task| {
-            let mut detail = vec![task.state.clone()];
-            if let Some(cpu) = task.cpu_percent {
-                detail.push(format!("CPU {cpu}%"));
-            }
-            if let Some(memory) = task.memory_mib {
-                detail.push(format!("{memory} MiB"));
-            }
-            custom_action(
-                &format!("tasks.item.{}", task.id),
-                &task.label,
-                Some(&detail.join(" · ")),
-                "task.inspect",
-                &task.id,
-                true,
-            )
-        }));
+        items.extend(
+            snapshot
+                .tasks
+                .iter()
+                .take(32)
+                .map(|task| task_detail_item(task, format!("tasks.item.{}", task.id))),
+        );
     }
 
     MenuModel {
@@ -1591,6 +1874,44 @@ pub fn build_tasks_menu(snapshot: &FixtureSnapshot) -> MenuModel {
         title: "Tasks".into(),
         items,
     }
+}
+
+fn task_detail_item(task: &TaskEntry, item_id: String) -> MenuItem {
+    let mut detail = vec![task.state.clone()];
+    if let Some(cpu) = task.cpu_percent {
+        detail.push(format!("CPU {cpu}%"));
+    }
+    if let Some(memory) = task.memory_mib {
+        detail.push(format!("{memory} MiB"));
+    }
+
+    let identifier = task.id.strip_prefix("pid:").unwrap_or(&task.id);
+    let mut children = vec![
+        status(&format!("{item_id}.state"), "State", &task.state),
+        status(
+            &format!("{item_id}.pid"),
+            if task.id.starts_with("pid:") {
+                "Process ID"
+            } else {
+                "Task identifier"
+            },
+            identifier,
+        ),
+    ];
+    if let Some(cpu) = task.cpu_percent {
+        children.push(status(&format!("{item_id}.cpu"), "CPU", &format!("{cpu}%")));
+    }
+    if let Some(memory) = task.memory_mib {
+        children.push(status(
+            &format!("{item_id}.memory"),
+            "Memory",
+            &format!("{memory} MiB"),
+        ));
+    }
+
+    let mut item = MenuItem::submenu(item_id, &task.label, children);
+    item.subtitle = Some(detail.join(" · "));
+    item
 }
 
 pub fn build_windows_menu(snapshot: &FixtureSnapshot) -> MenuModel {
@@ -1649,6 +1970,10 @@ pub fn build_windows_menu(snapshot: &FixtureSnapshot) -> MenuModel {
 }
 
 fn window_list_item(window: &WindowEntry) -> MenuItem {
+    window_control_item(window, format!("windows.item.{}", window.id))
+}
+
+fn window_control_item(window: &WindowEntry, item_id: String) -> MenuItem {
     let mut detail = Vec::new();
     if window.focused {
         detail.push("Focused");
@@ -1664,7 +1989,6 @@ fn window_list_item(window: &WindowEntry) -> MenuItem {
     } else {
         detail.join(" · ")
     };
-    let item_id = format!("windows.item.{}", window.id);
     let has_actionable_control =
         (!window.focused && window.focusable) || window.fullscreen_controllable || window.closable;
 
@@ -2407,6 +2731,27 @@ mod tests {
         ShellState::new(menu, false).expect("valid test menu")
     }
 
+    fn test_temp_dir(label: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("nuraloumi-{label}-{}-{nonce}", std::process::id()))
+    }
+
+    fn test_window(id: &str, app_id: &str, focused: bool) -> WindowEntry {
+        WindowEntry {
+            id: id.into(),
+            title: app_id.into(),
+            app_id: Some(app_id.into()),
+            focused,
+            fullscreen: false,
+            focusable: true,
+            fullscreen_controllable: true,
+            closable: true,
+        }
+    }
+
     #[test]
     fn scene_transition_is_finite_and_reduced_motion_settles_immediately() {
         let start = scene_enter_transition(0, false);
@@ -2432,7 +2777,128 @@ mod tests {
         assert_eq!(config.menu_width, 448);
         assert_eq!(config.row_height, 48);
         assert_eq!(config.panel_edge, PanelEdge::Top);
+        assert_eq!(config.launcher, LauncherPreferences::default());
         config.validate().expect("defaults valid");
+    }
+
+    #[test]
+    fn config_discovery_is_optional_and_explicit_path_wins() {
+        let root = test_temp_dir("config-discovery");
+        let xdg = root.join("xdg");
+        let nura = xdg.join("nuraloumi");
+        fs::create_dir_all(&nura).unwrap();
+        fs::write(nura.join("config.toml"), "menu_width = 400\n").unwrap();
+        assert_eq!(
+            load_config_from_sources(None, Some(&xdg), None)
+                .unwrap()
+                .menu_width,
+            400
+        );
+        let explicit = root.join("explicit.toml");
+        fs::write(&explicit, "menu_width = 512\n").unwrap();
+        assert_eq!(
+            load_config_from_sources(Some(&explicit), Some(&xdg), None)
+                .unwrap()
+                .menu_width,
+            512
+        );
+        assert_eq!(
+            load_config_from_sources(None, Some(&root.join("missing")), None).unwrap(),
+            ShellConfig::default()
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn launcher_preferences_only_modify_discovered_entries() {
+        let mut applications = vec![
+            ApplicationEntry {
+                id: "a.desktop".into(),
+                label: "A".into(),
+                generic_name: None,
+                keywords: vec![],
+                launchable: true,
+            },
+            ApplicationEntry {
+                id: "b.desktop".into(),
+                label: "B".into(),
+                generic_name: None,
+                keywords: vec![],
+                launchable: true,
+            },
+            ApplicationEntry {
+                id: "c.desktop".into(),
+                label: "C".into(),
+                generic_name: None,
+                keywords: vec![],
+                launchable: true,
+            },
+        ];
+        let mut preferences = LauncherPreferences {
+            pinned: vec!["c.desktop".into(), "unknown.desktop".into()],
+            hidden: vec!["b.desktop".into()],
+            ..LauncherPreferences::default()
+        };
+        preferences
+            .labels
+            .insert("c.desktop".into(), "Pinned C".into());
+        apply_launcher_preferences(&mut applications, &preferences);
+        assert_eq!(
+            applications
+                .iter()
+                .map(|app| app.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["c.desktop", "a.desktop"]
+        );
+        assert_eq!(applications[0].label, "Pinned C");
+        assert!(applications.iter().all(|app| app.launchable));
+    }
+
+    #[test]
+    fn app_activation_reuses_only_one_exact_toplevel() {
+        let preferences = LauncherPreferences::default();
+        let one = vec![test_window("tl:0000000000000001", "foot", false)];
+        assert_eq!(
+            resolve_app_activation("foot.desktop", &one, &preferences),
+            AppActivation::FocusWindow("tl:0000000000000001".into())
+        );
+        assert_eq!(
+            resolve_app_activation(
+                "foot.desktop",
+                &[test_window("tl:0000000000000001", "foot", true)],
+                &preferences
+            ),
+            AppActivation::AlreadyFocused
+        );
+        let ambiguous = vec![
+            test_window("tl:0000000000000001", "foot", false),
+            test_window("tl:0000000000000002", "foot", false),
+        ];
+        assert_eq!(
+            resolve_app_activation("foot.desktop", &ambiguous, &preferences),
+            AppActivation::Launch
+        );
+        assert_eq!(
+            resolve_app_activation("firefox.desktop", &one, &preferences),
+            AppActivation::Launch
+        );
+    }
+
+    #[test]
+    fn configured_app_id_alias_remains_exact() {
+        let mut preferences = LauncherPreferences::default();
+        preferences.app_id_aliases.insert(
+            "sl101-firefox-debian.desktop".into(),
+            vec!["firefox-esr".into()],
+        );
+        assert_eq!(
+            resolve_app_activation(
+                "sl101-firefox-debian.desktop",
+                &[test_window("tl:0000000000000007", "firefox-esr", false)],
+                &preferences
+            ),
+            AppActivation::FocusWindow("tl:0000000000000007".into())
+        );
     }
 
     #[test]
@@ -2478,7 +2944,7 @@ mod tests {
     }
 
     #[test]
-    fn super_menu_all_view_unifies_windows_apps_and_desktops() {
+    fn super_menu_all_view_unifies_windows_apps_tasks_and_desktops() {
         let snapshot = FixtureSnapshot::default();
         let menu = build_launcher_menu_for(&snapshot, OverviewMode::All);
         assert_eq!(menu.title, "Overview");
@@ -2498,10 +2964,149 @@ mod tests {
                 ref payload
             }) if kind == "app.launch" && payload == "foot.desktop"
         ));
+        let task = menu
+            .items
+            .iter()
+            .find(|item| item.id == "overview.task.labwc")
+            .expect("running task");
+        assert!(task.action.is_none());
+        assert_eq!(task.kind, MenuItemKind::Submenu);
+        assert!(task
+            .children
+            .iter()
+            .any(|item| item.id == "overview.task.labwc.state"));
+        assert!(task
+            .children
+            .iter()
+            .any(|item| item.id == "overview.task.labwc.pid"));
         assert!(menu
             .items
             .iter()
             .any(|item| item.id == "overview.desktop.1"));
+    }
+
+    #[test]
+    fn long_app_overview_scrolls_selected_gui_app_into_a_full_touch_target() {
+        let mut snapshot = FixtureSnapshot::default();
+        snapshot.windows.clear();
+        snapshot.tasks.clear();
+        snapshot.desktops.clear();
+        snapshot.applications = (0..20)
+            .map(|index| ApplicationEntry {
+                id: format!("app-{index:02}.desktop"),
+                label: format!("GUI App {index:02}"),
+                generic_name: Some("Graphical application".into()),
+                keywords: vec!["gui".into()],
+                launchable: true,
+            })
+            .collect();
+
+        let menu = build_launcher_menu_for(&snapshot, OverviewMode::Apps);
+        let app_rows = menu
+            .items
+            .iter()
+            .filter(|item| item.id.starts_with("overview.app."))
+            .collect::<Vec<_>>();
+        assert_eq!(app_rows.len(), 20);
+        assert!(app_rows.iter().enumerate().all(|(index, item)| matches!(
+            item.action,
+            Some(MenuAction::Custom {
+                ref kind,
+                ref payload
+            }) if kind == "app.launch" && payload == &format!("app-{index:02}.desktop")
+        )));
+
+        let state = MenuState {
+            selected_id: Some("overview.app.app-19.desktop".into()),
+            ..MenuState::default()
+        };
+        let viewport = nuraloumi_render_cairo::Viewport::new(480.0, 320.0, 1.0);
+        let renderer = nuraloumi_render_cairo::CairoRenderer::default();
+        let (scene, _buffer) = render_menu_follow_selection(
+            &renderer,
+            &menu,
+            &state,
+            viewport,
+            &nuraloumi_core::DARK_THEME,
+            nuraloumi_render_cairo::RenderOptions::default(),
+            None,
+        )
+        .expect("render long app overview");
+
+        assert!(scene.scroll.offset > 0.0);
+        let hit = scene
+            .hits
+            .iter()
+            .find(|hit| hit.item_id == "overview.app.app-19.desktop")
+            .expect("selected late app remains visible and touchable");
+        assert!(hit.actionable && hit.enabled);
+        assert!(hit.rect.height >= 48.0);
+        assert!(hit.rect.y >= scene.scroll.viewport.y);
+        assert!(hit.rect.bottom() <= scene.scroll.viewport.bottom());
+    }
+
+    #[test]
+    fn windows_overview_reuses_bounded_window_controls() {
+        let snapshot = FixtureSnapshot::default();
+
+        let all = build_launcher_menu_for(&snapshot, OverviewMode::All);
+        let all_window = all
+            .items
+            .iter()
+            .find(|item| item.id == "overview.window.files")
+            .expect("all-mode files window");
+        assert!(matches!(
+            all_window.action,
+            Some(MenuAction::Custom {
+                ref kind,
+                ref payload
+            }) if kind == "window.focus" && payload == "files"
+        ));
+        assert!(all_window.children.is_empty());
+
+        let windows = build_launcher_menu_for(&snapshot, OverviewMode::Windows);
+        let files = windows
+            .items
+            .iter()
+            .find(|item| item.id == "overview.window.files")
+            .expect("windows-mode files window");
+        assert!(files.action.is_none());
+        assert!(files.children.iter().any(|item| matches!(
+            item.action,
+            Some(MenuAction::Custom {
+                ref kind,
+                ref payload
+            }) if kind == "window.focus" && payload == "files"
+        )));
+        assert!(files.children.iter().any(|item| matches!(
+            item.action,
+            Some(MenuAction::Toggle { ref id })
+                if id == "window.fullscreen:files"
+        )));
+        assert!(files.children.iter().any(|item| matches!(
+            item.action,
+            Some(MenuAction::Confirm {
+                action: ref nested,
+                ..
+            }) if matches!(
+                nested.as_ref(),
+                MenuAction::Custom { kind, payload }
+                    if kind == "window.close" && payload == "files"
+            )
+        )));
+
+        let terminal = windows
+            .items
+            .iter()
+            .find(|item| item.id == "overview.window.terminal")
+            .expect("focused terminal");
+        let focus = terminal
+            .children
+            .iter()
+            .find(|item| item.id == "overview.window.terminal.focus")
+            .expect("focused status row");
+        assert!(!focus.enabled);
+        assert!(focus.action.is_none());
     }
 
     #[test]
@@ -2532,6 +3137,17 @@ mod tests {
         assert_eq!(
             shell.state.selected_id.as_deref(),
             Some("overview.window.terminal")
+        );
+
+        shell.state.query.clear();
+        shell.apply_semantic(SemanticInput::Text("labwc".into()));
+        shell
+            .set_overview_mode(OverviewMode::Tasks, &snapshot)
+            .expect("switch task view");
+        assert_eq!(shell.state.query, "labwc");
+        assert_eq!(
+            shell.state.selected_id.as_deref(),
+            Some("overview.task.labwc")
         );
     }
 
@@ -3206,16 +3822,30 @@ mod tests {
     }
 
     #[test]
-    fn task_viewer_is_inspection_only_and_legacy_snapshot_shape_still_loads() {
-        let tasks = build_tasks_menu(&FixtureSnapshot::default());
-        assert!(tasks
-            .items
-            .iter()
-            .filter_map(|item| item.action.as_ref())
-            .all(|action| matches!(
-                action,
-                MenuAction::Custom { kind, .. } if kind == "task.inspect"
-            )));
+    fn task_viewer_is_read_only_detail_navigation_and_legacy_snapshot_shape_still_loads() {
+        let snapshot = FixtureSnapshot::default();
+        let tasks = build_tasks_menu(&snapshot);
+        assert!(tasks.items.iter().all(|item| {
+            item.action.is_none()
+                || !matches!(
+                    item.action.as_ref(),
+                    Some(MenuAction::Custom { kind, .. })
+                        if kind.contains("kill") || kind.contains("signal")
+                )
+        }));
+
+        let mut shell = shell_with(tasks);
+        assert_eq!(shell.state.selected_id.as_deref(), Some("tasks.item.labwc"));
+        assert!(matches!(
+            shell.apply_semantic(SemanticInput::Activate),
+            ActionReport::NavigationChanged { .. }
+        ));
+        assert_eq!(shell.state.path, vec!["tasks.item.labwc"]);
+        assert!(shell.state.selected_id.is_none());
+        let visible = shell.state.visible_items(&shell.menu);
+        assert!(visible.iter().any(|item| item.label == "State"));
+        assert!(visible.iter().any(|item| item.label == "Task identifier"));
+        assert!(visible.iter().all(|item| item.action.is_none()));
 
         let legacy = r#"{
             "network":{"state":"ready","value":"Lab","message":null},

@@ -452,7 +452,12 @@ fn target_binaries(dir: &Path) -> Result<Vec<PathBuf>, String> {
         return Ok(Vec::new());
     }
     let mut binaries = Vec::new();
-    for name in ["nuraloumi-panel", "nuraloumi-menu", "nuraloumi-probe"] {
+    for name in [
+        "nuraloumi-panel",
+        "nuraloumi-menu",
+        "nuraloumi-thumbnail-helper",
+        "nuraloumi-probe",
+    ] {
         let path = dir.join(name);
         if path.is_file() {
             binaries.push(path);

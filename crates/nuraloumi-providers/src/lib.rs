@@ -16,6 +16,7 @@ pub mod media;
 pub mod network;
 pub mod notifications;
 pub mod probe;
+pub mod processes;
 pub mod session;
 
 pub use applications::{
@@ -38,6 +39,7 @@ pub use notifications::{
     NotificationAction, NotificationEntry, NotificationProvider, NotificationSnapshot,
 };
 pub use probe::ProbeSnapshot;
+pub use processes::{ProcessEntry, ProcessProvider, ProcessSnapshot};
 pub use session::{SessionAction, SessionProvider, SessionSnapshot};
 
 pub const CRATE_READY: bool = true;

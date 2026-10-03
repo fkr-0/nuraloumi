@@ -20,3 +20,9 @@ strip = true
 lto = "thin"
 codegen-units = 1
 panic = "abort"
+
+[profile.dev]
+incremental = false
+
+[profile.test]
+incremental = false

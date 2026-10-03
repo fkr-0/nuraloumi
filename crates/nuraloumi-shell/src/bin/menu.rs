@@ -3,20 +3,22 @@ use nuraloumi_providers::{
     ActionProvider, ActionResult, ApplicationAction, ApplicationProvider, AudioAction,
     AudioProvider, BacklightAction, BacklightProvider, BluetoothAction, BluetoothProvider, Health,
     MediaAction, MediaProvider, NetworkAction, NetworkProvider, NotificationAction,
-    NotificationProvider, ProbeSnapshot, Provider, SessionAction, SessionProvider, SnapshotMeta,
-    SystemCommandRunner,
+    NotificationProvider, ProbeSnapshot, ProcessProvider, Provider, SessionAction, SessionProvider,
+    SnapshotMeta, SystemCommandRunner,
 };
 use nuraloumi_render_cairo::{CairoRenderer, RenderOptions, Scene, Viewport};
 use nuraloumi_shell::{
-    build_family, execute_window_command, launcher_search_input, load_config,
-    load_fixture_snapshot, load_menu, parse_desktop_command, parse_family, parse_window_command,
-    window_entries, ActionReport, ApplicationEntry as ShellApplicationEntry, BluetoothDeviceEntry,
+    apply_launcher_preferences, build_family, execute_window_command, launcher_search_input,
+    load_config_or_default, load_fixture_snapshot, load_menu, parse_desktop_command, parse_family,
+    parse_window_command, render_menu_follow_selection, resolve_app_activation, window_entries,
+    ActionReport, AppActivation, ApplicationEntry as ShellApplicationEntry, BluetoothDeviceEntry,
     ControlCenterTab, DesktopCommand, DesktopControlCapabilities, DesktopEntry, FixtureSnapshot,
     HitRegion as ShellHitRegion, MediaPlayerEntry as ShellMediaPlayerEntry, MenuAction, MenuFamily,
     NotificationHistoryEntry as ShellNotificationHistoryEntry, OverviewMode,
     PlatformEvent as ShellPlatformEvent, ProviderValue, SceneTransitionClock, SemanticInput,
-    ShellConfig, ShellInput, ShellState, Theme as ShellTheme, ValueState, WifiNetworkEntry,
-    WindowControlCapabilities, WindowEntry, WindowThumbnailEntry,
+    ShellConfig, ShellInput, ShellState, TaskEntry as ShellTaskEntry, Theme as ShellTheme,
+    ValueState, WifiNetworkEntry, WindowCommand, WindowControlCapabilities, WindowEntry,
+    WindowThumbnailEntry,
 };
 use nuraloumi_wayland::{
     capture_toplevel_thumbnails_with_timeout, BackendCapabilities as WaylandCapabilities,
@@ -76,6 +78,7 @@ struct Args {
 }
 
 fn refresh_probe_snapshot(snapshot: &mut FixtureSnapshot, probe: &ProbeSnapshot) {
+    let tasks = std::mem::take(&mut snapshot.tasks);
     let applications = std::mem::take(&mut snapshot.applications);
     let windows = std::mem::take(&mut snapshot.windows);
     let window_thumbnails = std::mem::take(&mut snapshot.window_thumbnails);
@@ -88,6 +91,7 @@ fn refresh_probe_snapshot(snapshot: &mut FixtureSnapshot, probe: &ProbeSnapshot)
     let notifications = snapshot.notifications.clone();
     let notification_history = snapshot.notification_history.clone();
     *snapshot = fixture_snapshot_from_probe(probe);
+    snapshot.tasks = tasks;
     snapshot.applications = applications;
     snapshot.windows = windows;
     snapshot.window_thumbnails = window_thumbnails;
@@ -198,11 +202,7 @@ fn run() -> Result<(), String> {
     if args.probe_workspaces {
         return run_workspace_probe();
     }
-    let mut config = if let Some(path) = args.config.as_ref() {
-        load_config(path)?
-    } else {
-        ShellConfig::default()
-    };
+    let mut config = load_config_or_default(args.config.as_deref())?;
     if args.reduced_motion {
         config.reduced_motion = true;
     }
@@ -215,10 +215,14 @@ fn run() -> Result<(), String> {
     } else {
         FixtureSnapshot::default()
     };
-    if args.live && args.providers.is_none() {
-        refresh_application_snapshot(&mut snapshot);
-    }
+    apply_launcher_preferences(&mut snapshot.applications, &config.launcher);
     let family = parse_family(args.family.as_deref().unwrap_or("launcher"))?;
+    if args.live && args.providers.is_none() {
+        refresh_application_snapshot(&mut snapshot, &config.launcher);
+        if matches!(family, MenuFamily::Launcher | MenuFamily::Tasks) {
+            refresh_process_snapshot(&mut snapshot);
+        }
+    }
     let menu = if let Some(path) = args.fixture.as_ref() {
         load_menu(path)?
     } else {
@@ -324,7 +328,14 @@ fn run_live(
     if let Some(input) = initial_input {
         for step in input.split(',').filter(|step| !step.is_empty()) {
             let report = shell.apply_input(parse_input(step)?);
-            if handle_live_report(&report, &mut shell, &mut snapshot, &mut backend, policy)? {
+            if handle_live_report(
+                &report,
+                &mut shell,
+                &mut snapshot,
+                &mut backend,
+                &config,
+                policy,
+            )? {
                 return Ok(());
             }
         }
@@ -534,7 +545,14 @@ fn run_live(
                         ..
                     } if kind == "menu.open" || kind == "overview.mode" || kind == "control.tab"
                 );
-                if handle_live_report(&report, &mut shell, &mut snapshot, &mut backend, policy)? {
+                if handle_live_report(
+                    &report,
+                    &mut shell,
+                    &mut snapshot,
+                    &mut backend,
+                    &config,
+                    policy,
+                )? {
                     backend
                         .destroy_surface(surface)
                         .map_err(|error| format!("failed to destroy menu surface: {error}"))?;
@@ -660,24 +678,16 @@ fn render_and_present(
         f64::from(logical_height),
         f64::from(scale.max(1)),
     );
-    let rendered = match transition {
-        Some(transition) => renderer.render_core_transition(
-            &shell.menu,
-            &shell.state,
-            viewport,
-            tokens,
-            RenderOptions::default(),
-            transition,
-        ),
-        None => renderer.render_core(
-            &shell.menu,
-            &shell.state,
-            viewport,
-            tokens,
-            RenderOptions::default(),
-        ),
-    };
-    let (scene, mut buffer) = rendered.map_err(|error| format!("Cairo render failed: {error}"))?;
+    let (scene, mut buffer) = render_menu_follow_selection(
+        renderer,
+        &shell.menu,
+        &shell.state,
+        viewport,
+        tokens,
+        RenderOptions::default(),
+        transition,
+    )
+    .map_err(|error| format!("Cairo render failed: {error}"))?;
     paint_window_thumbnail_overlays(&scene, &mut buffer, snapshot)?;
 
     let info = buffer.info();
@@ -731,6 +741,7 @@ fn handle_live_report(
     shell: &mut ShellState,
     snapshot: &mut FixtureSnapshot,
     backend: &mut WaylandBackend,
+    config: &ShellConfig,
     policy: LivePolicy,
 ) -> Result<bool, String> {
     log_live_report(report)?;
@@ -782,8 +793,41 @@ fn handle_live_report(
                 return Ok(false);
             }
             if let Some(command) = parse_window_command(action, &snapshot.windows)? {
+                let close_after_focus = matches!(command, WindowCommand::Focus(_));
                 execute_window_command(backend, command)?;
-                return Ok(false);
+                if close_after_focus {
+                    backend
+                        .roundtrip()
+                        .map_err(|error| format!("toplevel focus roundtrip failed: {error}"))?;
+                }
+                return Ok(close_after_focus);
+            }
+            let app_launch = matches!(
+                action,
+                MenuAction::Custom { kind, .. } if kind == "app.launch"
+            );
+            if let MenuAction::Custom { kind, payload } = action {
+                if kind == "app.launch" {
+                    match resolve_app_activation(payload, &snapshot.windows, &config.launcher) {
+                        AppActivation::AlreadyFocused => return Ok(true),
+                        AppActivation::FocusWindow(window_id) => {
+                            let focus = MenuAction::Custom {
+                                kind: "window.focus".into(),
+                                payload: window_id,
+                            };
+                            let command = parse_window_command(&focus, &snapshot.windows)?
+                                .ok_or_else(|| {
+                                    "resolved app focus did not produce a window command".to_owned()
+                                })?;
+                            execute_window_command(backend, command)?;
+                            backend.roundtrip().map_err(|error| {
+                                format!("toplevel focus roundtrip failed: {error}")
+                            })?;
+                            return Ok(true);
+                        }
+                        AppActivation::Launch => {}
+                    }
+                }
             }
             match execute_live_action(
                 action,
@@ -795,6 +839,9 @@ fn handle_live_report(
                         "nuraloumi-provider-result: executed={} dry_run={} message={}",
                         result.executed, result.dry_run, result.message
                     );
+                    if app_launch && result.executed {
+                        return Ok(true);
+                    }
                     if refresh_lazy_control_action(snapshot, action) {
                         refresh_builtin_menu(shell, snapshot)?;
                     } else {
@@ -1221,7 +1268,10 @@ fn fixture_snapshot_from_probe(probe: &ProbeSnapshot) -> FixtureSnapshot {
     }
 }
 
-fn refresh_application_snapshot(snapshot: &mut FixtureSnapshot) {
+fn refresh_application_snapshot(
+    snapshot: &mut FixtureSnapshot,
+    preferences: &nuraloumi_shell::LauncherPreferences,
+) {
     match ApplicationProvider::system().snapshot() {
         Ok(applications) => {
             snapshot.applications = applications
@@ -1235,10 +1285,34 @@ fn refresh_application_snapshot(snapshot: &mut FixtureSnapshot) {
                     launchable: application.launchable,
                 })
                 .collect();
+            apply_launcher_preferences(&mut snapshot.applications, preferences);
         }
         Err(error) => {
             eprintln!("nuraloumi-application-provider-error: {error}");
             snapshot.applications.clear();
+        }
+    }
+}
+
+fn refresh_process_snapshot(snapshot: &mut FixtureSnapshot) {
+    let mut provider = ProcessProvider::system();
+    match provider.snapshot() {
+        Ok(processes) => {
+            snapshot.tasks = processes
+                .processes
+                .into_iter()
+                .map(|process| ShellTaskEntry {
+                    id: process.id,
+                    label: process.label,
+                    state: process.state,
+                    cpu_percent: process.cpu_percent,
+                    memory_mib: process.memory_mib,
+                })
+                .collect();
+        }
+        Err(error) => {
+            eprintln!("nuraloumi-process-provider-error: {error}");
+            snapshot.tasks.clear();
         }
     }
 }

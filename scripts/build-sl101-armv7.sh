@@ -25,8 +25,8 @@ while [ "$#" -gt 0 ]; do
             cat <<EOF
 Usage: scripts/build-sl101-armv7.sh [--prepare] [--ssh user@host]
 
-Builds nuraloumi-panel, nuraloumi-menu and nuraloumi-probe for the real
-SL101 musl ARMv7 ABI. --prepare refreshes the generated runtime sysroot from
+Builds nuraloumi-panel, nuraloumi-menu, nuraloumi-thumbnail-helper and
+nuraloumi-probe for the real SL101 musl ARMv7 ABI. --prepare refreshes the generated runtime sysroot from
 the tablet first. Build output remains under target/ and is never committed.
 EOF
             exit 0
@@ -87,17 +87,27 @@ export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=-neon,-d32,-hwdiv,-
 # heuristics produce false positives; stripping debug info does not affect RSS.
 export CARGO_PROFILE_RELEASE_STRIP=debuginfo
 
-cargo build --locked --release --target "$TARGET" \
+RUSTC_BOOTSTRAP=1 cargo -Z build-std=std,panic_abort build \
+    --locked --release --target "$TARGET" \
     -p nuraloumi-shell --bins \
     -p nuraloumi-providers --bin nuraloumi-probe
+
+# Thumbnail capture lives outside the panel startup image. Build the helper in a
+# separate codegen invocation with a Tegra20-safe integer downsample path; the
+# regular library/panel build retains its independently qualified hot-path code.
+BASE_RUSTFLAGS=$RUSTFLAGS
+RUSTFLAGS="$BASE_RUSTFLAGS --cfg nuraloumi_thumbnail_helper" \
+    cargo build --locked --release --target "$TARGET" \
+        -p nuraloumi-wayland --bin nuraloumi-thumbnail-helper
 
 RELEASE="$TARGET_DIR/$TARGET/release"
 sh "$ROOT/scripts/inspect-armv7-elf.sh" \
     "$RELEASE/nuraloumi-panel" \
     "$RELEASE/nuraloumi-menu" \
+    "$RELEASE/nuraloumi-thumbnail-helper" \
     "$RELEASE/nuraloumi-probe"
 
-for binary in nuraloumi-panel nuraloumi-menu nuraloumi-probe; do
+for binary in nuraloumi-panel nuraloumi-menu nuraloumi-thumbnail-helper nuraloumi-probe; do
     path="$RELEASE/$binary"
     printf 'SL101_BINARY=PASS name=%s sha256=%s file=' "$binary" "$(sha256sum "$path" | awk '{print $1}')"
     file -b "$path"

@@ -260,11 +260,13 @@ fn parse_desktop_file(root: &Path, path: &Path) -> Result<Option<ApplicationEntr
     };
     let id = desktop_id(root, path)?;
     let exec = fields.get("Exec");
+    // GIO owns Desktop Entry launch semantics, including Terminal=true.
+    // NuraLoumi validates Exec field codes but never expands or executes Exec
+    // itself; gio launch receives only the selected desktop-file path.
     let launchable = exec
         .map(|value| validate_exec(value))
         .transpose()?
-        .is_some()
-        && parse_bool(fields.get("Terminal")) != Some(true);
+        .is_some();
 
     Ok(Some(ApplicationEntry {
         id,
@@ -503,19 +505,37 @@ mod tests {
     }
 
     #[test]
-    fn terminal_entries_are_visible_but_not_launchable_in_r1() {
+    fn terminal_entries_use_the_same_exact_gio_launch_path() {
         let root = fixture_dir();
+        let desktop = root.join("terminal.desktop");
         fs::write(
-            root.join("terminal.desktop"),
+            &desktop,
             "[Desktop Entry]\nType=Application\nName=Terminal App\nTerminal=true\nExec=inside-terminal\n",
         )
         .unwrap();
-        let snapshot =
-            ApplicationProvider::new(FixtureCommandRunner::default(), vec![root.clone()])
-                .snapshot()
-                .unwrap();
+
+        let mut runner = FixtureCommandRunner::default();
+        runner.insert(
+            CommandSpec::new("gio")
+                .args(["launch".to_owned(), desktop.to_string_lossy().into_owned()]),
+            CommandOutput {
+                status: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        );
+
+        let mut provider = ApplicationProvider::new(runner, vec![root.clone()]);
+        let snapshot = provider.snapshot().unwrap();
         assert_eq!(snapshot.applications.len(), 1);
-        assert!(!snapshot.applications[0].launchable);
+        assert!(snapshot.applications[0].launchable);
+
+        let result = provider
+            .execute(ApplicationAction::Launch {
+                id: "terminal.desktop".to_owned(),
+            })
+            .unwrap();
+        assert!(result.executed);
         let _ = fs::remove_dir_all(root);
     }
 }

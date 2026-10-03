@@ -33,6 +33,18 @@ find_objdump() {
 }
 
 OBJDUMP=$(find_objdump || true)
+UPPER_VFP_RE='(^|[[:space:],{])d(1[6-9]|2[0-9]|3[01])([^[:alnum:]_]|$)'
+
+# Fail closed if the audit expression ever stops recognizing the exact class
+# of Tegra20-breaking operand that exposed the musl round() false negative.
+if ! printf '%s\n' '  1950c0: vldr d16, [pc, #136]' | grep -Eq "$UPPER_VFP_RE"; then
+    echo "ELF_AUDIT=FAIL reason=upper-vfp-regex-self-test-d16" >&2
+    exit 1
+fi
+if printf '%s\n' '  000000: vldr d15, [pc, #4]' | grep -Eq "$UPPER_VFP_RE"; then
+    echo "ELF_AUDIT=FAIL reason=upper-vfp-regex-self-test-d15" >&2
+    exit 1
+fi
 
 status=0
 mark_pending() {
@@ -95,7 +107,7 @@ for elf in "$@"; do
         status=1
         continue
     fi
-    if printf '%s\n' "$disasm" | grep -Eiq '[[:space:],{]d(1[6-9]|2[0-9]|3[01])([,}\\]]|[[:space:]])'; then
+    if printf '%s\n' "$disasm" | grep -Eiq "$UPPER_VFP_RE"; then
         echo "ELF_FILE=FAIL path=$elf reason=upper-VFP-register-d16-d31-detected"
         status=1
         continue
