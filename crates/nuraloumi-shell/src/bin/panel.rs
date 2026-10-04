@@ -12,18 +12,19 @@ use nuraloumi_render_cairo::{
 };
 use nuraloumi_shell::{
     apply_launcher_preferences, blank_press_requests_dismiss, build_family,
-    dismiss_backdrop_margins, dispatch_keybinding, execute_window_command, launcher_search_input,
-    load_config_or_default, load_fixture_snapshot, panel_affordances, parse_desktop_command,
-    parse_family, parse_window_command, render_menu_follow_selection, resolve_app_activation,
-    successful_action_requests_dismiss, window_entries, ActionReport, AppActivation,
-    ApplicationEntry as ShellApplicationEntry, BluetoothDeviceEntry, ControlCenterTab,
-    DesktopCommand, DesktopControlCapabilities, DesktopEntry, FixtureSnapshot,
-    HitRegion as ShellHitRegion, KeybindingRegistry, MediaPlayerEntry as ShellMediaPlayerEntry,
-    MenuAction, MenuFamily, NotificationHistoryEntry as ShellNotificationHistoryEntry,
-    OverviewMode, PanelAffordance, PanelController, PanelEdge as ShellPanelEdge,
-    PlatformEvent as ShellPlatformEvent, ProviderValue, SceneTransitionClock, ShellConfig,
-    ShellState, TaskEntry as ShellTaskEntry, Theme as ShellTheme, ValueState, WifiNetworkEntry,
-    WindowCommand, WindowControlCapabilities, WindowThumbnailEntry,
+    dismiss_backdrop_enabled_for_renderer, dismiss_backdrop_margins, dispatch_keybinding,
+    execute_window_command, launcher_search_input, load_config_or_default, load_fixture_snapshot,
+    panel_affordances, parse_desktop_command, parse_family, parse_window_command,
+    render_menu_follow_selection, resolve_app_activation, successful_action_requests_dismiss,
+    window_entries, ActionReport, AppActivation, ApplicationEntry as ShellApplicationEntry,
+    BluetoothDeviceEntry, ControlCenterTab, DesktopCommand, DesktopControlCapabilities,
+    DesktopEntry, FixtureSnapshot, HitRegion as ShellHitRegion, KeybindingRegistry,
+    MediaPlayerEntry as ShellMediaPlayerEntry, MenuAction, MenuFamily,
+    NotificationHistoryEntry as ShellNotificationHistoryEntry, OverviewMode, PanelAffordance,
+    PanelController, PanelEdge as ShellPanelEdge, PlatformEvent as ShellPlatformEvent,
+    ProviderValue, SceneTransitionClock, ShellConfig, ShellState, TaskEntry as ShellTaskEntry,
+    Theme as ShellTheme, ValueState, WifiNetworkEntry, WindowCommand, WindowControlCapabilities,
+    WindowThumbnailEntry,
 };
 use nuraloumi_wayland::{
     BackendCapabilities as WaylandCapabilities, BackendError, DismissBackdropConfig, Frame,
@@ -779,7 +780,7 @@ fn run_live(
                             {
                                 let focused = matches!(command, WindowCommand::Focus(_));
                                 execute_window_command(&mut backend, command)?;
-                                if focused {
+                                if focused && !close_after_success {
                                     backend.roundtrip().map_err(|error| {
                                         format!("toplevel focus roundtrip failed: {error}")
                                     })?;
@@ -826,13 +827,13 @@ fn run_live(
                                                                 .to_owned()
                                                         })?;
                                                 execute_window_command(&mut backend, command)?;
-                                                backend.roundtrip().map_err(|error| {
-                                                    format!(
-                                                        "toplevel focus roundtrip failed: {error}"
-                                                    )
-                                                })?;
                                                 close = close_after_success;
                                                 if !close {
+                                                    backend.roundtrip().map_err(|error| {
+                                                        format!(
+                                                            "toplevel focus roundtrip failed: {error}"
+                                                        )
+                                                    })?;
                                                     refresh_window_snapshot(
                                                         &mut snapshot,
                                                         &backend,
@@ -1119,7 +1120,17 @@ fn open_live_menu(
     } else {
         0
     };
-    let dismiss_surface = if config.menu_dismissal.outside_press {
+    let dismiss_backdrop_enabled = dismiss_backdrop_enabled_for_renderer(
+        config.menu_dismissal,
+        env::var("WLR_RENDERER").ok().as_deref(),
+        env::var("MESA_LOADER_DRIVER_OVERRIDE").ok().as_deref(),
+    );
+    if config.menu_dismissal.outside_press && !dismiss_backdrop_enabled {
+        eprintln!(
+            "nuraloumi-menu-dismiss: outside backdrop suppressed for unqualified Grate renderer; close-after-action remains enabled"
+        );
+    }
+    let dismiss_surface = if dismiss_backdrop_enabled {
         let (margin_top, margin_right, margin_bottom, margin_left) =
             dismiss_backdrop_margins(config.panel_edge, config.panel_height);
         Some(

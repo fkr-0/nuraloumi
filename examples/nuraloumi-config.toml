@@ -15,6 +15,8 @@ reduced_motion = false
 # Transient menus close when pressing/touching outside the visible sheet and
 # after successful one-shot actions such as app launch/window focus/workspace
 # switch. Continuous controls such as brightness or volume remain open.
+# The output-sized outside-dismiss backdrop is automatically suppressed on the
+# still-unqualified SL101 Grate GLES2 path; close-after-action remains active.
 [menu_dismissal]
 outside_press = true
 after_one_shot_action = true

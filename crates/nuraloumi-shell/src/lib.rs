@@ -242,6 +242,23 @@ pub fn dismiss_backdrop_margins(edge: PanelEdge, panel_height: u32) -> (i32, i32
     }
 }
 
+pub fn dismiss_backdrop_enabled_for_renderer(
+    policy: MenuDismissalConfig,
+    wlr_renderer: Option<&str>,
+    mesa_driver_override: Option<&str>,
+) -> bool {
+    if !policy.outside_press {
+        return false;
+    }
+
+    // The outside-dismiss implementation uses a transparent output-sized
+    // layer-shell surface. Keep that surface off the still-unqualified
+    // Tegra20/Grate GLES2 path: it adds a full-screen alpha composition pass
+    // to every transient menu and can amplify compositor stalls. One-shot
+    // action dismissal is independent and remains enabled.
+    !(wlr_renderer == Some("gles2") && mesa_driver_override == Some("grate"))
+}
+
 pub fn blank_press_requests_dismiss(
     policy: MenuDismissalConfig,
     input_enabled: bool,
@@ -3111,6 +3128,41 @@ after_one_shot_action = true
             (0, 0, 40, 0)
         );
         assert_eq!(dismiss_backdrop_margins(PanelEdge::Left, 40), (0, 0, 0, 40));
+    }
+
+    #[test]
+    fn dismiss_backdrop_is_suppressed_only_for_the_unqualified_grate_path() {
+        let policy = MenuDismissalConfig::default();
+        assert!(dismiss_backdrop_enabled_for_renderer(
+            policy,
+            Some("pixman"),
+            None
+        ));
+        assert!(dismiss_backdrop_enabled_for_renderer(
+            policy,
+            Some("gles2"),
+            Some("swrast")
+        ));
+        assert!(dismiss_backdrop_enabled_for_renderer(
+            policy,
+            None,
+            Some("grate")
+        ));
+        assert!(!dismiss_backdrop_enabled_for_renderer(
+            policy,
+            Some("gles2"),
+            Some("grate")
+        ));
+
+        let disabled = MenuDismissalConfig {
+            outside_press: false,
+            ..policy
+        };
+        assert!(!dismiss_backdrop_enabled_for_renderer(
+            disabled,
+            Some("pixman"),
+            None
+        ));
     }
 
     #[test]

@@ -111,6 +111,11 @@ When enabled:
 
 - pointer press or touch-down on the transparent backdrop closes the transient
   menu;
+- on the still-unqualified `WLR_RENDERER=gles2` + `MESA_LOADER_DRIVER_OVERRIDE=grate`
+  SL101 path, NuraLoumi deliberately suppresses the output-sized transparent
+  backdrop to avoid adding a full-screen alpha-composition pass to every menu;
+  blank-space presses inside the menu and close-after-action behavior remain
+  active;
 - pointer press or touch-down on blank, non-actionable space inside the menu
   also closes it;
 - the static panel remains visible and interactive;
@@ -204,7 +209,8 @@ an error; declaration order never chooses a winner.
 a compositor-global hotkey. The persistent panel intentionally has keyboard
 interactivity disabled, so desktop-wide shortcuts still belong in the
 compositor. The `panel` scope is reserved for a future explicitly
-keyboard-interactive panel mode.
+keyboard-interactive panel mode; an enabled `panel` binding currently fails
+validation rather than creating an unreachable shortcut.
 
 ### Typed actions
 

@@ -9,18 +9,19 @@ use nuraloumi_providers::{
 use nuraloumi_render_cairo::{CairoRenderer, RenderOptions, Scene, Viewport};
 use nuraloumi_shell::{
     apply_launcher_preferences, blank_press_requests_dismiss, build_family,
-    dismiss_backdrop_margins, dispatch_keybinding, execute_window_command, launcher_search_input,
-    load_config_or_default, load_fixture_snapshot, load_menu, parse_desktop_command, parse_family,
-    parse_window_command, render_menu_follow_selection, resolve_app_activation,
-    successful_action_requests_dismiss, window_entries, ActionReport, AppActivation,
-    ApplicationEntry as ShellApplicationEntry, BluetoothDeviceEntry, ControlCenterTab,
-    DesktopCommand, DesktopControlCapabilities, DesktopEntry, FixtureSnapshot,
-    HitRegion as ShellHitRegion, KeybindingRegistry, MediaPlayerEntry as ShellMediaPlayerEntry,
-    MenuAction, MenuFamily, NotificationHistoryEntry as ShellNotificationHistoryEntry,
-    OverviewMode, PlatformEvent as ShellPlatformEvent, ProviderValue, SceneTransitionClock,
-    SemanticInput, ShellConfig, ShellInput, ShellState, TaskEntry as ShellTaskEntry,
-    Theme as ShellTheme, ValueState, WifiNetworkEntry, WindowCommand, WindowControlCapabilities,
-    WindowEntry, WindowThumbnailEntry,
+    dismiss_backdrop_enabled_for_renderer, dismiss_backdrop_margins, dispatch_keybinding,
+    execute_window_command, launcher_search_input, load_config_or_default, load_fixture_snapshot,
+    load_menu, parse_desktop_command, parse_family, parse_window_command,
+    render_menu_follow_selection, resolve_app_activation, successful_action_requests_dismiss,
+    window_entries, ActionReport, AppActivation, ApplicationEntry as ShellApplicationEntry,
+    BluetoothDeviceEntry, ControlCenterTab, DesktopCommand, DesktopControlCapabilities,
+    DesktopEntry, FixtureSnapshot, HitRegion as ShellHitRegion, KeybindingRegistry,
+    MediaPlayerEntry as ShellMediaPlayerEntry, MenuAction, MenuFamily,
+    NotificationHistoryEntry as ShellNotificationHistoryEntry, OverviewMode,
+    PlatformEvent as ShellPlatformEvent, ProviderValue, SceneTransitionClock, SemanticInput,
+    ShellConfig, ShellInput, ShellState, TaskEntry as ShellTaskEntry, Theme as ShellTheme,
+    ValueState, WifiNetworkEntry, WindowCommand, WindowControlCapabilities, WindowEntry,
+    WindowThumbnailEntry,
 };
 use nuraloumi_wayland::{
     capture_toplevel_thumbnails_with_timeout, BackendCapabilities as WaylandCapabilities,
@@ -382,7 +383,17 @@ fn run_live(
         })
         .unwrap_or(640);
 
-    let dismiss_surface = if config.menu_dismissal.outside_press {
+    let dismiss_backdrop_enabled = dismiss_backdrop_enabled_for_renderer(
+        config.menu_dismissal,
+        env::var("WLR_RENDERER").ok().as_deref(),
+        env::var("MESA_LOADER_DRIVER_OVERRIDE").ok().as_deref(),
+    );
+    if config.menu_dismissal.outside_press && !dismiss_backdrop_enabled {
+        eprintln!(
+            "nuraloumi-menu-dismiss: outside backdrop suppressed for unqualified Grate renderer; close-after-action remains enabled"
+        );
+    }
+    let dismiss_surface = if dismiss_backdrop_enabled {
         let (margin_top, margin_right, margin_bottom, margin_left) =
             dismiss_backdrop_margins(config.panel_edge, config.panel_height);
         Some(
@@ -920,7 +931,7 @@ fn handle_live_report(
             if let Some(command) = parse_window_command(action, &snapshot.windows)? {
                 let focused = matches!(command, WindowCommand::Focus(_));
                 execute_window_command(backend, command)?;
-                if focused {
+                if focused && !close_after_success {
                     backend
                         .roundtrip()
                         .map_err(|error| format!("toplevel focus roundtrip failed: {error}"))?;
@@ -945,10 +956,10 @@ fn handle_live_report(
                                     "resolved app focus did not produce a window command".to_owned()
                                 })?;
                             execute_window_command(backend, command)?;
-                            backend.roundtrip().map_err(|error| {
-                                format!("toplevel focus roundtrip failed: {error}")
-                            })?;
                             if !close_after_success {
+                                backend.roundtrip().map_err(|error| {
+                                    format!("toplevel focus roundtrip failed: {error}")
+                                })?;
                                 refresh_window_snapshot(snapshot, backend);
                                 refresh_builtin_menu(shell, snapshot)?;
                             }
