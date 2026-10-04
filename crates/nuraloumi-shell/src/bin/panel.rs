@@ -860,6 +860,12 @@ fn run_live(
                                             "nuraloumi-provider-result: executed={} dry_run={} message={}",
                                             result.executed, result.dry_run, result.message
                                         );
+                                            if successful_compositor_restart(action, &result) {
+                                                eprintln!(
+                                                    "nuraloumi-panel: compositor restart completed; exiting stale Wayland session"
+                                                );
+                                                return Ok(());
+                                            }
                                             if close_after_success && result.executed {
                                                 close = true;
                                             } else {
@@ -2410,6 +2416,14 @@ fn window_control_capabilities(backend: &WaylandCapabilities) -> WindowControlCa
     capabilities
 }
 
+fn successful_compositor_restart(action: &MenuAction, result: &ActionResult) -> bool {
+    matches!(
+        action,
+        MenuAction::Custom { kind, .. } if kind == "renderer.switch"
+    ) && result.executed
+        && !result.dry_run
+}
+
 fn execute_live_action(
     action: &MenuAction,
     enable_power_actions: bool,
@@ -2777,6 +2791,31 @@ mod tests {
         let label = panel_text(&affordance, 70.0);
         assert!(label.ends_with('…'));
         assert!(label.chars().count() <= 10);
+    }
+
+    #[test]
+    fn successful_renderer_restart_exits_only_after_real_execution() {
+        let renderer = MenuAction::Custom {
+            kind: "renderer.switch".into(),
+            payload: "grate".into(),
+        };
+        assert!(successful_compositor_restart(
+            &renderer,
+            &ActionResult::executed("restarted")
+        ));
+        assert!(!successful_compositor_restart(
+            &renderer,
+            &ActionResult::dry_run("not restarted")
+        ));
+
+        let unrelated = MenuAction::Custom {
+            kind: "audio.adjust".into(),
+            payload: "5".into(),
+        };
+        assert!(!successful_compositor_restart(
+            &unrelated,
+            &ActionResult::executed("changed")
+        ));
     }
 
     #[test]
