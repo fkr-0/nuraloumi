@@ -1,10 +1,9 @@
 use nuraloumi_core::{DARK_THEME, LIGHT_THEME};
 use nuraloumi_providers::{
-    ActionProvider, ActionResult, ApplicationAction, ApplicationProvider, AudioAction,
-    AudioProvider, BacklightAction, BacklightProvider, BluetoothAction, BluetoothProvider, Health,
-    MediaAction, MediaProvider, NetworkAction, NetworkProvider, NotificationAction,
-    NotificationProvider, ProbeSnapshot, ProcessProvider, Provider, SessionAction, SessionProvider,
-    SnapshotMeta, SystemCommandRunner,
+    ActionProvider, ActionResult, ApplicationProvider, AudioAction, AudioProvider, BacklightAction,
+    BacklightProvider, BluetoothAction, BluetoothProvider, Health, MediaAction, MediaProvider,
+    NetworkAction, NetworkProvider, NotificationAction, NotificationProvider, ProbeSnapshot,
+    ProcessProvider, Provider, SessionAction, SessionProvider, SnapshotMeta, SystemCommandRunner,
 };
 use nuraloumi_render_cairo::{CairoRenderer, RenderOptions, Scene, Viewport};
 use nuraloumi_shell::{
@@ -1138,9 +1137,7 @@ fn execute_live_action(
     let result = match action {
         MenuAction::Custom { kind, payload } if kind == "app.launch" => {
             ApplicationProvider::system()
-                .execute(ApplicationAction::Launch {
-                    id: payload.clone(),
-                })
+                .launch_nonblocking(payload)
                 .map_err(|error| error.to_string())?
         }
         MenuAction::Custom { kind, payload } if kind == "media.previous" => MediaProvider::system()

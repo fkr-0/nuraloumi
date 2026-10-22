@@ -5,7 +5,8 @@ use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 const ACTION_LIMITS: CommandLimits = CommandLimits::new(Duration::from_secs(4), 16 * 1024);
 const MAX_DESKTOP_FILES: usize = 4096;
@@ -60,6 +61,16 @@ impl ApplicationProvider<SystemCommandRunner> {
     pub fn system() -> Self {
         Self::new(SystemCommandRunner, system_application_roots())
     }
+
+    /// Request an application without blocking the Wayland event loop on `gio`.
+    /// A successful return proves helper spawn, not that the app reached a frame.
+    pub fn launch_nonblocking(&self, id: &str) -> Result<ActionResult, ProviderError> {
+        let (spec, name) = self.launch_spec(id)?;
+        start_launch_helper(&spec)?;
+        Ok(ActionResult::executed(format!(
+            "launch requested for application {name}"
+        )))
+    }
 }
 
 impl<R> ApplicationProvider<R> {
@@ -78,6 +89,33 @@ impl<R> ApplicationProvider<R> {
 
     pub fn into_runner(self) -> R {
         self.runner
+    }
+
+    fn launch_spec(&self, id: &str) -> Result<(CommandSpec, String), ProviderError> {
+        validate_desktop_id(id)?;
+        let (applications, _) = self.discover();
+        let entry = applications
+            .into_iter()
+            .find(|entry| entry.id == id)
+            .ok_or_else(|| {
+                ProviderError::unavailable(format!("application {id:?} is not present"))
+            })?;
+        if !entry.launchable {
+            return Err(ProviderError::unavailable(format!(
+                "application {:?} has no supported launch command",
+                entry.name
+            )));
+        }
+        // The discovered .desktop file, not a user-provided command string,
+        // remains the sole authority for GIO's Exec-field expansion.
+        let path = entry
+            .desktop_file
+            .to_str()
+            .ok_or_else(|| ProviderError::parse("desktop file path is not valid UTF-8"))?;
+        Ok((
+            CommandSpec::new("gio").args(["launch".to_owned(), path.to_owned()]),
+            entry.name,
+        ))
     }
 
     fn discover(&self) -> (Vec<ApplicationEntry>, Vec<String>) {
@@ -125,29 +163,7 @@ impl<R> Provider for ApplicationProvider<R> {
 impl<R: CommandRunner> ActionProvider<ApplicationAction> for ApplicationProvider<R> {
     fn execute(&mut self, action: ApplicationAction) -> Result<ActionResult, ProviderError> {
         let ApplicationAction::Launch { id } = action;
-        validate_desktop_id(&id)?;
-        let (applications, _) = self.discover();
-        let entry = applications
-            .into_iter()
-            .find(|entry| entry.id == id)
-            .ok_or_else(|| {
-                ProviderError::unavailable(format!("application {id:?} is not present"))
-            })?;
-        if !entry.launchable {
-            return Err(ProviderError::unavailable(format!(
-                "application {:?} has no supported launch command",
-                entry.name
-            )));
-        }
-
-        // Invoke gio with exact argv. The selected desktop file remains the
-        // authority for Desktop Entry Exec field-code expansion; no shell
-        // interpolation is introduced by NuraLoumi.
-        let path = entry
-            .desktop_file
-            .to_str()
-            .ok_or_else(|| ProviderError::parse("desktop file path is not valid UTF-8"))?;
-        let spec = CommandSpec::new("gio").args(["launch".to_owned(), path.to_owned()]);
+        let (spec, name) = self.launch_spec(&id)?;
         let output = self.runner.run(&spec, ACTION_LIMITS)?;
         if output.status != 0 {
             return Err(ProviderError::backend(format!(
@@ -157,9 +173,52 @@ impl<R: CommandRunner> ActionProvider<ApplicationAction> for ApplicationProvider
         }
         Ok(ActionResult::executed(format!(
             "launched application {}",
-            entry.name
+            name
         )))
     }
+}
+
+/// Launch only already-validated desktop entries, with no shell or inherited
+/// stdio that could keep a capture pipe open after the helper exits. Reap and
+/// bound the helper off-thread so a stalled `gio launch` cannot freeze a menu.
+fn start_launch_helper(spec: &CommandSpec) -> Result<(), ProviderError> {
+    let mut child = Command::new(&spec.program)
+        .args(&spec.args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| ProviderError::from_io("starting application launch helper", &error))?;
+
+    std::thread::spawn(move || {
+        let started = Instant::now();
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    if !status.success() {
+                        eprintln!("nuraloumi-launch: gio helper exited with {status}");
+                    }
+                    return;
+                }
+                Ok(None) if started.elapsed() < ACTION_LIMITS.timeout => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Ok(None) => {
+                    eprintln!("nuraloumi-launch: gio helper timed out; terminating helper");
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return;
+                }
+                Err(error) => {
+                    eprintln!("nuraloumi-launch: waiting for gio helper failed: {error}");
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return;
+                }
+            }
+        }
+    });
+    Ok(())
 }
 
 fn system_application_roots() -> Vec<PathBuf> {
@@ -537,5 +596,38 @@ mod tests {
             .unwrap();
         assert!(result.executed);
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn nonblocking_and_fixture_launch_share_the_same_validated_desktop_command() {
+        let root = fixture_dir();
+        let path = root.join("terminal.desktop");
+        fs::write(
+            &path,
+            "[Desktop Entry]\nType=Application\nName=Terminal\nExec=foot\n",
+        )
+        .unwrap();
+        let provider =
+            ApplicationProvider::new(FixtureCommandRunner::default(), vec![root.clone()]);
+        let (spec, name) = provider.launch_spec("terminal.desktop").unwrap();
+        assert_eq!(name, "Terminal");
+        assert_eq!(spec.program, "gio");
+        assert_eq!(spec.args, ["launch", path.to_str().unwrap()]);
+        assert!(provider.launch_spec("../terminal.desktop").is_err());
+        assert!(provider.launch_spec("missing.desktop").is_err());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn slow_launch_helper_does_not_block_its_caller() {
+        // Uses exact argv, not a shell. This reproduces a helper that stays
+        // alive while a newly spawned terminal is already on screen.
+        let started = Instant::now();
+        start_launch_helper(&CommandSpec::new("/bin/sleep").arg("1")).unwrap();
+        assert!(
+            started.elapsed() < Duration::from_millis(750),
+            "Wayland event dispatch must not wait for a launch helper"
+        );
     }
 }
