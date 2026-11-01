@@ -60,7 +60,7 @@ FRIBIDI_VERSION=$(runtime_version fribidi "$REMOTE_FRIBIDI")
 
 STAGE="$SYSROOT.new.$$"
 PKGSTAGE="$PKGCONFIG.new.$$"
-REMOTE_STAGE=$(ssh_run "mktemp -d /tmp/nuraloumi-cross.XXXXXX")
+REMOTE_STAGE=$(ssh_run "mktemp -d /var/tmp/nuraloumi-cross.XXXXXX")
 cleanup() {
     rm -rf "$STAGE"
     rm -rf "$PKGSTAGE"

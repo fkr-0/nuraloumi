@@ -414,12 +414,31 @@ fn run_live(
         let toplevel_changed = backend.drain_toplevel_events().count() > 0;
         let workspace_changed = backend.drain_workspace_events().count() > 0;
         if policy.execute_provider_actions && (toplevel_changed || workspace_changed) {
+            let prev_focused = toplevel_changed
+                .then(|| {
+                    snapshot
+                        .windows
+                        .iter()
+                        .find(|window| window.focused)
+                        .map(|window| window.id.clone())
+                })
+                .flatten();
             if toplevel_changed {
                 refresh_window_snapshot(&mut snapshot, &backend);
                 thumbnail_probe_started = false;
             }
             if workspace_changed {
                 refresh_workspace_snapshot(&mut snapshot, &backend);
+            }
+            if toplevel_changed && active_menu.is_some() {
+                let new_focused = snapshot
+                    .windows
+                    .iter()
+                    .find(|window| window.focused)
+                    .map(|window| window.id.clone());
+                if new_focused != prev_focused {
+                    close_live_menu(&mut backend, &mut panel, &mut active_menu)?;
+                }
             }
             if let Some(menu) = active_menu.as_mut() {
                 if policy.execute_provider_actions && menu.family == MenuFamily::ControlCenter {

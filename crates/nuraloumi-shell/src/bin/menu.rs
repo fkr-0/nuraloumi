@@ -467,12 +467,32 @@ fn run_live(
         let toplevel_changed = backend.drain_toplevel_events().count() > 0;
         let workspace_changed = backend.drain_workspace_events().count() > 0;
         if policy.execute_provider_actions && (toplevel_changed || workspace_changed) {
+            let prev_focused = toplevel_changed
+                .then(|| {
+                    snapshot
+                        .windows
+                        .iter()
+                        .find(|window| window.focused)
+                        .map(|window| window.id.clone())
+                })
+                .flatten();
             if toplevel_changed {
                 refresh_window_snapshot(&mut snapshot, &backend);
                 thumbnail_probe_started = false;
             }
             if workspace_changed {
                 refresh_workspace_snapshot(&mut snapshot, &backend);
+            }
+            if toplevel_changed {
+                let new_focused = snapshot
+                    .windows
+                    .iter()
+                    .find(|window| window.focused)
+                    .map(|window| window.id.clone());
+                if new_focused != prev_focused {
+                    close_live_surfaces(&mut backend, surface, dismiss_surface)?;
+                    return Ok(());
+                }
             }
             if refresh_builtin_menu(&mut shell, &snapshot)? {
                 if let Some(geometry) = geometry {
