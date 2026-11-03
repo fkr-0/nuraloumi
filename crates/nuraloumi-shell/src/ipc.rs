@@ -359,6 +359,16 @@ impl IpcServer {
         Ok(())
     }
 }
+
+// Cleanup also runs when the IPC worker exits unexpectedly or thread creation
+// fails after socket bind. The inode guard in cleanup prevents removing a
+// replacement socket installed by another process.
+impl Drop for IpcServer {
+    fn drop(&mut self) {
+        let _ = self.cleanup();
+    }
+}
+
 /// Client-side single round-trip. Bounded read and write time.
 pub fn request(path: &Path, req: &IpcRequest) -> io::Result<IpcResponse> {
     let mut stream = UnixStream::connect(path)?;
@@ -555,6 +565,20 @@ mod tests {
         good.read_to_string(&mut result).unwrap_or_default();
         assert!(result.contains("\"ok\":true"));
         server.cleanup().unwrap();
+    }
+
+    #[test]
+    fn server_drop_cleans_only_its_own_socket() {
+        let path = std::env::temp_dir().join(format!(
+            "nuraloumi-drop-{}-{:?}.sock",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        {
+            let _server = IpcServer::bind(&path).unwrap();
+            assert!(path.exists());
+        }
+        assert!(!path.exists());
     }
 
     #[test]

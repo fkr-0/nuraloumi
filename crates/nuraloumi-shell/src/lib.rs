@@ -15,6 +15,7 @@ mod config;
 pub mod glyphs;
 pub use glyphs::{default_glyph_resolver, GlyphStyle, GlyphTable};
 pub mod ipc;
+pub mod surface_catalog;
 mod keybindings;
 mod window_adapter;
 pub use config::{PanelConfig, ProviderConfig, QuickLaunchSlot, SurfaceConfig};

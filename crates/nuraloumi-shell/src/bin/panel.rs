@@ -10,6 +10,7 @@ use nuraloumi_render_cairo::{
     CairoRenderer, Color, HitRegion as RenderHitRegion, PaintNode, Point, Rect, RenderOptions,
     RowKind, Scene, ScrollWindow, TextStyle, Theme as RenderTheme, Viewport,
 };
+use nuraloumi_shell::surface_catalog::{IpcRuntime, SurfaceCatalog, SurfaceObservation};
 use nuraloumi_shell::{
     apply_launcher_preferences, blank_press_requests_dismiss, build_family,
     dismiss_backdrop_enabled_for_renderer, dismiss_backdrop_margins, dispatch_keybinding,
@@ -177,6 +178,35 @@ struct LiveMenu {
     scene: Option<Scene>,
     touch_regions: BTreeMap<i32, Option<ShellHitRegion>>,
     motion: Option<SceneTransitionClock>,
+}
+
+fn surface_name(family: MenuFamily) -> &'static str {
+    match family {
+        MenuFamily::Launcher => "launcher",
+        MenuFamily::ControlCenter => "control-center",
+        MenuFamily::Network => "network",
+        MenuFamily::Bluetooth => "bluetooth",
+        MenuFamily::Display => "display",
+        MenuFamily::Audio => "audio",
+        MenuFamily::Power => "power",
+        MenuFamily::Tasks => "tasks",
+        MenuFamily::Windows => "windows",
+        MenuFamily::System => "system",
+    }
+}
+
+fn live_surface_observations(
+    catalog: &SurfaceCatalog,
+    menu: Option<&LiveMenu>,
+) -> Vec<SurfaceObservation> {
+    catalog.observe(
+        menu.map(|current| surface_name(current.family)),
+        menu.and_then(|current| current.shell.state.selected_id.as_deref()),
+        menu.map_or(0, |current| {
+            current.shell.state.visible_items(&current.shell.menu).len()
+        }),
+        std::process::id(),
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -382,6 +412,21 @@ fn run_live(
             family,
         )?);
     }
+
+    // The panel is the sole IPC owner. The worker observes bounded, immutable
+    // state; it never executes commands or operates Wayland from its thread.
+    // Only reviewed 0.2 surface binaries may be supplied as ReleasedBinary
+    // registrations. None have been integrated into this panel yet.
+    let binary =
+        env::current_exe().map_err(|error| format!("cannot locate panel executable: {error}"))?;
+    let binary_dir = binary
+        .parent()
+        .ok_or_else(|| "panel executable has no containing directory".to_owned())?;
+    let surface_catalog = SurfaceCatalog::discover(binary_dir, &[]);
+    let ipc_runtime = IpcRuntime::start(
+        &nuraloumi_shell::ipc::default_socket_path(),
+        live_surface_observations(&surface_catalog, active_menu.as_ref()),
+    )?;
 
     loop {
         let launcher_open = active_menu
@@ -1095,6 +1140,11 @@ fn run_live(
                 )?);
             }
         }
+
+        ipc_runtime.publish(live_surface_observations(
+            &surface_catalog,
+            active_menu.as_ref(),
+        ));
 
         if panel_first_frame_presented && live_provider_probe.is_some() {
             std::thread::sleep(std::time::Duration::from_millis(8));
