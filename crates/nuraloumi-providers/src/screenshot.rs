@@ -1,14 +1,12 @@
-//! Bounded PPM capture via grim, software preview, lossless streaming PNG save/copy.
+//! Bounded PPM capture via grim, software preview, and lossless PNG save/copy.
 //! Snapshot is read-only. Capture, save and copy require distinct explicit actions.
 use crate::{ActionProvider, ActionResult, Provider, ProviderError};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
+use std::os::fd::AsRawFd;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -366,127 +364,271 @@ fn png_chunk(out: &mut impl Write, kind: &[u8; 4], bytes: &[u8]) -> io::Result<(
     out.write_all(bytes)?;
     out.write_all(&(crc(crc(!0, kind), bytes) ^ !0).to_be_bytes())
 }
-fn limited(reader: impl Read, limit: usize, exceed: Arc<AtomicBool>) -> io::Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    reader.take(limit as u64 + 1).read_to_end(&mut bytes)?;
-    if bytes.len() > limit {
-        exceed.store(true, Ordering::Relaxed);
-    }
-    Ok(bytes)
+// Only Linux is targeted (labwc/wlroots on the SL101). The standard library
+// does not expose nonblocking ChildStd{in,out,err}, so use the minimal Linux
+// fcntl/kill ABI here rather than creating readers/writers that cannot be
+// interrupted by an operation deadline. F_GETFL=3, F_SETFL=4,
+// O_NONBLOCK=0o4000 and SIGKILL=9 on Linux, including ARMv7.
+unsafe extern "C" {
+    fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+    fn kill(pid: i32, sig: i32) -> i32;
 }
-fn run_grim(selection: &CaptureSelection) -> Result<Vec<u8>, ProviderError> {
-    selection.validate()?;
-    let mut child = Command::new("grim")
-        .args(selection.args())
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| ProviderError::from_io("start grim", &e))?;
-    let stdout = child
+
+fn nonblocking(fd: &impl AsRawFd) -> io::Result<()> {
+    // SAFETY: the descriptor is an owned, live pipe; fcntl only changes its
+    // file-status flags. Negative results are converted to io::Error.
+    let flags = unsafe { fcntl(fd.as_raw_fd(), 3) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if unsafe { fcntl(fd.as_raw_fd(), 4, flags | 0o4000) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// A private process group permits deadline cleanup of descendants that
+/// inherit a pipe even after the direct child has exited. Never reap the
+/// group leader until all I/O has finished: while it is alive or unreaped,
+/// its PID/PGID cannot be reused by an unrelated process group.
+struct IsolatedChild {
+    child: Child,
+    armed: bool,
+}
+impl IsolatedChild {
+    fn spawn(mut command: Command, context: &'static str) -> Result<Self, ProviderError> {
+        command.process_group(0);
+        Ok(Self {
+            child: command
+                .spawn()
+                .map_err(|e| ProviderError::from_io(context, &e))?,
+            armed: true,
+        })
+    }
+
+    fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        match self.child.try_wait()? {
+            Some(status) => {
+                self.armed = false; // reaped; it must never be signalled again
+                Ok(Some(status))
+            }
+            None => Ok(None),
+        }
+    }
+}
+impl Drop for IsolatedChild {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        // SAFETY: process_group(0) created a new group whose leader is this
+        // still-unreaped child; a negative PID therefore cannot target the
+        // caller or an unrelated process group. Its children share that group
+        // unless they explicitly daemonize and leave it.
+        if let Ok(pgid) = i32::try_from(self.child.id()) {
+            let _ = unsafe { kill(-pgid, 9) };
+        }
+        let _ = self.child.kill(); // fallback if group signalling failed
+                                   // Never perform an unbounded wait as part of timeout cleanup.
+        let limit = Instant::now() + Duration::from_millis(100);
+        while Instant::now() < limit {
+            match self.child.try_wait() {
+                Ok(Some(_)) | Err(_) => break,
+                Ok(None) => thread::sleep(Duration::from_millis(2)),
+            }
+        }
+    }
+}
+
+/// One bounded nonblocking drain. A descendant holding a pipe open produces
+/// WouldBlock, not an indefinite read_to_end or join. The caller checks its
+/// end-to-end deadline independently of direct-child exit.
+fn drain(
+    pipe: &mut impl Read,
+    into: &mut Vec<u8>,
+    cap: usize,
+    deadline: Instant,
+) -> io::Result<bool> {
+    let mut chunk = [0_u8; 16 * 1024];
+    for _ in 0..32 {
+        if Instant::now() >= deadline {
+            return Err(io::Error::from(io::ErrorKind::TimedOut));
+        }
+        match pipe.read(&mut chunk) {
+            Ok(0) => return Ok(true),
+            Ok(n) => {
+                if n > cap.saturating_sub(into.len()) {
+                    return Err(io::Error::from(io::ErrorKind::InvalidData));
+                }
+                into.extend_from_slice(&chunk[..n]);
+            }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(false),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(false)
+}
+
+fn capture_command(command: Command, timeout: Duration) -> Result<Vec<u8>, ProviderError> {
+    let deadline = Instant::now() + timeout;
+    let mut child = IsolatedChild::spawn(command, "start grim")?;
+    let mut stdout = child
+        .child
         .stdout
         .take()
         .ok_or_else(|| ProviderError::backend("grim stdout unavailable"))?;
-    let stderr = child
+    let mut stderr = child
+        .child
         .stderr
         .take()
         .ok_or_else(|| ProviderError::backend("grim stderr unavailable"))?;
-    let exceeded = Arc::new(AtomicBool::new(false));
-    let out_exceed = Arc::clone(&exceeded);
-    let output = thread::spawn(move || limited(stdout, MAX_CAPTURE_BYTES, out_exceed));
-    let errors = thread::spawn(move || limited(stderr, 4096, Arc::new(AtomicBool::new(false))));
-    let start = Instant::now();
-    let result = loop {
-        if exceeded.load(Ordering::Relaxed) || start.elapsed() >= CAPTURE_TIMEOUT {
-            let oversized = exceeded.load(Ordering::Relaxed);
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = output.join();
-            let _ = errors.join();
-            return Err(if oversized {
-                ProviderError::backend("grim byte cap exceeded")
-            } else {
-                ProviderError::timeout("grim screenshot timed out")
-            });
+    nonblocking(&stdout).map_err(|e| ProviderError::from_io("grim stdout flags", &e))?;
+    nonblocking(&stderr).map_err(|e| ProviderError::from_io("grim stderr flags", &e))?;
+    let mut image = Vec::new();
+    let mut errors = Vec::new();
+    let (mut out_eof, mut err_eof) = (false, false);
+    loop {
+        if Instant::now() >= deadline {
+            return Err(ProviderError::timeout("grim screenshot timed out"));
         }
-        match child.try_wait() {
-            Ok(Some(s)) => break s,
-            Ok(None) => thread::sleep(Duration::from_millis(5)),
-            Err(e) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = output.join();
-                let _ = errors.join();
-                return Err(ProviderError::from_io("wait for grim", &e));
+        if !out_eof {
+            out_eof =
+                drain(&mut stdout, &mut image, MAX_CAPTURE_BYTES, deadline).map_err(|e| match e
+                    .kind()
+                {
+                    io::ErrorKind::TimedOut => ProviderError::timeout("grim screenshot timed out"),
+                    io::ErrorKind::InvalidData => ProviderError::backend("grim byte cap exceeded"),
+                    _ => ProviderError::from_io("read grim image", &e),
+                })?;
+        }
+        if !err_eof {
+            err_eof =
+                drain(&mut stderr, &mut errors, 4096, deadline).map_err(|e| match e.kind() {
+                    io::ErrorKind::TimedOut => ProviderError::timeout("grim screenshot timed out"),
+                    io::ErrorKind::InvalidData => {
+                        ProviderError::backend("grim stderr cap exceeded")
+                    }
+                    _ => ProviderError::from_io("read grim stderr", &e),
+                })?;
+        }
+        // Do not call try_wait before both pipes reach EOF. A child that
+        // exited but left pipes with a grandchild must remain unreaped, so
+        // its process group remains safely addressable on timeout.
+        if out_eof && err_eof {
+            if let Some(status) = child
+                .try_wait()
+                .map_err(|e| ProviderError::from_io("wait for grim", &e))?
+            {
+                if !status.success() {
+                    return Err(ProviderError::backend(format!(
+                        "grim failed: {}",
+                        String::from_utf8_lossy(&errors)
+                    )));
+                }
+                return Ok(image);
             }
         }
-    };
-    let image = output
-        .join()
-        .map_err(|_| ProviderError::backend("grim reader panic"))?
-        .map_err(|e| ProviderError::from_io("read grim image", &e))?;
-    let error = errors
-        .join()
-        .map_err(|_| ProviderError::backend("grim stderr reader panic"))?
-        .map_err(|e| ProviderError::from_io("read grim stderr", &e))?;
-    if image.len() > MAX_CAPTURE_BYTES {
-        return Err(ProviderError::backend("grim image too large"));
+        thread::sleep(Duration::from_millis(5));
     }
-    if !result.success() {
-        return Err(ProviderError::backend(format!(
-            "grim failed: {}",
-            String::from_utf8_lossy(&error)
-        )));
-    }
-    Ok(image)
 }
-fn copy_png(image: &ScreenshotImage) -> Result<(), ProviderError> {
-    let mut child = Command::new("wl-copy")
-        .args(["--type", "image/png"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| ProviderError::from_io("start wl-copy", &e))?;
-    let stdin = child
+
+fn run_grim(selection: &CaptureSelection) -> Result<Vec<u8>, ProviderError> {
+    selection.validate()?;
+    let mut command = Command::new("grim");
+    command
+        .args(selection.args())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    capture_command(command, CAPTURE_TIMEOUT)
+}
+
+// A memory-backed bounded writer avoids a background PNG producer thread.
+// Every chunk checks the same deadline that later applies to wl-copy I/O.
+struct TimedPng {
+    bytes: Vec<u8>,
+    deadline: Instant,
+}
+impl Write for TimedPng {
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        if Instant::now() >= self.deadline {
+            return Err(io::Error::from(io::ErrorKind::TimedOut));
+        }
+        if data.len() > MAX_CAPTURE_BYTES.saturating_sub(self.bytes.len()) {
+            return Err(io::Error::from(io::ErrorKind::InvalidData));
+        }
+        self.bytes.extend_from_slice(data);
+        Ok(data.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn write_command(command: Command, bytes: &[u8], deadline: Instant) -> Result<(), ProviderError> {
+    if Instant::now() >= deadline {
+        return Err(ProviderError::timeout("wl-copy timed out"));
+    }
+    let mut child = IsolatedChild::spawn(command, "start wl-copy")?;
+    let mut stdin = child
+        .child
         .stdin
         .take()
         .ok_or_else(|| ProviderError::backend("clipboard pipe unavailable"))?;
-    let frame = image.clone();
-    let writer = thread::spawn(move || {
-        let mut pipe = io::BufWriter::new(stdin);
-        frame.write_png(&mut pipe)?;
-        // Report any final buffered write failure instead of losing
-        // the PNG IEND trailer silently during BufWriter::drop.
-        pipe.flush()
-    });
-    let start = Instant::now();
-    let status = loop {
-        if start.elapsed() >= COPY_TIMEOUT {
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = writer.join();
+    nonblocking(&stdin).map_err(|e| ProviderError::from_io("clipboard pipe flags", &e))?;
+    let mut sent = 0;
+    loop {
+        if Instant::now() >= deadline {
             return Err(ProviderError::timeout("wl-copy timed out"));
         }
-        match child.try_wait() {
-            Ok(Some(s)) => break s,
-            Ok(None) => thread::sleep(Duration::from_millis(5)),
-            Err(e) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = writer.join();
-                return Err(ProviderError::from_io("wait for wl-copy", &e));
+        if sent < bytes.len() {
+            match stdin.write(&bytes[sent..]) {
+                Ok(0) => return Err(ProviderError::backend("clipboard pipe made no progress")),
+                Ok(n) => sent += n,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(ProviderError::from_io("send PNG to clipboard", &e)),
             }
         }
-    };
-    writer
-        .join()
-        .map_err(|_| ProviderError::backend("clipboard writer panic"))?
-        .map_err(|e| ProviderError::from_io("send PNG to clipboard", &e))?;
-    if !status.success() {
-        return Err(ProviderError::backend("wl-copy failed"));
+        if sent == bytes.len() {
+            drop(stdin); // send EOF before waiting for the consumer
+            break;
+        }
+        thread::sleep(Duration::from_millis(5));
     }
-    Ok(())
+    loop {
+        if Instant::now() >= deadline {
+            return Err(ProviderError::timeout("wl-copy timed out"));
+        }
+        match child
+            .try_wait()
+            .map_err(|e| ProviderError::from_io("wait for wl-copy", &e))?
+        {
+            Some(status) if status.success() => return Ok(()),
+            Some(_) => return Err(ProviderError::backend("wl-copy failed")),
+            None => thread::sleep(Duration::from_millis(5)),
+        }
+    }
+}
+
+fn copy_png(image: &ScreenshotImage) -> Result<(), ProviderError> {
+    let deadline = Instant::now() + COPY_TIMEOUT;
+    let mut png = TimedPng {
+        bytes: Vec::new(),
+        deadline,
+    };
+    image.write_png(&mut png).map_err(|e| match e.kind() {
+        io::ErrorKind::TimedOut => ProviderError::timeout("PNG encoding timed out"),
+        _ => ProviderError::from_io("encode PNG for clipboard", &e),
+    })?;
+    let mut command = Command::new("wl-copy");
+    command
+        .args(["--type", "image/png"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    write_command(command, &png.bytes, deadline)
 }
 #[cfg(test)]
 mod tests {
@@ -600,5 +742,79 @@ mod tests {
             rgb: vec![0; 2048 * 1024 * 3],
         };
         assert!(image.preview().unwrap().argb32.len() <= MAX_PREVIEW_PIXELS * 4);
+    }
+    // These child processes exit while descendants still hold their inherited
+    // pipes. Without end-to-end I/O deadlines, the old join() calls hung
+    // forever even though try_wait() had already observed the direct exit.
+    #[test]
+    fn descendant_retained_stdout_and_stderr_have_bounded_capture() {
+        for script in [
+            "sleep 30 & printf 'direct child exited\n'",
+            "sleep 30 1>&2 & printf 'direct child exited\n' >&2",
+        ] {
+            let mut command = Command::new("sh");
+            command
+                .args(["-c", script])
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            let start = Instant::now();
+            let result = capture_command(command, Duration::from_millis(180));
+            assert_eq!(
+                result.unwrap_err().category.as_str(),
+                "timeout",
+                "descendant-held pipe must reach the deadline: {script}"
+            );
+            assert!(
+                start.elapsed() < Duration::from_secs(2),
+                "capture exceeded bounded cleanup: {script}"
+            );
+        }
+    }
+
+    #[test]
+    fn descendant_retained_stdin_has_bounded_clipboard_write() {
+        // The grandchild keeps stdin open but never drains it. A 1 MiB
+        // payload exceeds a Linux pipe's capacity even if the parent exited.
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "sleep 30 <&0 & exit 0"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let start = Instant::now();
+        let result = write_command(
+            command,
+            &vec![7_u8; 1024 * 1024],
+            Instant::now() + Duration::from_millis(180),
+        );
+        assert_eq!(result.unwrap_err().category.as_str(), "timeout");
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn drained_child_pipes_complete_without_spurious_deadline() {
+        let mut producer = Command::new("sh");
+        producer
+            .args(["-c", "printf done"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        assert_eq!(
+            capture_command(producer, Duration::from_secs(1)).unwrap(),
+            b"done"
+        );
+        let mut consumer = Command::new("sh");
+        consumer
+            .args(["-c", "cat >/dev/null"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        write_command(
+            consumer,
+            &vec![42_u8; 1024 * 1024],
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap();
     }
 }
