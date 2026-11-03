@@ -748,7 +748,7 @@ impl ReadState {
     }
 }
 fn unhex(hex: &str) -> Result<String, FeedError> {
-    if hex.len() % 2 != 0 || hex.len() > MAX_ATTR * 2 {
+    if hex.len() & 1 != 0 || hex.len() > MAX_ATTR * 2 {
         return Err(FeedError::Invalid("read-state hex length"));
     }
     let digit = |b: u8| match b {
