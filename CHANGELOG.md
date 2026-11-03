@@ -2,6 +2,34 @@
 
 All notable user-visible changes to NuraLoumi are recorded here.
 
+## [0.0.3] - 2026-11-03
+
+### Added
+
+- Keyboard input now follows the compositor's XKB keymap instead of assuming
+  US-QWERTY. German QWERTZ, French AZERTY, and other layouts work out of the
+  box when the compositor sets `XKB_DEFAULT_LAYOUT`.
+- Added dedicated `nuraloumi-run`, `nuraloumi-files`, and `nuraloumi-windows`
+  binaries so the compositor can invoke each surface directly from keybindings.
+- Added an optional glyph resolver callback to the render adapter, allowing
+  menu binaries to supply per-item icon glyphs without coupling the core model
+  to icon resolution.
+
+### Fixed
+
+- Enabled panel-scope keybindings now fail validation with a clear message
+  instead of being silently accepted but never firing.
+- Disabled keybinding overrides no longer require a valid scope-action pair,
+  since they serve only as documentation.
+
+### Compatibility
+
+- New dependency: `xkbcommon` (with `wayland` feature) for XKB keymap loading.
+  Requires `libxkbcommon` in the cross-compile sysroot.
+- The hardcoded scancode table remains as a fallback when no compositor keymap
+  has been received.
+- The pixman/Cairo software-rendered path remains authoritative.
+
 ## [0.0.2] - 2026-10-03
 
 ### Added
