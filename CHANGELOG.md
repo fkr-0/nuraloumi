@@ -2,6 +2,36 @@
 
 All notable user-visible changes to NuraLoumi are recorded here.
 
+## [0.0.4-dev.1] - 2026-11-03
+
+Development checkpoint toward 0.2 and 0.3; not SL101 release qualified.
+
+### Added
+
+- Resource, task, music, notification and calendar surfaces; terminal/editor launchers,
+  clipboard history, glyphs, and bounded calendar/weather providers.
+- Offline feed and map providers and initial Cairo reader/viewer implementations.
+- Screenshot capture/preview, one-shot notification toasts and an explicit IPC trigger.
+- Initial confirmed file operations, monotonic timer/stopwatch, persistent favorites
+  storage, accessible renderer text scaling/light theme, and opt-in config migration.
+- Package completeness/integrity checks and bounded performance qualification tools.
+
+### Fixed
+
+- IPC now distinguishes unobserved standalone surfaces from closed ones and enforces
+  an overall monotonic client deadline.
+- Screenshot capture and clipboard operations bound descendant-retained pipes.
+- Rotated raw touch coordinate mapping and keyboard protocol capability reporting.
+
+### Qualification and remaining work
+
+- New feature source does not imply complete launcher/config/runtime integration.
+  Config, maps, feeds and timer registration and user-facing wiring require followup.
+- Host checks are recorded separately from release acceptance. ARMv7 qualification
+  is blocked by the prepared sysroot missing libxkbcommon; physical SL101 input,
+  software-rendered operation, memory and latency checks remain pending.
+- This development tag does not certify 0.2 or 0.3 completion or authorize deployment.
+
 ## [0.0.3] - 2026-11-03
 
 ### Added
