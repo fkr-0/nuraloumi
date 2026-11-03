@@ -200,7 +200,32 @@ pub fn render_menu_follow_selection(
     ),
     String,
 > {
+    render_menu_with_glyphs(renderer, menu, state, viewport, tokens, options, transition, None)
+}
+
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn render_menu_with_glyphs<'a>(
+    renderer: &nuraloumi_render_cairo::CairoRenderer,
+    menu: &'a MenuModel,
+    state: &MenuState,
+    viewport: nuraloumi_render_cairo::Viewport,
+    tokens: &nuraloumi_core::ThemeTokens,
+    options: nuraloumi_render_cairo::RenderOptions,
+    transition: Option<nuraloumi_core::Transition>,
+    glyph_resolver: Option<&'a dyn Fn(&str) -> Option<char>>,
+) -> Result<
+    (
+        nuraloumi_render_cairo::Scene,
+        nuraloumi_render_cairo::RenderedBuffer,
+    ),
+    String,
+> {
     let adapter = nuraloumi_render_cairo::CoreMenuAdapter::new(menu, state);
+    let adapter = if let Some(resolver) = glyph_resolver {
+        adapter.with_glyph_resolver(resolver)
+    } else {
+        adapter
+    };
     let interaction = nuraloumi_render_cairo::InteractionState {
         selected_id: state.selected_id.clone(),
         pressed_id: None,

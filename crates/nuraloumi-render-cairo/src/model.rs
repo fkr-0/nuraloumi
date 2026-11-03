@@ -218,9 +218,12 @@ impl MenuSource for MenuView {
 ///
 /// It consumes the core-owned visible-row projection without copying semantic
 /// strings or introducing presentation state into nuraloumi-core.
+type GlyphResolver<'a> = Box<dyn Fn(&str) -> Option<char> + 'a>;
+
 pub struct CoreMenuAdapter<'a> {
     model: &'a nuraloumi_core::MenuModel,
     visible_items: Vec<&'a nuraloumi_core::MenuItem>,
+    glyph_fn: Option<GlyphResolver<'a>>,
 }
 
 impl<'a> CoreMenuAdapter<'a> {
@@ -228,7 +231,16 @@ impl<'a> CoreMenuAdapter<'a> {
         Self {
             model,
             visible_items: state.visible_items(model),
+            glyph_fn: None,
         }
+    }
+
+    pub fn with_glyph_resolver(
+        mut self,
+        resolver: impl Fn(&str) -> Option<char> + 'a,
+    ) -> Self {
+        self.glyph_fn = Some(Box::new(resolver));
+        self
     }
 }
 
@@ -247,12 +259,16 @@ impl MenuSource for CoreMenuAdapter<'_> {
 
     fn item(&self, index: usize) -> MenuItemRef<'_> {
         let item = self.visible_items[index];
+        let glyph = self
+            .glyph_fn
+            .as_ref()
+            .and_then(|f| f(&item.id));
         MenuItemRef {
             id: &item.id,
             label: &item.label,
             subtitle: item.subtitle.as_deref(),
             shortcut: None,
-            glyph: None,
+            glyph,
             kind: RowKind::from(item),
             enabled: item.enabled,
         }
