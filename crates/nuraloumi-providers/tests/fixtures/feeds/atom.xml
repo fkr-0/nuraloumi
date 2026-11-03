@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+<title>Notebook</title><link rel="alternate" href="https://example.org/"/>
+<entry><id>urn:entry:one</id><title>Caf&#xE9; &amp; code</title>
+<link rel="self" href="https://example.org/feed/1"/>
+<link rel="alternate" href="https://example.org/entry/1"/>
+<summary><![CDATA[read-only note]]></summary><updated>2026-11-03T08:00:00Z</updated></entry>
+</feed>

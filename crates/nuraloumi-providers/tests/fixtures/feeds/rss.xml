@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel>
+<title>Rust &amp; Tech</title><link>https://example.org/</link>
+<item><guid isPermaLink="false">news-1</guid><title>Hello &lt;world&gt;</title><link>https://example.org/hello</link><description>An &amp; update</description><pubDate>Tue, 03 Nov 2026 08:00:00 GMT</pubDate></item>
+<item><guid>news-2</guid><title>Unsafe target</title><link>javascript:alert(1)</link></item>
+<item><guid>news-1</guid><title>Duplicate ignored</title></item>
+</channel></rss>
