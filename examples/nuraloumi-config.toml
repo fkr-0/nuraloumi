@@ -1,10 +1,5 @@
-# NuraLoumi user configuration example.
-#
-# Copy to:
-#   $XDG_CONFIG_HOME/nuraloumi/config.toml
-# or, when XDG_CONFIG_HOME is unset/non-absolute:
-#   $HOME/.config/nuraloumi/config.toml
-
+# Versioned NuraLoumi example (legacy files may omit config_version).
+config_version = 1
 panel_edge = "top"
 panel_height = 40
 menu_width = 448
@@ -12,18 +7,47 @@ row_height = 48
 theme = "dark"
 reduced_motion = false
 
-# Transient menus close when pressing/touching outside the visible sheet and
-# after successful one-shot actions such as app launch/window focus/workspace
-# switch. Continuous controls such as brightness or volume remain open.
-# The output-sized outside-dismiss backdrop is automatically suppressed on the
-# still-unqualified SL101 Grate GLES2 path; close-after-action remains active.
+[panel]
+[[panel.quick_launch]]
+label = "Term"
+glyph = ""
+command = "nuraloumi-terminal"
+
+[[panel.quick_launch]]
+label = "Edit"
+glyph = ""
+command = "nuraloumi-editor"
+
+[[panel.quick_launch]]
+label = "Files"
+desktop = "org.gnome.Nautilus.desktop"
+
+[surface.music]
+show_album_art = false
+
+[surface.resources]
+refresh_interval_ms = 5000
+
+[surface.calendar]
+ical_path = "~/.local/share/khal/calendars"
+
+[providers]
+terminal = "foot"
+editor = "nvim"
+weather_url = "https://wttr.in/?format=j1"
+weather_cache_seconds = 1800
+
+[providers.media]
+backend = "playerctl"
+
+[providers.resources]
+refresh_interval_ms = 5000
+top_process_count = 10
+
 [menu_dismissal]
 outside_press = true
 after_one_shot_action = true
 
-# Built-in navigation and user bindings share one validated registry.
-# "global" means any keyboard-focused NuraLoumi transient menu, not a
-# compositor-wide shortcut.
 [keybindings]
 enabled = true
 
@@ -33,23 +57,13 @@ keys = "Ctrl+Alt+Up"
 scope = "global"
 action = { id = "audio.adjust", delta = 5 }
 
-# Launcher entries still come exclusively from discovered XDG .desktop files.
-# Pinned entries appear once under Favorites, in this order. Unknown IDs are
-# ignored because launcher config never creates executable application entries.
 [launcher]
-pinned = [
-  "foot.desktop",
-  "firefox.desktop",
-]
-hidden = [
-  "org.example.LegacyTool.desktop",
-]
+pinned = ["foot.desktop", "firefox.desktop"]
+hidden = ["org.example.LegacyTool.desktop"]
 
 [launcher.labels]
 "foot.desktop" = "Terminal"
 "firefox.desktop" = "Web"
 
-# Exact compositor app_id aliases used only for conservative existing-window
-# reuse. Multiple matching windows intentionally fall back to a normal launch.
 [launcher.app_id_aliases]
 "firefox.desktop" = ["firefox", "firefox-esr"]

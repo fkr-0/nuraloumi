@@ -30,7 +30,61 @@ If neither file exists, built-in defaults are used. If the selected file exists 
 
 The CLI flag `--reduced-motion` can additionally force reduced motion on after the file is loaded.
 
-## Complete TOML example
+## M6 — extensible configuration (version 1)
+
+The shared shell loader accepts TOML and JSON. Omitted `config_version`
+means legacy version 0, while built-in defaults declare version 1.
+Versions above 1 fail validation. The existing top-level shell fields remain
+unchanged. Unknown top-level keys emit warnings and are preserved; unknown
+surface names and unknown per-surface fields are preserved and ignored.
+
+```toml
+config_version = 1
+
+[surface.music]
+show_album_art = false
+[surface.resources]
+refresh_interval_ms = 5000
+[surface.calendar]
+ical_path = "~/.local/share/khal/calendars"
+
+[providers]
+terminal = "foot"
+editor = "nvim"
+weather_url = "https://wttr.in/?format=j1"
+weather_cache_seconds = 1800
+[providers.media]
+backend = "playerctl"
+[providers.resources]
+refresh_interval_ms = 5000
+top_process_count = 10
+
+[[panel.quick_launch]]
+label = "Term"
+glyph = ""
+command = "nuraloumi-terminal"
+[[panel.quick_launch]]
+label = "Files"
+desktop = "org.gnome.Nautilus.desktop"
+```
+
+Provider intervals, cache seconds and process count must be positive.
+Quick launch is bounded to 16 entries. Each slot requires a nonempty
+single-line label and exactly one of `command` or `desktop`.
+Desktop IDs cannot contain slash characters. Configuration commands are
+data, not execution authority: consuming surfaces must use bounded execution.
+
+`[providers.media]`, `[providers.resources]`, `[panel]`, and their
+quick-launch entries are strict: unknown keys are errors.
+`[surface.NAME]` permits additional keys and third-party surface names.
+Calendar paths are stored verbatim; `~` is not expanded by the loader.
+
+`ShellConfig::validate` and `load_config` perform semantic validation
+and file-qualified error reporting. The standalone
+`nuraloumi-config validate` / `dump-defaults` binary is not yet available
+because adding `src/bin/config.rs` is outside this lane's exclusive write scope.
+
+## Legacy-compatible TOML example
 
 The repository copy at `examples/nuraloumi-config.toml` is intended to be copied and edited:
 
@@ -95,7 +149,7 @@ cp examples/nuraloumi-config.toml "$config_root/nuraloumi/config.toml"
 | `theme` | `dark` or `light` | `dark` | enum |
 | `reduced_motion` | boolean | `false` | boolean |
 
-Unknown or malformed values fail configuration loading instead of being guessed.
+Malformed values and unknown keys in strict sections fail configuration loading. Unknown top-level and per-surface extension keys are preserved; unknown top-level keys produce warnings.
 
 ## Transient menu dismissal
 
