@@ -20,6 +20,7 @@ strip = true
 lto = "thin"
 codegen-units = 1
 panic = "abort"
+incremental = false
 
 [profile.dev]
 incremental = false
