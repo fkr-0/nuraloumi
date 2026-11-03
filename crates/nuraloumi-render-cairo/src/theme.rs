@@ -84,6 +84,27 @@ pub struct Theme {
 }
 
 impl Theme {
+    /// High-contrast light palette for the same square Cairo scene grammar.
+    pub const fn light() -> Self {
+        Self {
+            base: Color::rgb(0xf7, 0xf8, 0xfa),
+            raised: Color::rgb(0xff, 0xff, 0xff),
+            overlay: Color::rgb(0xf8, 0xf9, 0xfc),
+            card: Color::rgb(0xf0, 0xf2, 0xf7),
+            selected: Color::rgb(0xdf, 0xe5, 0xf4),
+            primary_text: Color::rgb(0x16, 0x1d, 0x2c),
+            secondary_text: Color::rgb(0x39, 0x45, 0x58),
+            hint: Color::rgb(0x48, 0x55, 0x6b),
+            accent: Color::rgb(0x30, 0x4a, 0x86),
+            warning: Color::rgb(0x86, 0x54, 0x00),
+            error: Color::rgb(0x9a, 0x24, 0x28),
+            border: Color::rgba(0x24, 0x30, 0x46, 68),
+            border_width: 1.0,
+            separator: Color::rgba(0x24, 0x30, 0x46, 65),
+            panel_radius: 0.0,
+        }
+    }
+
     pub const fn dark() -> Self {
         Self {
             base: Color::rgb(0x11, 0x12, 0x18),

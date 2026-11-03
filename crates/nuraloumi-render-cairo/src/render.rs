@@ -3,7 +3,7 @@ use std::{error::Error as StdError, fmt, fs::File, path::Path};
 use cairo::{Context, FontSlant, FontWeight, Format, ImageSurface, LinearGradient};
 
 use crate::{
-    layout_menu,
+    layout_menu_scaled,
     model::{
         CoreMenuAdapter, MenuSource, PaintNode, Rect, Scene, TextMetrics, TextStyle, Viewport,
     },
@@ -740,10 +740,31 @@ impl<B: TextBackend> CairoRenderer<B> {
         tokens: &nuraloumi_core::ThemeTokens,
         options: RenderOptions,
     ) -> Scene {
+        self.build_core_scene_with_text_scale(model, state, viewport, tokens, options, 1.0)
+    }
+
+    /// Opt-in text scaling for canonical core menus, without changing
+    /// RenderOptions literals used by existing shell and fixture clients.
+    pub fn build_core_scene_with_text_scale(
+        &self,
+        model: &nuraloumi_core::MenuModel,
+        state: &nuraloumi_core::MenuState,
+        viewport: Viewport,
+        tokens: &nuraloumi_core::ThemeTokens,
+        options: RenderOptions,
+        text_scale: f64,
+    ) -> Scene {
         let adapter = CoreMenuAdapter::new(model, state);
         let interaction = InteractionState::from(state);
         let theme = Theme::from(tokens);
-        self.build_scene(&adapter, &interaction, viewport, &theme, options)
+        self.build_scene_with_text_scale(
+            &adapter,
+            &interaction,
+            viewport,
+            &theme,
+            options,
+            text_scale,
+        )
     }
 
     /// Rasterize the canonical semantic-core model/state into ARGB32.
@@ -756,6 +777,22 @@ impl<B: TextBackend> CairoRenderer<B> {
         options: RenderOptions,
     ) -> Result<(Scene, RenderedBuffer), cairo::Error> {
         let scene = self.build_core_scene(model, state, viewport, tokens, options);
+        let buffer = self.render_scene(&scene)?;
+        Ok((scene, buffer))
+    }
+
+    /// Rasterize canonical core menus with scaled text.
+    pub fn render_core_with_text_scale(
+        &self,
+        model: &nuraloumi_core::MenuModel,
+        state: &nuraloumi_core::MenuState,
+        viewport: Viewport,
+        tokens: &nuraloumi_core::ThemeTokens,
+        options: RenderOptions,
+        text_scale: f64,
+    ) -> Result<(Scene, RenderedBuffer), cairo::Error> {
+        let scene = self
+            .build_core_scene_with_text_scale(model, state, viewport, tokens, options, text_scale);
         let buffer = self.render_scene(&scene)?;
         Ok((scene, buffer))
     }
@@ -786,13 +823,28 @@ impl<B: TextBackend> CairoRenderer<B> {
         theme: &Theme,
         options: RenderOptions,
     ) -> Scene {
-        layout_menu(
+        self.build_scene_with_text_scale(menu, interaction, viewport, theme, options, 1.0)
+    }
+
+    /// Opt-in accessibility text scale in logical pixels (finite-clamped
+    /// to 1.0..=2.0); independent of Viewport.scale (device pixel density).
+    pub fn build_scene_with_text_scale<M: MenuSource>(
+        &self,
+        menu: &M,
+        interaction: &InteractionState,
+        viewport: Viewport,
+        theme: &Theme,
+        options: RenderOptions,
+        text_scale: f64,
+    ) -> Scene {
+        layout_menu_scaled(
             menu,
             interaction,
             viewport,
             theme,
             &self.text,
             options.constrained,
+            text_scale,
         )
     }
 
@@ -859,6 +911,28 @@ impl<B: TextBackend> CairoRenderer<B> {
         options: RenderOptions,
     ) -> Result<(Scene, RenderedBuffer), cairo::Error> {
         let scene = self.build_scene(menu, interaction, viewport, theme, options);
+        let buffer = self.render_scene(&scene)?;
+        Ok((scene, buffer))
+    }
+
+    /// Render a scaled scene without changing existing caller options.
+    pub fn render_with_text_scale<M: MenuSource>(
+        &self,
+        menu: &M,
+        interaction: &InteractionState,
+        viewport: Viewport,
+        theme: &Theme,
+        options: RenderOptions,
+        text_scale: f64,
+    ) -> Result<(Scene, RenderedBuffer), cairo::Error> {
+        let scene = self.build_scene_with_text_scale(
+            menu,
+            interaction,
+            viewport,
+            theme,
+            options,
+            text_scale,
+        );
         let buffer = self.render_scene(&scene)?;
         Ok((scene, buffer))
     }

@@ -23,7 +23,7 @@ mod theme;
 #[cfg(all(feature = "packaged-font", not(unix)))]
 compile_error!("the packaged-font backend currently requires a Unix target");
 
-pub use layout::{layout_menu, LayoutMetrics};
+pub use layout::{layout_menu, layout_menu_scaled, LayoutMetrics};
 pub use model::{
     CoreMenuAdapter, HitRegion, Insets, InteractionState, MenuItemRef, MenuItemView, MenuSource,
     MenuView, PaintNode, Point, Rect, RowKind, Scene, ScrollWindow, TextMetrics, TextStyle,
