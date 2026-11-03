@@ -43,5 +43,7 @@ final CLI differs from the automatic probe:
     NURALOUMI_MENU_SMOKE='exact menu fixture/headless command' \
     cargo xtask qualify-host --strict
 
+See 02-PACKAGE-PERFORMANCE.md for metadata-derived binary completeness,
+package integrity verification and bounded read-only RSS/CPU sampling.
 See SL101-DEPLOYMENT.md for copy-only target deployment and
 EVIDENCE-TEMPLATE.md for target recording.

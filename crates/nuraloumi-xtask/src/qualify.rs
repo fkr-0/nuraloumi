@@ -1,4 +1,4 @@
-use crate::package::{host_triple, release_dir, target_root};
+use crate::package::{host_triple, release_dir, runtime_binaries, target_root};
 use crate::process::{command_available, run_capture, run_capture_env, run_checked};
 use std::env;
 use std::fs;
@@ -275,11 +275,15 @@ pub fn qualify_armv7(root: &Path, cross_check: bool) -> Result<(), String> {
     }
 
     let release = target_root(root).join(ARMV7_TARGET).join("release");
-    let binaries = target_binaries(&release)?;
+    // A clean audit of a subset is not a clean release audit. Every
+    // declared runtime executable must be present before reporting PASS.
+    let expected = runtime_binaries(root)?;
+    let (binaries, missing) = target_binaries(&release, &expected);
     if binaries.is_empty() {
         println!(
-            "ELF_AUDIT=PENDING reason=no-cross-release-binaries path={}",
-            release.display()
+            "ELF_AUDIT=PENDING reason=no-cross-release-binaries path={} missing={}",
+            release.display(),
+            missing.join(",")
         );
     } else {
         let script = root.join("scripts/inspect-armv7-elf.sh");
@@ -308,12 +312,15 @@ pub fn qualify_armv7(root: &Path, cross_check: bool) -> Result<(), String> {
                 ));
             }
         }
-        if audit_pending == 0 {
+        if audit_pending == 0 && missing.is_empty() {
             println!("ELF_AUDIT=PASS binaries={audited} heuristic-only");
         } else {
             println!(
-                "ELF_AUDIT=PENDING passed={} pending={} heuristic-incomplete",
-                audited, audit_pending
+                "ELF_AUDIT=PENDING passed={} pending={} missing={} names={} heuristic-incomplete",
+                audited,
+                audit_pending,
+                missing.len(),
+                missing.join(",")
             );
         }
     }
@@ -447,29 +454,40 @@ fn run_shell_smoke(root: &Path, label: &str, command: &str) -> Result<(), String
     }
 }
 
-fn target_binaries(dir: &Path) -> Result<Vec<PathBuf>, String> {
-    if !dir.is_dir() {
-        return Ok(Vec::new());
-    }
+fn target_binaries(dir: &Path, expected: &[String]) -> (Vec<PathBuf>, Vec<String>) {
     let mut binaries = Vec::new();
-    for name in [
-        "nuraloumi-panel",
-        "nuraloumi-menu",
-        "nuraloumi-thumbnail-helper",
-        "nuraloumi-probe",
-    ] {
+    let mut missing = Vec::new();
+    for name in expected {
         let path = dir.join(name);
         if path.is_file() {
             binaries.push(path);
+        } else {
+            missing.push(name.clone());
         }
     }
-    Ok(binaries)
+    (binaries, missing)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::nonempty_pngs;
+    use super::{nonempty_pngs, target_binaries};
     use std::fs;
+
+    #[test]
+    fn cross_release_audit_requires_every_declared_runtime_binary() {
+        let dir = std::env::temp_dir().join(format!(
+            "nuraloumi-xtask-binary-check-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create");
+        fs::write(dir.join("nuraloumi-panel"), b"sample").expect("write");
+        let names = vec!["nuraloumi-panel".into(), "nuraloumi-feeds".into()];
+        let (present, missing) = target_binaries(&dir, &names);
+        assert_eq!(present.len(), 1);
+        assert_eq!(missing, vec!["nuraloumi-feeds"]);
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn png_probe_ignores_empty_files() {

@@ -4,12 +4,40 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-const RUNTIME_BINARIES: &[&str] = &[
-    "nuraloumi-panel",
-    "nuraloumi-menu",
-    "nuraloumi-thumbnail-helper",
-    "nuraloumi-probe",
-];
+// The script uses Python's standard JSON parser with a bounded cargo-metadata
+// invocation. No runtime crate or shared Cargo.lock modification is required.
+fn runtime_binaries_from_list(list: &str) -> Result<Vec<String>, String> {
+    let mut names = std::collections::BTreeSet::new();
+    for line in list.lines() {
+        let name = line.trim();
+        if !name.starts_with("nuraloumi-")
+            || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        {
+            return Err(format!("invalid runtime binary name: {name:?}"));
+        }
+        if !names.insert(name.to_owned()) {
+            return Err(format!("duplicate runtime binary name: {name}"));
+        }
+    }
+    if ![
+        "nuraloumi-panel",
+        "nuraloumi-menu",
+        "nuraloumi-probe",
+        "nuraloumi-thumbnail-helper",
+    ]
+    .iter()
+    .all(|name| names.contains(*name))
+    {
+        return Err("Cargo metadata is missing a baseline runtime binary".to_owned());
+    }
+    Ok(names.into_iter().collect())
+}
+
+pub(crate) fn runtime_binaries(root: &Path) -> Result<Vec<String>, String> {
+    let script = root.join("scripts/package-binaries.py");
+    let output = run_checked("python3", &[script.to_string_lossy().as_ref()], root)?;
+    runtime_binaries_from_list(&output.stdout)
+}
 
 pub fn host_triple(root: &Path) -> Result<String, String> {
     let output = run_checked("rustc", &["-vV"], root)?;
@@ -142,15 +170,15 @@ pub fn stage_package(
 
     let binaries_dir = release_dir(root, target);
     let mut staged_bins = Vec::new();
-    for name in RUNTIME_BINARIES {
-        let source = binaries_dir.join(name);
+    for name in runtime_binaries(root)? {
+        let source = binaries_dir.join(&name);
         if !source.is_file() {
             return Err(format!(
                 "required runtime release binary missing: {}; run the complete target release build first",
                 source.display()
             ));
         }
-        let destination = bin_dir.join(name);
+        let destination = bin_dir.join(&name);
         fs::copy(&source, &destination).map_err(|error| {
             format!(
                 "copy runtime binary {} -> {}: {error}",
@@ -158,7 +186,7 @@ pub fn stage_package(
                 destination.display()
             )
         })?;
-        staged_bins.push((*name).to_owned());
+        staged_bins.push(name);
     }
 
     copy_required(&root.join("packaging/README.md"), &stage.join("README.md"))?;
@@ -210,6 +238,181 @@ pub fn stage_package(
     println!("PACKAGE_TAR={}", tar_path.display());
     println!("PACKAGE_TAR_SHA256={}", sha256(root, &tar_path)?);
     Ok(stage)
+}
+
+pub fn check_package(root: &Path, stage: &Path) -> Result<(), String> {
+    if !stage.is_dir() || stage.is_symlink() {
+        return Err(format!(
+            "package directory missing or symlinked: {}",
+            stage.display()
+        ));
+    }
+    let text = fs::read_to_string(stage.join("MANIFEST.txt"))
+        .map_err(|error| format!("read package manifest: {error}"))?;
+    let mut expected_files = std::collections::BTreeMap::new();
+    let mut target = None;
+    let mut declared_bins = None;
+    let mut in_files = false;
+    let mut keys = std::collections::BTreeSet::new();
+    for line in text.lines() {
+        if line == "files:" {
+            if in_files {
+                return Err("duplicate files marker".to_owned());
+            }
+            in_files = true;
+            continue;
+        }
+        if in_files {
+            let (hash, name) = line
+                .trim_start()
+                .split_once("  ")
+                .ok_or_else(|| format!("invalid manifest file entry: {line:?}"))?;
+            if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err(format!("invalid sha256 digest for {name:?}"));
+            }
+            let rel = Path::new(name);
+            if rel
+                .components()
+                .any(|part| !matches!(part, std::path::Component::Normal(_)))
+                || name.is_empty()
+            {
+                return Err(format!("unsafe package path: {name:?}"));
+            }
+            if expected_files
+                .insert(name.to_owned(), hash.to_owned())
+                .is_some()
+            {
+                return Err(format!("duplicate manifest path: {name}"));
+            }
+        } else {
+            let (key, value) = line
+                .split_once('=')
+                .ok_or_else(|| format!("invalid manifest header: {line:?}"))?;
+            if !keys.insert(key.to_owned()) {
+                return Err(format!("duplicate manifest key: {key}"));
+            }
+            match key {
+                "schema" if value == "nuraloumi-package-manifest-v1" => {}
+                "target" => target = Some(value.to_owned()),
+                "binaries" => {
+                    declared_bins = Some(value.split(',').map(str::to_owned).collect::<Vec<_>>())
+                }
+                "version" | "git_commit" | "git_dirty" | "build_command" => {}
+                _ => return Err(format!("invalid manifest key or schema: {key}={value}")),
+            }
+        }
+    }
+    if !in_files
+        || ![
+            "schema",
+            "version",
+            "target",
+            "git_commit",
+            "git_dirty",
+            "build_command",
+            "binaries",
+        ]
+        .iter()
+        .all(|key| keys.contains(*key))
+    {
+        return Err("package manifest missing required fields".to_owned());
+    }
+    let bins = runtime_binaries(root)?;
+    if declared_bins.as_ref() != Some(&bins) {
+        return Err(format!("packaged binaries do not match Cargo targets: expected {bins:?}, found {declared_bins:?}"));
+    }
+    for required in [
+        "README.md",
+        "LICENSE",
+        "config/nuraloumi.toml.example",
+        "share/nuraloumi/qualification/README.md",
+    ] {
+        if !expected_files.contains_key(required) {
+            return Err(format!("required package input not listed: {required}"));
+        }
+    }
+    for bin in &bins {
+        let name = format!("bin/{bin}");
+        if !expected_files.contains_key(&name) {
+            return Err(format!("runtime binary missing from manifest: {name}"));
+        }
+        let file = stage.join(&name);
+        let meta = fs::symlink_metadata(&file).map_err(|error| format!("stat {name}: {error}"))?;
+        if !meta.is_file() || meta.permissions().mode() & 0o111 == 0 {
+            return Err(format!(
+                "runtime binary is not a regular executable: {name}"
+            ));
+        }
+        let mut header = [0_u8; 4];
+        let mut input = fs::File::open(&file).map_err(|error| format!("open {name}: {error}"))?;
+        std::io::Read::read_exact(&mut input, &mut header)
+            .map_err(|error| format!("read ELF header {name}: {error}"))?;
+        if &header != b"\x7fELF" {
+            return Err(format!("runtime binary is not ELF: {name}"));
+        }
+    }
+    let actual_files = collect_files(stage)?;
+    if actual_files.len() != expected_files.len() {
+        return Err(format!(
+            "package file count mismatch: manifest={} actual={}",
+            expected_files.len(),
+            actual_files.len()
+        ));
+    }
+    for file in actual_files {
+        let name = file
+            .strip_prefix(stage)
+            .map_err(|error| error.to_string())?
+            .to_string_lossy()
+            .into_owned();
+        let meta = fs::symlink_metadata(&file).map_err(|error| format!("stat {name}: {error}"))?;
+        if !meta.is_file() {
+            return Err(format!("package contains non-regular file: {name}"));
+        }
+        let expected = expected_files
+            .get(&name)
+            .ok_or_else(|| format!("unlisted package file: {name}"))?;
+        let actual = sha256(root, &file)?;
+        if &actual != expected {
+            return Err(format!("package SHA256 mismatch for {name}"));
+        }
+    }
+    if target.as_deref() == Some("armv7-unknown-linux-musleabihf") {
+        let paths = bins
+            .iter()
+            .map(|bin| stage.join("bin").join(bin))
+            .collect::<Vec<_>>();
+        let args = paths
+            .iter()
+            .map(|path| {
+                path.to_str()
+                    .ok_or_else(|| "non-UTF8 binary path".to_owned())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let script = root
+            .join("scripts/inspect-armv7-elf.sh")
+            .to_string_lossy()
+            .into_owned();
+        let mut audit_args = vec![script.as_str()];
+        audit_args.extend(args);
+        let audit = crate::process::run_capture("sh", &audit_args, root)?;
+        print!("{}", audit.stdout);
+        eprint!("{}", audit.stderr);
+        if !audit.status.success() {
+            return Err(format!(
+                "ARMv7 package ELF audit incomplete or failed: {}",
+                audit.status
+            ));
+        }
+        println!("PACKAGE_ARMV7_ELF=PASS heuristic-only; SL101 runtime still PENDING");
+    }
+    println!(
+        "PACKAGE_CHECK=PASS files={} binaries={} target={} hardware=PENDING",
+        expected_files.len(),
+        bins.len(),
+        target.as_deref().unwrap_or("unknown")
+    );
+    Ok(())
 }
 
 fn archive_path(stage: &Path) -> PathBuf {
@@ -301,6 +504,13 @@ fn collect_files_inner(dir: &Path, result: &mut Vec<PathBuf>) -> Result<(), Stri
 
     for entry in entries {
         let path = entry.path();
+        if fs::symlink_metadata(&path)
+            .map_err(|error| format!("stat {}: {error}", path.display()))?
+            .file_type()
+            .is_symlink()
+        {
+            return Err(format!("symlink in package tree: {}", path.display()));
+        }
         if path.is_dir() {
             collect_files_inner(&path, result)?;
         } else if path.is_file()
@@ -354,7 +564,8 @@ fn create_deterministic_tar(root: &Path, stage: &Path, tar_path: &Path) -> Resul
 #[cfg(test)]
 mod tests {
     use super::{
-        archive_path, collect_files, create_deterministic_tar, workspace_version, RUNTIME_BINARIES,
+        archive_path, collect_files, create_deterministic_tar, runtime_binaries_from_list,
+        workspace_version,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -380,16 +591,25 @@ mod tests {
     }
 
     #[test]
-    fn runtime_package_requires_thumbnail_helper() {
+    fn binary_list_includes_new_surfaces() {
+        let list = "nuraloumi-menu\nnuraloumi-panel\nnuraloumi-probe\n\
+                    nuraloumi-thumbnail-helper\nnuraloumi-feeds\n";
         assert_eq!(
-            RUNTIME_BINARIES,
-            [
-                "nuraloumi-panel",
+            runtime_binaries_from_list(list).unwrap(),
+            vec![
+                "nuraloumi-feeds",
                 "nuraloumi-menu",
-                "nuraloumi-thumbnail-helper",
+                "nuraloumi-panel",
                 "nuraloumi-probe",
+                "nuraloumi-thumbnail-helper"
             ]
         );
+    }
+
+    #[test]
+    fn binary_list_rejects_missing_baseline_and_unsafe_names() {
+        assert!(runtime_binaries_from_list("nuraloumi-panel\n").is_err());
+        assert!(runtime_binaries_from_list("nuraloumi-panel\n../escape\n").is_err());
     }
 
     #[test]

@@ -101,14 +101,23 @@ RUSTFLAGS="$BASE_RUSTFLAGS --cfg nuraloumi_thumbnail_helper" \
         -p nuraloumi-wayland --bin nuraloumi-thumbnail-helper
 
 RELEASE="$TARGET_DIR/$TARGET/release"
-sh "$ROOT/scripts/inspect-armv7-elf.sh" \
-    "$RELEASE/nuraloumi-panel" \
-    "$RELEASE/nuraloumi-menu" \
-    "$RELEASE/nuraloumi-thumbnail-helper" \
-    "$RELEASE/nuraloumi-probe"
+# Inspect every release executable (including newly added surfaces), not
+# just the original four. Separately run cargo xtask package/package-check
+# to prove the set matches Cargo metadata rather than stale artifacts.
+set --
+for path in "$RELEASE"/nuraloumi-*; do
+    if [ -f "$path" ] && [ -x "$path" ]; then
+        set -- "$@" "$path"
+    fi
+done
+if [ "$#" -lt 4 ]; then
+    echo "SL101_CROSS_BUILD=FAIL reason=too-few-release-binaries" >&2
+    exit 1
+fi
+sh "$ROOT/scripts/inspect-armv7-elf.sh" "$@"
 
-for binary in nuraloumi-panel nuraloumi-menu nuraloumi-thumbnail-helper nuraloumi-probe; do
-    path="$RELEASE/$binary"
+for path in "$@"; do
+    binary=${path##*/}
     printf 'SL101_BINARY=PASS name=%s sha256=%s file=' "$binary" "$(sha256sum "$path" | awk '{print $1}')"
     file -b "$path"
 done

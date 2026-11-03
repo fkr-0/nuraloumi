@@ -9,6 +9,8 @@ Layout:
       nuraloumi-panel
       nuraloumi-menu
       nuraloumi-probe
+      nuraloumi-thumbnail-helper
+      ... all declared nuraloumi-shell/wayland/providers binary targets
     config/
       nuraloumi.toml.example
     share/nuraloumi/
@@ -25,6 +27,7 @@ Build and stage:
 
     cargo xtask build-release
     cargo xtask package
+    cargo xtask package-check --dir target/nuraloumi-package/<host-triple>/nuraloumi-<version>-<host-triple>
 
 For SL101 cross artifacts, use armv7-unknown-linux-musleabihf only after
 qualify-armv7 reports the Rust target and linker prerequisites. A successful

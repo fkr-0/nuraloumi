@@ -60,13 +60,18 @@ shown only as a reminder that the compositor recovery baseline is pixman.
 
 ## Rollback
 
-Primary rollback is process-only:
+Primary rollback is process-only and scoped to the PIDs launched by this
+specific manual trial. **Never** use global `pkill -x nuraloumi-*` because an
+operator may already be running another version or session.
 
-    pkill -TERM -x nuraloumi-menu 2>/dev/null || true
-    pkill -TERM -x nuraloumi-panel 2>/dev/null || true
+    # Record panel_pid/menu_pid immediately after launching the trial.
+    kill -TERM "$menu_pid" "$panel_pid" 2>/dev/null || true
     sleep 1
-    pkill -KILL -x nuraloumi-menu 2>/dev/null || true
-    pkill -KILL -x nuraloumi-panel 2>/dev/null || true
+    # Inspect before escalating; only known trial PIDs and the same start time
+    ps -o pid,lstart,rss,args -p "$panel_pid","$menu_pid" || true
+
+If a process did not terminate, verify its PID/start-time identity before
+sending any stronger signal. Do not kill an unrelated or reused PID.
 
 Verify labwc survived:
 

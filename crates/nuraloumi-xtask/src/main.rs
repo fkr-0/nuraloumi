@@ -4,7 +4,7 @@ mod package;
 mod process;
 mod qualify;
 
-use package::{print_sizes, stage_package};
+use package::{check_package, print_sizes, stage_package};
 use process::run_capture;
 use qualify::{qualify_armv7, qualify_host, ARMV7_TARGET};
 use std::env;
@@ -47,6 +47,7 @@ fn run() -> Result<(), String> {
         "size" => cmd_size(&root, &args[1..]),
         "deps" => cmd_deps(&root, &args[1..]),
         "package" => cmd_package(&root, &args[1..]),
+        "package-check" => cmd_package_check(&root, &args[1..]),
         "qualify-host" => cmd_qualify_host(&root, &args[1..]),
         "qualify-armv7" => cmd_qualify_armv7(&root, &args[1..]),
         other => Err(format!("unknown subcommand {other:?}; use --help")),
@@ -250,6 +251,17 @@ fn cmd_package(root: &Path, args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn cmd_package_check(root: &Path, args: &[String]) -> Result<(), String> {
+    if args.iter().any(|arg| arg == "--help" || arg == "-h") {
+        println!("Usage: nuraloumi-xtask package-check --dir PACKAGE_STAGE");
+        return Ok(());
+    }
+    let dir =
+        option_value(args, "--dir")?.ok_or_else(|| "package-check requires --dir".to_owned())?;
+    reject_consumed_options(args, &["--dir"])?;
+    check_package(root, Path::new(&dir))
+}
+
 fn cmd_qualify_host(root: &Path, args: &[String]) -> Result<(), String> {
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         println!("Usage: nuraloumi-xtask qualify-host [--strict] [--no-nested]");
@@ -337,7 +349,8 @@ Commands:
   build-release   Build workspace release binaries
   size            Enumerate release binary sizes; optionally show sections
   deps            Show runtime dependency trees and flag heavyweight GUI stacks
-  package         Stage bin/share/config/license/readme plus deterministic manifest/tar
+  package         Stage all Cargo runtime binaries plus deterministic manifest/tar
+  package-check   Verify staged binary completeness, SHA256 and ARMv7 ELF heuristics
   qualify-host    Run non-mutating host qualification probes
   qualify-armv7   Report ARMv7 musl/no-NEON readiness without claiming device proof
   help            Show this help
