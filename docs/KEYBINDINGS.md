@@ -172,8 +172,9 @@ no keyboard focus, so NuraLoumi cannot make `Super+Space` a desktop-wide
 launcher hotkey without compositor cooperation.
 
 The `panel` scope is reserved for a future explicitly keyboard-interactive
-panel mode; it does not cause the current static panel to consume keyboard
-input.
+panel mode. Because the current static panel cannot consume keys, an enabled
+`panel` binding fails configuration validation rather than being reported as
+effective but unreachable.
 
 ## Typed action descriptors
 

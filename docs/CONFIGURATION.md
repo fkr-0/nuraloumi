@@ -209,7 +209,8 @@ an error; declaration order never chooses a winner.
 a compositor-global hotkey. The persistent panel intentionally has keyboard
 interactivity disabled, so desktop-wide shortcuts still belong in the
 compositor. The `panel` scope is reserved for a future explicitly
-keyboard-interactive panel mode.
+keyboard-interactive panel mode; an enabled `panel` binding currently fails
+validation rather than creating an unreachable shortcut.
 
 ### Typed actions
 

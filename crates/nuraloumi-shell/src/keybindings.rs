@@ -581,7 +581,9 @@ impl KeybindingRegistry {
         validate_collisions(&bindings)?;
         for binding in &bindings {
             binding.action.resolve()?;
-            validate_scope_action(binding.scope, &binding.action)?;
+            if binding.enabled {
+                validate_scope_action(binding.scope, &binding.action)?;
+            }
         }
 
         Ok(Self {
@@ -694,7 +696,9 @@ fn merge_override(
         .or_else(|| previous.map(|binding| binding.action.clone()))
         .ok_or_else(|| format!("keybinding {:?} requires action", entry.id))?;
     action.resolve()?;
-    validate_scope_action(scope, &action)?;
+    if enabled {
+        validate_scope_action(scope, &action)?;
+    }
     Ok(BindingDefinition {
         id: entry.id.clone(),
         stroke,
@@ -721,6 +725,12 @@ fn validate_collisions(bindings: &[BindingDefinition]) -> Result<(), String> {
 }
 
 fn validate_scope_action(scope: BindingScope, action: &ActionSpec) -> Result<(), String> {
+    if scope == BindingScope::Panel {
+        return Err(
+            "panel keybinding scope is reserved until the persistent panel has keyboard input"
+                .into(),
+        );
+    }
     match action.id.as_str() {
         "overview.mode"
             if !matches!(
@@ -1115,6 +1125,22 @@ mod tests {
             .expect("down");
         assert_eq!(down.keys, "Down");
         assert_eq!(down.source, BindingSource::BuiltIn);
+    }
+
+    #[test]
+    fn enabled_panel_scope_fails_instead_of_claiming_dead_binding_is_effective() {
+        let config = KeybindingConfig {
+            enabled: true,
+            bindings: vec![BindingOverride {
+                id: "user.panel".into(),
+                enabled: None,
+                keys: Some("Ctrl+P".into()),
+                scope: Some(BindingScope::Panel),
+                action: Some(ActionSpec::simple("menu.activate")),
+            }],
+        };
+        let error = KeybindingRegistry::from_config(&config).expect_err("reserved panel scope");
+        assert!(error.contains("panel keybinding scope is reserved"));
     }
 
     #[test]
