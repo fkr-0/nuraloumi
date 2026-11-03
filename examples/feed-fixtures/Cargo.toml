@@ -1,0 +1,18 @@
+[package]
+name = "nuraloumi-feeds-fixture"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+nuraloumi-shell = { path = "../../crates/nuraloumi-shell" }
+nuraloumi-core = { path = "../../crates/nuraloumi-core" }
+nuraloumi-providers = { path = "../../crates/nuraloumi-providers" }
+nuraloumi-render-cairo = { path = "../../crates/nuraloumi-render-cairo" }
+nuraloumi-wayland = { path = "../../crates/nuraloumi-wayland" }
+
+[[bin]]
+name = "nuraloumi-feeds-fixture"
+path = "../../crates/nuraloumi-shell/src/bin/feeds.rs"

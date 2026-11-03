@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<opml version="2.0"><head><title>Local subscriptions</title></head><body>
+<outline title="Offline reading" type="rss" xmlUrl="https://feeds.example.test/news"/>
+<outline title="Example Atom" type="rss" xmlUrl="https://example.org/feed.xml"/>
+</body></opml>

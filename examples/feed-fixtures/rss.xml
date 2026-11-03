@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0"><channel><title>Offline reading</title><link>https://feeds.example.test/</link>
+<item><guid>article-one</guid><title>First cached story</title><link>https://example.org/story/1</link><description>Read without network access.</description></item>
+<item><guid>article-two</guid><title>Second &amp; longer story</title><link>https://example.org/story/2</link><description>Keyboard and touch navigation.</description></item>
+</channel></rss>
