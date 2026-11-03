@@ -2,6 +2,7 @@ use std::{
     collections::{BTreeSet, HashMap, VecDeque},
     os::fd::AsRawFd,
 };
+use xkbcommon::xkb;
 
 use wayland_client::{
     delegate_noop, event_created_child,
@@ -45,6 +46,24 @@ struct OutputRecord {
     info: OutputInfo,
 }
 
+#[cfg(test)]
+fn test_keyboard_layout(layout: &str) -> KeyboardState {
+    let mut keyboard = KeyboardState::default();
+    let keymap = xkb::Keymap::new_from_names(
+        &keyboard.context,
+        "",
+        "",
+        layout,
+        "",
+        None,
+        xkb::COMPILE_NO_FLAGS,
+    )
+    .expect("test layout must compile");
+    keyboard.state = Some(xkb::State::new(&keymap));
+    keyboard.keymap = Some(keymap);
+    keyboard
+}
+
 struct SurfaceRecord {
     surface: wl_surface::WlSurface,
     layer: ZwlrLayerSurfaceV1,
@@ -70,6 +89,65 @@ impl SurfaceRecord {
             self.width.saturating_mul(scale),
             self.height.saturating_mul(scale),
         ))
+    }
+}
+
+fn modifier_keys_from_enter(keys: &[u8]) -> BTreeSet<u32> {
+    keys.chunks_exact(std::mem::size_of::<u32>())
+        .map(|chunk| u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .filter(|key| is_modifier_key(*key))
+        .collect()
+}
+
+struct KeyboardState {
+    context: xkb::Context,
+    keymap: Option<xkb::Keymap>,
+    state: Option<xkb::State>,
+}
+
+impl Default for KeyboardState {
+    fn default() -> Self {
+        Self {
+            context: xkb::Context::new(xkb::CONTEXT_NO_FLAGS),
+            keymap: None,
+            state: None,
+        }
+    }
+}
+
+impl KeyboardState {
+    fn translate(&self, code: u32) -> Option<(crate::Key, Modifiers)> {
+        let state = self.state.as_ref()?;
+        let keycode = xkb::Keycode::new(code.checked_add(8)?);
+        let mods = Modifiers {
+            ctrl: state.mod_name_is_active(xkb::MOD_NAME_CTRL, xkb::STATE_MODS_EFFECTIVE),
+            alt: state.mod_name_is_active(xkb::MOD_NAME_ALT, xkb::STATE_MODS_EFFECTIVE),
+            shift: state.mod_name_is_active(xkb::MOD_NAME_SHIFT, xkb::STATE_MODS_EFFECTIVE),
+            super_key: state.mod_name_is_active(xkb::MOD_NAME_LOGO, xkb::STATE_MODS_EFFECTIVE),
+        };
+        // Keep navigation and multimedia key identity, but never use the US
+        // scancode text table when a compositor keymap is available.
+        let raw = semantic_key(code, false);
+        let key = match raw {
+            crate::Key::Text(_) | crate::Key::Raw(_) | crate::Key::Space => {
+                let sym = state.key_get_one_sym(keycode);
+                let ch = char::from_u32(xkb::keysym_to_utf32(sym));
+                let text = if mods.ctrl || mods.alt || mods.super_key {
+                    ch.map(|c| c.to_string()).unwrap_or_default()
+                } else {
+                    state.key_get_utf8(keycode)
+                };
+                if text == " " {
+                    crate::Key::Space
+                } else if !text.is_empty() && !text.chars().any(char::is_control) {
+                    crate::Key::Text(text)
+                } else {
+                    crate::Key::Raw(code)
+                }
+            }
+            other => other,
+        };
+        Some((key, mods))
     }
 }
 
@@ -99,6 +177,7 @@ struct BackendState {
     touch_surfaces: HashMap<i32, SurfaceId>,
     active_touches: BTreeSet<i32>,
     modifier_keys: BTreeSet<u32>,
+    xkb: KeyboardState,
     foreign_toplevel: ForeignToplevelStore,
     workspace: WorkspaceStore,
 }
@@ -1272,6 +1351,8 @@ impl Dispatch<wl_seat::WlSeat, ()> for BackendState {
                 }
                 state.keyboard_surface = None;
                 state.modifier_keys.clear();
+                state.xkb.state = None;
+                state.xkb.keymap = None;
             }
 
             if has_touch && state.touch.is_none() {
@@ -1412,8 +1493,45 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for BackendState {
         _qh: &QueueHandle<Self>,
     ) {
         match event {
-            wl_keyboard::Event::Enter { surface, .. } => {
+            wl_keyboard::Event::Keymap { format, fd, size } => {
+                // Replacing a keymap must invalidate the old state even if the
+                // compositor supplies an unsupported or malformed replacement.
+                state.xkb.state = None;
+                state.xkb.keymap = None;
+                if format == WEnum::Value(wl_keyboard::KeymapFormat::XkbV1)
+                    && size > 0
+                    && size <= 16 * 1024 * 1024
+                {
+                    // SAFETY: Wayland supplies an owned, valid fd and a length;
+                    // the mapping is read-only and the loader consumes the fd.
+                    if let Ok(Some(keymap)) = unsafe {
+                        xkb::Keymap::new_from_fd(
+                            &state.xkb.context,
+                            fd,
+                            size as usize,
+                            xkb::KEYMAP_FORMAT_TEXT_V1,
+                            xkb::KEYMAP_COMPILE_NO_FLAGS,
+                        )
+                    } {
+                        state.xkb.state = Some(xkb::State::new(&keymap));
+                        state.xkb.keymap = Some(keymap);
+                    }
+                }
+            }
+            wl_keyboard::Event::Modifiers {
+                mods_depressed,
+                mods_latched,
+                mods_locked,
+                group,
+                ..
+            } => {
+                if let Some(xkb_state) = state.xkb.state.as_mut() {
+                    xkb_state.update_mask(mods_depressed, mods_latched, mods_locked, 0, 0, group);
+                }
+            }
+            wl_keyboard::Event::Enter { surface, keys, .. } => {
                 state.keyboard_surface = find_surface(state, &surface);
+                state.modifier_keys = modifier_keys_from_enter(&keys);
             }
             wl_keyboard::Event::Leave { .. } => {
                 state.keyboard_surface = None;
@@ -1429,8 +1547,10 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for BackendState {
                 };
                 let pressed = matches!(key_state, wl_keyboard::KeyState::Pressed);
                 update_modifier_key(&mut state.modifier_keys, key, pressed);
-                let modifiers = modifiers_from_keys(&state.modifier_keys);
-                let semantic = semantic_key(key, modifiers.shift);
+                let (semantic, modifiers) = state.xkb.translate(key).unwrap_or_else(|| {
+                    let modifiers = modifiers_from_keys(&state.modifier_keys);
+                    (semantic_key(key, modifiers.shift), modifiers)
+                });
                 let semantic = if modifiers.is_empty() {
                     semantic
                 } else {
@@ -1613,6 +1733,46 @@ mod tests {
     use super::*;
 
     #[test]
+    fn xkb_layout_follows_compositor_qwertz_and_qwerty() {
+        let de = test_keyboard_layout("de");
+        let us = test_keyboard_layout("us");
+        assert_eq!(de.translate(21).unwrap().0, crate::Key::Text("z".into()));
+        assert_eq!(de.translate(44).unwrap().0, crate::Key::Text("y".into()));
+        assert_eq!(us.translate(21).unwrap().0, crate::Key::Text("y".into()));
+        assert_eq!(us.translate(44).unwrap().0, crate::Key::Text("z".into()));
+    }
+
+    #[test]
+    fn xkb_shifted_german_punctuation_and_modifiers() {
+        let mut de = test_keyboard_layout("de");
+        let shift_index = de
+            .keymap
+            .as_ref()
+            .unwrap()
+            .mod_get_index(xkb::MOD_NAME_SHIFT);
+        assert_ne!(shift_index, xkb::MOD_INVALID);
+        de.state
+            .as_mut()
+            .unwrap()
+            .update_mask(1 << shift_index, 0, 0, 0, 0, 0);
+        let (key, modifiers) = de.translate(3).unwrap();
+        assert_eq!(key, crate::Key::Text("\"".into()));
+        assert!(modifiers.shift);
+        assert_eq!(de.translate(21).unwrap().0, crate::Key::Text("Z".into()));
+        let mut us = test_keyboard_layout("us");
+        let shift_index = us
+            .keymap
+            .as_ref()
+            .unwrap()
+            .mod_get_index(xkb::MOD_NAME_SHIFT);
+        us.state
+            .as_mut()
+            .unwrap()
+            .update_mask(1 << shift_index, 0, 0, 0, 0, 0);
+        assert_eq!(us.translate(3).unwrap().0, crate::Key::Text("@".into()));
+    }
+
+    #[test]
     fn modifier_tracking_handles_both_sides_without_stuck_state() {
         let mut keys = BTreeSet::new();
         update_modifier_key(&mut keys, 29, true);
@@ -1643,6 +1803,25 @@ mod tests {
 
         update_modifier_key(&mut keys, 30, true);
         assert!(keys.is_empty());
+    }
+
+    #[test]
+    fn keyboard_enter_restores_already_pressed_modifiers() {
+        let bytes = [29_u32, 42, 125, 30]
+            .into_iter()
+            .flat_map(u32::to_ne_bytes)
+            .collect::<Vec<_>>();
+        let keys = modifier_keys_from_enter(&bytes);
+        assert_eq!(
+            modifiers_from_keys(&keys),
+            Modifiers {
+                ctrl: true,
+                alt: false,
+                shift: true,
+                super_key: true,
+            }
+        );
+        assert!(!keys.contains(&30));
     }
 
     #[test]
