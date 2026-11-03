@@ -1,7 +1,7 @@
 //! Deterministic, opt-in migration of *supported* NuraLoumi shell config versions.
 //! No startup integration and no runtime command execution. The accepted migration
 //! is the real legacy v0 (missing/zero version) to current v1 schema.
-use nuraloumi_shell::ShellConfig;
+use crate::ShellConfig;
 use serde::Serialize;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};

@@ -6,6 +6,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+cairo-rs = { version = "0.20", default-features = false, features = ["png"] }
 nuraloumi-core = { path = "../nuraloumi-core" }
 nuraloumi-render-cairo = { path = "../nuraloumi-render-cairo" }
 nuraloumi-wayland = { path = "../nuraloumi-wayland" }
@@ -77,3 +78,20 @@ path = "src/bin/files.rs"
 [[bin]]
 name = "nuraloumi-windows"
 path = "src/bin/windows.rs"
+
+
+[[bin]]
+name = "nuraloumi-config"
+path = "src/bin/config.rs"
+
+[[bin]]
+name = "nuraloumi-maps"
+path = "src/bin/maps.rs"
+
+[[bin]]
+name = "nuraloumi-feeds"
+path = "src/bin/feeds.rs"
+
+[[bin]]
+name = "nuraloumi-timer"
+path = "src/bin/timer.rs"

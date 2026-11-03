@@ -6,6 +6,8 @@
 //! provider dispatch. No system command is constructed or executed by core or
 //! renderer code.
 
+pub mod config_migration;
+pub mod maps;
 pub use nuraloumi_core::{
     Confirmation, MenuAction, MenuItem, MenuItemKind, MenuModel, MenuState, NavigationOutcome,
     SemanticInput,
@@ -15,9 +17,9 @@ mod config;
 pub mod glyphs;
 pub use glyphs::{default_glyph_resolver, GlyphStyle, GlyphTable};
 pub mod ipc;
+mod keybindings;
 pub mod surface_catalog;
 pub mod toast;
-mod keybindings;
 mod window_adapter;
 pub use config::{PanelConfig, ProviderConfig, QuickLaunchSlot, SurfaceConfig};
 pub use keybindings::{

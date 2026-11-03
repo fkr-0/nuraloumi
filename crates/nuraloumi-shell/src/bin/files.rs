@@ -607,12 +607,11 @@ mod tests {
     #[test]
     fn capabilities_default_safe() {
         assert!(
-            parse(vec!["--live".into()])
+            !parse(vec!["--live".into()])
                 .unwrap()
                 .unwrap()
                 .capabilities
                 .delete
-                == false
         );
         assert!(parse(vec!["--open-with".into(), "../../malicious.desktop".into()]).is_err());
     }

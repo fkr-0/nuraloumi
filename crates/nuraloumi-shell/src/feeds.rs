@@ -1,9 +1,7 @@
 //! Offline feed view-model. No network or command execution while painting.
 //! This temporary source import is replaced by nuraloumi_providers::feeds
 //! when the integration lane publishes its module export.
-#[allow(dead_code)] // Temporary accepted provider source seam until shared export lands.
-#[path = "../../nuraloumi-providers/src/feeds.rs"]
-pub mod provider;
+pub use nuraloumi_providers::feeds as provider;
 
 use nuraloumi_core::{MenuAction, MenuItem, MenuModel, MenuState};
 use nuraloumi_providers::command::{CommandLimits, CommandRunner, CommandSpec};

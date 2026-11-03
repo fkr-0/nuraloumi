@@ -26,7 +26,8 @@ Development checkpoint toward 0.2 and 0.3; not SL101 release qualified.
 ### Qualification and remaining work
 
 - New feature source does not imply complete launcher/config/runtime integration.
-  Config, maps, feeds and timer registration and user-facing wiring require followup.
+  Config, maps, feeds and timer binaries are registered; broader launcher and IPC
+  runtime integration still require followup.
 - Host checks are recorded separately from release acceptance. ARMv7 qualification
   is blocked by the prepared sysroot missing libxkbcommon; physical SL101 input,
   software-rendered operation, memory and latency checks remain pending.

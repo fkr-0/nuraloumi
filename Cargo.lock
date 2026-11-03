@@ -156,6 +156,7 @@ dependencies = [
 name = "nuraloumi-shell"
 version = "0.0.4-dev.1"
 dependencies = [
+ "cairo-rs",
  "nuraloumi-core",
  "nuraloumi-providers",
  "nuraloumi-render-cairo",

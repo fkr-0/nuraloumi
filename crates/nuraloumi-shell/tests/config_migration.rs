@@ -1,10 +1,7 @@
 #[allow(dead_code)]
 #[path = "../src/bin/config.rs"]
 mod config_cli;
-#[path = "../src/config_migration.rs"]
-mod config_migration;
-
-use config_migration::*;
+use nuraloumi_shell::config_migration::*;
 use std::fs;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};

@@ -1,7 +1,6 @@
 //! Explicit opt-in configuration migration CLI. Register as nuraloumi-config
 //! in Cargo.toml through the shared integration lane, not this isolated lane.
-#[path = "../config_migration.rs"]
-mod config_migration;
+use nuraloumi_shell::config_migration;
 
 use config_migration::{plan, prepare_reload, read_bounded, write_explicit, WriteOutcome};
 use std::path::PathBuf;
