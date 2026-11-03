@@ -18,6 +18,7 @@ pub mod network;
 pub mod notifications;
 pub mod probe;
 pub mod processes;
+pub mod refresh;
 pub mod renderer;
 pub mod resources;
 pub mod session;
@@ -45,6 +46,7 @@ pub use notifications::{
 };
 pub use probe::ProbeSnapshot;
 pub use processes::{ProcessEntry, ProcessProvider, ProcessSnapshot};
+pub use refresh::{CachedProvider, RefreshPolicy, RefreshSnapshot};
 pub use resources::{
     CpuUsage, DiskIoStats, FilesystemStats, MemoryStats, NetworkIoStats, ResourceProcess,
     ResourceProvider, ResourceSnapshot, TemperatureReading,
