@@ -107,6 +107,12 @@ reconciled by its owning shell lane. Verify the **final Cargo target list**;
 an explicit `[[bin]]` alone may not suppress implicit autobin discovery
 without `autobins = false` or a filename adjustment.
 
-Package completeness, target-cross compile and hardware acceptance remain
-pending after this update. The reviewed qualification commit is
+Package completeness, target-cross compile and hardware acceptance remained
+pending at this historical checkpoint. The reviewed qualification commit was
 `59bef4769bfbe2a2630639bc33cccac2191a3144`.
+
+**Superseding 2026-11-03 gate:** `37040896` resolved the screenshot binary
+naming defect and `3ad0c59a` registered the toast binary; the former
+blockers above are historical. See [02-03-GATE-20261103.md](02-03-GATE-20261103.md)
+for refreshed implementation/reviewer/host/cross/device checklists and the
+current missing `libxkbcommon.so` cross-link dependency. No release qualified.

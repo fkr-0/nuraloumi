@@ -41,8 +41,12 @@ installing a compiler or headers on it. The generated sysroot stays under
 `apk fetch` only, extracting the tablet-matched `musl-dev`, `gcc`, and
 `libgcc-static` packages into the generated sysroot alongside the live loader,
 Cairo, Wayland and libgcc_s runtime libraries. It also stages the exact live
-FreeType, HarfBuzz and FriBidi DSOs used by the strict packaged-font renderer,
-including SONAME/unversioned linker aliases and target pkg-config metadata.
+XKBCommon, FreeType, HarfBuzz and FriBidi DSOs required by the current
+Wayland keyboard and strict packaged-font renderer. The unversioned
+libxkbcommon.so linker alias is essential for the XKB-enabled binaries;
+missing it fails local preflight before Cargo starts. These libraries retain
+SONAME/unversioned linker aliases and target pkg-config metadata for the
+font-shaping libraries.
 Dynamic PIEs therefore use musl's matching `Scrt1.o/crti.o/crtn.o` and GCC's
 `crtbeginS.o/crtendS.o/libgcc.a`.
 Do not substitute Rust's bundled musl CRT: on the SL101 that mix corrupted DSO TLS
@@ -63,6 +67,10 @@ dynamically links the shell against the tablet's Cairo ABI. The probe remains el
 the common build script deliberately uses the same dynamic musl policy for all
 three runtime binaries so one target ABI is qualified.
 
+The target build audits **every binary Cargo metadata declares for shipping**;
+a missing target or stale undeclared release executable fails the gate before
+reporting ELF PASS. The script checks the local sysroot only unless --prepare
+is explicitly provided; never use --prepare during a non-device qualification.
 The target build strips debug information only. ARM mapping symbols are retained
 because fully stripping symbols removes the metadata LLVM needs to distinguish
 ARM, Thumb and inline data; disassembling such a fully stripped image can
@@ -83,7 +91,8 @@ font fallback.
 
 ### Strict packaged-font live evidence
 
-The 2026-10-02 SL101 run from a freshly regenerated sysroot passed:
+A historical **2026-10-02** SL101 run from a freshly regenerated sysroot passed
+for a strict-font sample. This does not certify the later 0.2/0.3 binaries:
 
     ELF_FILE=PASS arm32=yes fp=VFPv3-D16 neon-attribute=no \
         neon-disassembly-heuristic=no upper-dregs=no hwdiv=no

@@ -25,8 +25,8 @@ while [ "$#" -gt 0 ]; do
             cat <<EOF
 Usage: scripts/build-sl101-armv7.sh [--prepare] [--ssh user@host]
 
-Builds nuraloumi-panel, nuraloumi-menu, nuraloumi-thumbnail-helper and
-nuraloumi-probe for the real SL101 musl ARMv7 ABI. --prepare refreshes the generated runtime sysroot from
+Builds all declared shipping Cargo binaries for the SL101 musl ARMv7 ABI.
+--prepare refreshes the generated runtime sysroot from
 the tablet first. Build output remains under target/ and is never committed.
 EOF
             exit 0
@@ -45,6 +45,7 @@ fi
 for required in \
     "$SYSROOT/lib/ld-musl-armhf.so.1" \
     "$SYSROOT/usr/lib/libcairo.so" \
+    "$SYSROOT/usr/lib/libxkbcommon.so" \
     "$SYSROOT/usr/lib/libgcc_s.so" \
     "$SYSROOT/usr/lib/libfreetype.so" \
     "$SYSROOT/usr/lib/libharfbuzz.so" \
@@ -101,19 +102,37 @@ RUSTFLAGS="$BASE_RUSTFLAGS --cfg nuraloumi_thumbnail_helper" \
         -p nuraloumi-wayland --bin nuraloumi-thumbnail-helper
 
 RELEASE="$TARGET_DIR/$TARGET/release"
-# Inspect every release executable (including newly added surfaces), not
-# just the original four. Separately run cargo xtask package/package-check
-# to prove the set matches Cargo metadata rather than stale artifacts.
+# Cargo metadata, not a glob or an old four-binary allowlist, defines the
+# shipping set. Missing binaries are hard failures even if stale ARM builds
+# leave other executables in the release directory.
+EXPECTED=$(python3 "$ROOT/scripts/package-binaries.py") || {
+    echo "SL101_CROSS_BUILD=FAIL reason=binary-target-discovery" >&2
+    exit 1
+}
 set --
-for path in "$RELEASE"/nuraloumi-*; do
-    if [ -f "$path" ] && [ -x "$path" ]; then
-        set -- "$@" "$path"
+for binary in $EXPECTED; do
+    path="$RELEASE/$binary"
+    if [ ! -f "$path" ] || [ ! -x "$path" ]; then
+        echo "SL101_CROSS_BUILD=FAIL reason=missing-declared-binary name=$binary" >&2
+        exit 1
     fi
+    set -- "$@" "$path"
 done
 if [ "$#" -lt 4 ]; then
-    echo "SL101_CROSS_BUILD=FAIL reason=too-few-release-binaries" >&2
+    echo "SL101_CROSS_BUILD=FAIL reason=missing-baseline-binaries" >&2
     exit 1
 fi
+# A stale undeclared executable must not be mistaken for a current package.
+for path in "$RELEASE"/nuraloumi-*; do
+    [ -f "$path" ] && [ -x "$path" ] || continue
+    case " $* " in
+        *" $path "*) ;;
+        *)
+            echo "SL101_CROSS_BUILD=FAIL reason=undeclared-release-binary name=${path##*/}" >&2
+            exit 1
+            ;;
+    esac
+done
 sh "$ROOT/scripts/inspect-armv7-elf.sh" "$@"
 
 for path in "$@"; do

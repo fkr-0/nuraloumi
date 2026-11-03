@@ -24,6 +24,7 @@ esac
 
 REMOTE_CAIRO=$(ssh_run "readlink -f /usr/lib/libcairo.so.2")
 REMOTE_WAYLAND=$(ssh_run "readlink -f /usr/lib/libwayland-client.so.0")
+REMOTE_XKB=$(ssh_run "readlink -f /usr/lib/libxkbcommon.so.0")
 REMOTE_GCC=$(ssh_run "readlink -f /lib/libgcc_s.so.1")
 REMOTE_FREETYPE=$(ssh_run "readlink -f /usr/lib/libfreetype.so.6")
 REMOTE_HARFBUZZ=$(ssh_run "readlink -f /usr/lib/libharfbuzz.so.0")
@@ -34,6 +35,7 @@ for remote in \
     "$REMOTE_LOADER" \
     "$REMOTE_CAIRO" \
     "$REMOTE_WAYLAND" \
+    "$REMOTE_XKB" \
     "$REMOTE_GCC" \
     "$REMOTE_FREETYPE" \
     "$REMOTE_HARFBUZZ" \
@@ -90,12 +92,14 @@ ssh_run "set -eu
 "$SCP" -q -o BatchMode=yes "$SSH_TARGET:$REMOTE_LOADER" "$STAGE/lib/ld-musl-armhf.so.1"
 CAIRO_BASE=${REMOTE_CAIRO##*/}
 WAYLAND_BASE=${REMOTE_WAYLAND##*/}
+XKB_BASE=${REMOTE_XKB##*/}
 GCC_RUNTIME_BASE=${REMOTE_GCC##*/}
 FREETYPE_BASE=${REMOTE_FREETYPE##*/}
 HARFBUZZ_BASE=${REMOTE_HARFBUZZ##*/}
 FRIBIDI_BASE=${REMOTE_FRIBIDI##*/}
 "$SCP" -q -o BatchMode=yes "$SSH_TARGET:$REMOTE_CAIRO" "$STAGE/usr/lib/$CAIRO_BASE"
 "$SCP" -q -o BatchMode=yes "$SSH_TARGET:$REMOTE_WAYLAND" "$STAGE/usr/lib/$WAYLAND_BASE"
+"$SCP" -q -o BatchMode=yes "$SSH_TARGET:$REMOTE_XKB" "$STAGE/usr/lib/$XKB_BASE"
 "$SCP" -q -o BatchMode=yes "$SSH_TARGET:$REMOTE_GCC" "$STAGE/usr/lib/$GCC_RUNTIME_BASE"
 "$SCP" -q -o BatchMode=yes "$SSH_TARGET:$REMOTE_FREETYPE" "$STAGE/usr/lib/$FREETYPE_BASE"
 "$SCP" -q -o BatchMode=yes "$SSH_TARGET:$REMOTE_HARFBUZZ" "$STAGE/usr/lib/$HARFBUZZ_BASE"
@@ -113,6 +117,8 @@ link_alias "$CAIRO_BASE" libcairo.so.2
 link_alias libcairo.so.2 libcairo.so
 link_alias "$WAYLAND_BASE" libwayland-client.so.0
 link_alias libwayland-client.so.0 libwayland-client.so
+link_alias "$XKB_BASE" libxkbcommon.so.0
+link_alias libxkbcommon.so.0 libxkbcommon.so
 link_alias "$GCC_RUNTIME_BASE" libgcc_s.so.1
 link_alias "$FREETYPE_BASE" libfreetype.so.6
 link_alias libfreetype.so.6 libfreetype.so
@@ -146,6 +152,7 @@ for required in \
     "$GCCDIR/crtendS.o" \
     "$GCCDIR/libgcc.a" \
     "$STAGE/usr/lib/libgcc_s.so" \
+    "$STAGE/usr/lib/libxkbcommon.so" \
     "$STAGE/usr/lib/libfreetype.so" \
     "$STAGE/usr/lib/libharfbuzz.so" \
     "$STAGE/usr/lib/libfribidi.so"; do
@@ -242,6 +249,7 @@ TOOLCHAIN_APKS=$(ssh_run "cd '$REMOTE_STAGE/apks' && printf '%s ' *.apk")
         "$GCC_REL/libgcc.a" \
         "usr/lib/$CAIRO_BASE" \
         "usr/lib/$WAYLAND_BASE" \
+        "usr/lib/$XKB_BASE" \
         "usr/lib/$GCC_RUNTIME_BASE" \
         "usr/lib/$FREETYPE_BASE" \
         "usr/lib/$HARFBUZZ_BASE" \
