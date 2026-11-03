@@ -189,7 +189,11 @@ pub struct IpcRuntime {
 }
 
 impl IpcRuntime {
-    pub fn start(socket: &Path, initial: Vec<SurfaceObservation>) -> Result<Self, String> {
+    pub fn start(
+        socket: &Path,
+        initial: Vec<SurfaceObservation>,
+        toast_program: std::path::PathBuf,
+    ) -> Result<Self, String> {
         use std::sync::{atomic::AtomicBool, Arc, Mutex};
 
         let mut server = crate::ipc::IpcServer::bind(socket)
@@ -202,20 +206,67 @@ impl IpcRuntime {
             .name("nuraloumi-ipc".to_owned())
             .spawn(move || {
                 let started = std::time::Instant::now();
+                let mut toast_child: Option<std::process::Child> = None;
                 while !stop_worker.load(std::sync::atomic::Ordering::Relaxed) {
+                    // Reap the one-shot child without ever waiting on the Wayland
+                    // thread. Do not accumulate overlapping toast processes.
+                    if toast_child
+                        .as_mut()
+                        .is_some_and(|child| child.try_wait().map_or(true, |exit| exit.is_some()))
+                    {
+                        toast_child.take();
+                    }
                     if let Ok(Some(request)) = server.accept_one() {
                         let current = observations_worker
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
                             .clone();
-                        let response = ipc_reply(&request, &current, started.elapsed());
+                        let response =
+                            if matches!(request.command, crate::ipc::IpcCommand::Notify(_)) {
+                                let available = toast_program
+                                    .parent()
+                                    .is_some_and(|dir| is_executable(dir, "nuraloumi-toast"))
+                                    && toast_program
+                                        .file_name()
+                                        .is_some_and(|name| name == "nuraloumi-toast");
+                                let busy = toast_child.is_some();
+                                notification_reply(
+                                    &request,
+                                    &current,
+                                    available,
+                                    busy,
+                                    |notification| {
+                                        use std::process::{Command, Stdio};
+                                        let child = Command::new(&toast_program)
+                                            .arg("--summary")
+                                            .arg(&notification.summary)
+                                            .arg("--body")
+                                            .arg(notification.body.as_deref().unwrap_or(""))
+                                            .arg("--app")
+                                            .arg(notification.app.as_deref().unwrap_or("NuraLoumi"))
+                                            .stdin(Stdio::null())
+                                            .stdout(Stdio::null())
+                                            .stderr(Stdio::null())
+                                            .spawn()
+                                            .map_err(|error| error.to_string())?;
+                                        toast_child = Some(child);
+                                        Ok(())
+                                    },
+                                )
+                            } else {
+                                ipc_reply(&request, &current, started.elapsed())
+                            };
                         // A disconnected, non-reading, or malformed client cannot
                         // stall the compositor loop: this is a separate worker.
                         let _ = server.respond(&response);
                     }
-                    // Bound processing to <= 50 requests/s per panel. This also
-                    // gives idle and malformed connections a finite CPU cost.
+                    // Existing bounded IPC worker cadence, not a notification
+                    // daemon or a new notification-history polling loop.
                     std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                if let Some(mut child) = toast_child {
+                    let _ = child.kill();
+                    let _ = child.wait();
                 }
                 let _ = server.cleanup();
             })
@@ -242,6 +293,70 @@ impl Drop for IpcRuntime {
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
+    }
+}
+
+/// Authoritative explicit incoming-notification request path. An installed
+/// standalone center has UNKNOWN open state, so it cannot be treated as closed.
+/// Only a known-closed center permits the one-shot child. The launcher callback
+/// is injected to fixture-test all branches without running an external program.
+fn notification_reply<F>(
+    request: &crate::ipc::IpcRequest,
+    surfaces: &[SurfaceObservation],
+    executable_available: bool,
+    busy: bool,
+    launch: F,
+) -> crate::ipc::IpcResponse
+where
+    F: FnOnce(&crate::ipc::Notify) -> Result<(), String>,
+{
+    use crate::ipc::{IpcCommand, IpcResponse};
+    let IpcCommand::Notify(notification) = &request.command else {
+        return IpcResponse::failure(&request.id, "invalid_request", "not a notify request");
+    };
+    if surfaces.iter().any(|entry| {
+        (entry.name == "notifications" || entry.name == "control-center")
+            && entry.open_state == SurfaceOpenState::Open
+    }) {
+        return IpcResponse::success(
+            &request.id,
+            serde_json::json!({
+                "accepted": false, "reason": "notification_center_open"
+            }),
+        );
+    }
+    if surfaces
+        .iter()
+        .any(|entry| entry.name == "notifications" && entry.open_state == SurfaceOpenState::Unknown)
+    {
+        return IpcResponse::failure(
+            &request.id,
+            "center_state_unknown",
+            "standalone notification center is installed but its open state is not observed",
+        );
+    }
+    if !executable_available {
+        return IpcResponse::failure(
+            &request.id,
+            "toast_unavailable",
+            "one-shot toast executable is not installed",
+        );
+    }
+    if busy {
+        return IpcResponse::failure(
+            &request.id,
+            "toast_busy",
+            "previous one-shot toast is still active",
+        );
+    }
+    match launch(notification) {
+        Ok(()) => IpcResponse::success(
+            &request.id,
+            serde_json::json!({
+                "accepted": true, "presentation": "one_shot_started_unverified"
+            }),
+        ),
+        Err(error) => IpcResponse::failure(&request.id, "toast_spawn_failed", error),
     }
 }
 
@@ -458,6 +573,68 @@ mod tests {
     }
 
     #[test]
+    fn explicit_notify_never_guesses_standalone_center_closed() {
+        use crate::ipc::{IpcCommand, IpcRequest, Notify};
+        use std::cell::Cell;
+        let dir = TestDir::new();
+        let request = IpcRequest {
+            id: "arrival-1".to_owned(),
+            command: IpcCommand::Notify(Notify {
+                summary: "Build passed".to_owned(),
+                body: Some("Fixture".to_owned()),
+                app: None,
+            }),
+        };
+        let launched = Cell::new(0);
+        let launch = |_: &crate::ipc::Notify| {
+            launched.set(launched.get() + 1);
+            Ok(())
+        };
+        let observations = SurfaceCatalog::discover(&dir.0, &[]).observe(None, None, 0, 51);
+        let response = notification_reply(&request, &observations, true, false, launch);
+        assert!(response.ok);
+        assert_eq!(response.result.unwrap()["accepted"], true);
+        assert_eq!(launched.get(), 1);
+
+        let closed = |_: &crate::ipc::Notify| -> Result<(), String> { panic!("must not spawn") };
+        let response = notification_reply(&request, &observations, false, false, closed);
+        assert_eq!(response.error.unwrap().code, "toast_unavailable");
+        let response = notification_reply(&request, &observations, true, true, closed);
+        assert_eq!(response.error.unwrap().code, "toast_busy");
+        let open =
+            SurfaceCatalog::discover(&dir.0, &[]).observe(Some("control-center"), None, 0, 51);
+        let response = notification_reply(&request, &open, true, false, closed);
+        assert_eq!(
+            response.result.unwrap()["reason"],
+            "notification_center_open"
+        );
+        dir.executable("nuraloumi-notifications", 0o755);
+        let unknown = SurfaceCatalog::discover(&dir.0, &[]).observe(None, None, 0, 51);
+        let response = notification_reply(&request, &unknown, true, false, closed);
+        assert_eq!(response.error.unwrap().code, "center_state_unknown");
+        assert_eq!(launched.get(), 1);
+    }
+
+    #[test]
+    fn explicit_notify_spawn_failure_is_not_reported_as_presented() {
+        use crate::ipc::{IpcCommand, IpcRequest, Notify};
+        let dir = TestDir::new();
+        let request = IpcRequest {
+            id: "fail".into(),
+            command: IpcCommand::Notify(Notify {
+                summary: "hi".into(),
+                body: None,
+                app: None,
+            }),
+        };
+        let rows = SurfaceCatalog::discover(&dir.0, &[]).observe(None, None, 0, 9);
+        let response = notification_reply(&request, &rows, true, false, |_| {
+            Err("fixture spawn error".into())
+        });
+        assert_eq!(response.error.unwrap().code, "toast_spawn_failed");
+    }
+
+    #[test]
     fn ipc_queries_report_only_observed_state_and_reject_mutations() {
         use crate::ipc::{Empty, IpcCommand, IpcRequest, SurfaceName};
         let dir = TestDir::new();
@@ -590,7 +767,7 @@ mod tests {
         let socket = dir.0.join("nuraloumi.sock");
         let catalog = SurfaceCatalog::discover(&dir.0, &[]);
         let initial = catalog.observe(None, None, 0, 512);
-        let runtime = IpcRuntime::start(&socket, initial).unwrap();
+        let runtime = IpcRuntime::start(&socket, initial, dir.0.join("nuraloumi-toast")).unwrap();
 
         let ping = ipc::request(
             &socket,
@@ -615,7 +792,7 @@ mod tests {
         .unwrap();
         assert_eq!(response.result.unwrap()["selected_item"], "volume");
 
-        assert!(IpcRuntime::start(&socket, Vec::new()).is_err());
+        assert!(IpcRuntime::start(&socket, Vec::new(), dir.0.join("nuraloumi-toast")).is_err());
         drop(runtime);
         assert!(!socket.exists());
     }

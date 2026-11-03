@@ -51,6 +51,10 @@ name = "nuraloumi-screenshot"
 path = "src/bin/screenshot.rs"
 
 [[bin]]
+name = "nuraloumi-toast"
+path = "src/bin/toast.rs"
+
+[[bin]]
 name = "nuraloumi-calendar"
 path = "src/bin/calendar.rs"
 

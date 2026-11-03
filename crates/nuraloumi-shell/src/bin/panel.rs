@@ -413,10 +413,10 @@ fn run_live(
         )?);
     }
 
-    // The panel is the sole IPC owner. The worker observes bounded, immutable
-    // state; it never executes commands or operates Wayland from its thread.
-    // Only reviewed 0.2 surface binaries may be supplied as ReleasedBinary
-    // registrations. None have been integrated into this panel yet.
+    // The panel is the sole IPC owner. Its worker observes bounded immutable
+    // state, never touches Wayland, and can launch only a verified sibling
+    // one-shot toast in response to an explicit incoming IPC notify request.
+    // Unobserved standalone notification-center state suppresses that launch.
     let binary =
         env::current_exe().map_err(|error| format!("cannot locate panel executable: {error}"))?;
     let binary_dir = binary
@@ -426,6 +426,7 @@ fn run_live(
     let ipc_runtime = IpcRuntime::start(
         &nuraloumi_shell::ipc::default_socket_path(),
         live_surface_observations(&surface_catalog, active_menu.as_ref()),
+        binary_dir.join("nuraloumi-toast"),
     )?;
 
     loop {
