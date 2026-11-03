@@ -47,3 +47,6 @@ See 02-PACKAGE-PERFORMANCE.md for metadata-derived binary completeness,
 package integrity verification and bounded read-only RSS/CPU sampling.
 See SL101-DEPLOYMENT.md for copy-only target deployment and
 EVIDENCE-TEMPLATE.md for target recording.
+
+See 02-INTEGRATION-REVIEW-20261103.md for the committed lane inventory,
+latest cross-lane checks, release blockers and independent-review status.

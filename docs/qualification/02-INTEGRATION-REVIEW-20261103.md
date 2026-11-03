@@ -92,3 +92,21 @@ When changing trial versions on a future authorized device run, retain the
 known-good stage and only terminate **recorded trial PIDs**, verifying PID
 start time before escalation; never kill all NuraLoumi processes or replace
 labwc/pixman recovery. Never claim a release from host results.
+
+## Later same-day integration update (after qualification commit)
+
+After the screenshot lane advanced, a **direct** rerun of
+`cargo test --locked --workspace` returned exit code **0** across the
+workspace, including screenshot fixtures; strict workspace Clippy again
+returned exit code **0**. Therefore the screenshot unit failure above is a
+**historical, resolved point-in-time observation**, not a current blocker.
+The package binary naming problem **remains reproducible**:
+`python3 scripts/package-binaries.py` exits 2 with
+`invalid binary name: 'screenshot'`. The runtime Cargo metadata must be
+reconciled by its owning shell lane. Verify the **final Cargo target list**;
+an explicit `[[bin]]` alone may not suppress implicit autobin discovery
+without `autobins = false` or a filename adjustment.
+
+Package completeness, target-cross compile and hardware acceptance remain
+pending after this update. The reviewed qualification commit is
+`59bef4769bfbe2a2630639bc33cccac2191a3144`.
