@@ -395,11 +395,158 @@ impl Drop for IpcServer {
     }
 }
 
-/// Client-side single round-trip. Bounded read and write time.
+// Linux AF_UNIX connect can block if the listener backlog is full. Create the
+// socket nonblocking *before* connect, then poll all I/O against one deadline.
+// No additional Rust dependency or thread that could outlive a timed-out call.
+mod client_socket {
+    use super::*;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::ffi::OsStrExt;
+
+    const AF_UNIX: i32 = 1;
+    const SOCK_STREAM: i32 = 1;
+    const SOCK_NONBLOCK: i32 = 0x800;
+    const SOCK_CLOEXEC: i32 = 0x80000;
+    const EINTR: i32 = 4;
+    const EAGAIN: i32 = 11;
+    const EINPROGRESS: i32 = 115;
+    const SOL_SOCKET: i32 = 1;
+    const SO_ERROR: i32 = 4;
+    pub const READ: i16 = 0x001;
+    pub const WRITE: i16 = 0x004;
+
+    #[repr(C)]
+    struct SockAddrUn {
+        family: u16,
+        path: [std::ffi::c_char; 108],
+    }
+
+    #[repr(C)]
+    struct PollFd {
+        fd: i32,
+        events: i16,
+        revents: i16,
+    }
+
+    unsafe extern "C" {
+        fn socket(domain: i32, kind: i32, protocol: i32) -> i32;
+        fn connect(fd: i32, addr: *const SockAddrUn, len: u32) -> i32;
+        fn poll(fds: *mut PollFd, nfds: usize, timeout: i32) -> i32;
+        fn getsockopt(fd: i32, level: i32, name: i32, value: *mut i32, len: *mut u32) -> i32;
+    }
+
+    pub fn wait(stream: &UnixStream, events: i16, deadline: Instant) -> io::Result<()> {
+        wait_fd(stream.as_raw_fd(), events, deadline)
+    }
+
+    fn wait_fd(fd: i32, events: i16, deadline: Instant) -> io::Result<()> {
+        loop {
+            let left = remaining(deadline)?;
+            // poll's timeout is in whole milliseconds; round up and re-check
+            // Instant on return, even if the descriptor is continuously ready.
+            let ms = left.as_millis().saturating_add(1).min(i32::MAX as u128) as i32;
+            let mut pfd = PollFd {
+                fd,
+                events,
+                revents: 0,
+            };
+            // SAFETY: pfd is initialized and lives for the whole poll call.
+            let result = unsafe { poll(&mut pfd, 1, ms) };
+            match result {
+                n if n > 0 => return remaining(deadline).map(|_| ()),
+                0 => continue,
+                _ if io::Error::last_os_error().raw_os_error() == Some(EINTR) => continue,
+                _ => return Err(io::Error::last_os_error()),
+            }
+        }
+    }
+
+    pub fn connect_until(path: &Path, deadline: Instant) -> io::Result<UnixStream> {
+        let name = path.as_os_str().as_bytes();
+        if name.is_empty() || name.len() >= 108 || name.contains(&0) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid IPC socket path",
+            ));
+        }
+        remaining(deadline)?;
+        // SOCK_NONBLOCK|SOCK_CLOEXEC are Linux flags on both ARMv7 and x86_64.
+        // SAFETY: a new AF_UNIX socket is owned by the resulting OwnedFd.
+        let raw = unsafe { socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0) };
+        if raw < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: raw was returned as an owned descriptor by socket above.
+        let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+        let mut addr = SockAddrUn {
+            family: AF_UNIX as u16,
+            path: [0; 108],
+        };
+        for (slot, byte) in addr.path.iter_mut().zip(name) {
+            *slot = *byte as std::ffi::c_char;
+        }
+        let addr_len = (std::mem::size_of::<u16>() + name.len() + 1) as u32;
+        loop {
+            remaining(deadline)?;
+            // SAFETY: addr is a valid pathname sockaddr_un, including its NUL.
+            let result = unsafe { connect(fd.as_raw_fd(), &addr, addr_len) };
+            if result == 0 {
+                return Ok(fd.into());
+            }
+            let err = io::Error::last_os_error();
+            match err.raw_os_error() {
+                Some(EAGAIN) => {
+                    // Linux can report EAGAIN if the Unix listener backlog is
+                    // full. Poll, then use a tiny capped backoff if the socket
+                    // stays writable but the server queue cannot accept us.
+                    wait_fd(fd.as_raw_fd(), WRITE, deadline)?;
+                    std::thread::sleep(remaining(deadline)?.min(Duration::from_millis(2)));
+                }
+                Some(EINTR) | Some(EINPROGRESS) => {
+                    wait_fd(fd.as_raw_fd(), WRITE, deadline)?;
+                    let mut socket_error = 0i32;
+                    let mut len = std::mem::size_of::<i32>() as u32;
+                    // SAFETY: the output pointer and its length are valid.
+                    if unsafe {
+                        getsockopt(
+                            fd.as_raw_fd(),
+                            SOL_SOCKET,
+                            SO_ERROR,
+                            &mut socket_error,
+                            &mut len,
+                        )
+                    } < 0
+                    {
+                        return Err(io::Error::last_os_error());
+                    }
+                    if socket_error != 0 {
+                        return Err(io::Error::from_raw_os_error(socket_error));
+                    }
+                    return remaining(deadline).map(|_| fd.into());
+                }
+                _ => return Err(err),
+            }
+        }
+    }
+}
+
+fn deadline_expired() -> io::Error {
+    io::Error::new(io::ErrorKind::TimedOut, "IPC roundtrip deadline exceeded")
+}
+
+fn remaining(deadline: Instant) -> io::Result<Duration> {
+    let left = deadline.saturating_duration_since(Instant::now());
+    if left.is_zero() {
+        Err(deadline_expired())
+    } else {
+        Ok(left)
+    }
+}
+
+/// Client-side single round-trip. A monotonic deadline covers connect,
+/// request writes, response reads, decoding and response-id validation.
 pub fn request(path: &Path, req: &IpcRequest) -> io::Result<IpcResponse> {
-    let mut stream = UnixStream::connect(path)?;
-    stream.set_read_timeout(Some(REQUEST_TIMEOUT))?;
-    stream.set_write_timeout(Some(REQUEST_TIMEOUT))?;
+    let deadline = Instant::now() + REQUEST_TIMEOUT;
     let mut bytes = serde_json::to_vec(req)?;
     if bytes.len() > MAX_REQUEST_BYTES {
         return Err(io::Error::new(
@@ -408,29 +555,59 @@ pub fn request(path: &Path, req: &IpcRequest) -> io::Result<IpcResponse> {
         ));
     }
     bytes.push(b'\n');
-    stream.write_all(&bytes)?;
+    let mut stream = client_socket::connect_until(path, deadline)?;
+    let mut pending = bytes.as_slice();
+    while !pending.is_empty() {
+        remaining(deadline)?;
+        match stream.write(pending) {
+            Ok(0) => return Err(io::Error::from(io::ErrorKind::WriteZero)),
+            Ok(n) => pending = &pending[n..],
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                client_socket::wait(&stream, client_socket::WRITE, deadline)?;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
     let mut response = Vec::new();
-    let mut byte = [0];
+    let mut chunk = [0u8; 1024];
     loop {
-        match stream.read(&mut byte)? {
-            0 => {
+        remaining(deadline)?;
+        match stream.read(&mut chunk) {
+            Ok(0) => {
                 return Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
                     "no complete response",
                 ))
             }
-            _ if byte[0] == b'\n' => break,
-            _ => {
-                if response.len() >= 65536 {
+            Ok(n) => {
+                if let Some(end) = chunk[..n].iter().position(|&b| b == b'\n') {
+                    if response.len() + end > 65536 {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "response too large",
+                        ));
+                    }
+                    response.extend_from_slice(&chunk[..end]);
+                    break;
+                }
+                if response.len() + n > 65536 {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         "response too large",
                     ));
                 }
-                response.push(byte[0]);
+                response.extend_from_slice(&chunk[..n]);
             }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                client_socket::wait(&stream, client_socket::READ, deadline)?;
+            }
+            Err(e) => return Err(e),
         }
     }
+    remaining(deadline)?;
     let parsed: IpcResponse = serde_json::from_slice(&response)?;
     if parsed.id != req.id {
         return Err(io::Error::new(
@@ -438,6 +615,7 @@ pub fn request(path: &Path, req: &IpcRequest) -> io::Result<IpcResponse> {
             "response id mismatch",
         ));
     }
+    remaining(deadline)?;
     Ok(parsed)
 }
 
@@ -649,6 +827,123 @@ mod tests {
         assert!(path.exists());
         drop(replacement);
         fs::remove_file(&path).unwrap();
+    }
+
+    // Each test owns a unique local socket; panics and early returns unlink it.
+    struct TestSocket(PathBuf);
+    impl Drop for TestSocket {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
+
+    #[test]
+    fn slow_trickle_cannot_extend_client_roundtrip_deadline() {
+        let socket = TestSocket(std::env::temp_dir().join(format!(
+            "nuraloumi-deadline-{}-{:?}.sock",
+            std::process::id(),
+            std::thread::current().id()
+        )));
+        let listener = UnixListener::bind(&socket.0).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let server = std::thread::spawn(move || {
+            let started = Instant::now();
+            let mut peer = loop {
+                match listener.accept() {
+                    Ok((peer, _)) => break peer,
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        assert!(
+                            started.elapsed() < Duration::from_secs(2),
+                            "no client connected"
+                        );
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(e) => panic!("accept failed: {e}"),
+                }
+            };
+            peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            let mut request_bytes = Vec::new();
+            let mut buf = [0u8; 256];
+            while !request_bytes.contains(&b'\n') {
+                let n = peer.read(&mut buf).unwrap();
+                assert!(n > 0, "client closed before sending request");
+                request_bytes.extend_from_slice(&buf[..n]);
+                assert!(request_bytes.len() <= MAX_REQUEST_BYTES + 1);
+            }
+            assert_eq!(
+                parse_request(request_bytes.split(|b| *b == b'\n').next().unwrap())
+                    .unwrap()
+                    .id,
+                "slow"
+            );
+
+            // The old per-read one-second timeout accepts this complete
+            // response after >1 second because each byte arrives <1 second
+            // after the previous one. The new overall deadline cannot.
+            for byte in b"{\"id\":\"slow\",\"ok\":true}\n" {
+                if peer.write_all(&[*byte]).is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(70));
+            }
+        });
+        let started = Instant::now();
+        let result = request(
+            &socket.0,
+            &IpcRequest {
+                id: "slow".into(),
+                command: IpcCommand::Ping(Empty {}),
+            },
+        );
+        let elapsed = started.elapsed();
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
+        assert!(
+            elapsed >= Duration::from_millis(800),
+            "premature timeout: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(1700),
+            "deadline slipped: {elapsed:?}"
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn client_rejects_mismatched_response_id() {
+        let socket = TestSocket(std::env::temp_dir().join(format!(
+            "nuraloumi-response-id-{}-{:?}.sock",
+            std::process::id(),
+            std::thread::current().id()
+        )));
+        let listener = UnixListener::bind(&socket.0).unwrap();
+        let server = std::thread::spawn(move || {
+            listener.set_nonblocking(true).unwrap();
+            let started = Instant::now();
+            let mut peer = loop {
+                match listener.accept() {
+                    Ok((peer, _)) => break peer,
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        assert!(started.elapsed() < Duration::from_secs(2));
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(e) => panic!("accept failed: {e}"),
+                }
+            };
+            peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            let mut chunk = [0u8; 128];
+            assert!(peer.read(&mut chunk).unwrap() > 0);
+            peer.write_all(b"{\"id\":\"wrong\",\"ok\":true}\n").unwrap();
+        });
+        let err = request(
+            &socket.0,
+            &IpcRequest {
+                id: "expected".into(),
+                command: IpcCommand::Ping(Empty {}),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        server.join().unwrap();
     }
 
     #[test]
