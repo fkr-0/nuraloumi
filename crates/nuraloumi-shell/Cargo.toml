@@ -20,3 +20,15 @@ path = "src/bin/menu.rs"
 [[bin]]
 name = "nuraloumi-panel"
 path = "src/bin/panel.rs"
+
+[[bin]]
+name = "nuraloumi-run"
+path = "src/bin/run.rs"
+
+[[bin]]
+name = "nuraloumi-files"
+path = "src/bin/files.rs"
+
+[[bin]]
+name = "nuraloumi-windows"
+path = "src/bin/windows.rs"
