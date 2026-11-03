@@ -11,8 +11,13 @@ pub use nuraloumi_core::{
     SemanticInput,
 };
 
+mod config;
+pub mod glyphs;
+pub use glyphs::{default_glyph_resolver, GlyphStyle, GlyphTable};
+pub mod ipc;
 mod keybindings;
 mod window_adapter;
+pub use config::{PanelConfig, ProviderConfig, QuickLaunchSlot, SurfaceConfig};
 pub use keybindings::{
     dispatch_keybinding, ActionSpec as KeybindingActionSpec, BindingOverride, BindingScope,
     BindingSource, BindingView, KeyStroke, KeybindingConfig, KeybindingDump, KeybindingRegistry,
@@ -68,9 +73,16 @@ impl Default for MenuDismissalConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ShellConfig {
+    #[serde(default)]
+    pub config_version: u32,
+    pub surface: BTreeMap<String, SurfaceConfig>,
+    pub providers: ProviderConfig,
+    pub panel: PanelConfig,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, toml::Value>,
     pub panel_edge: PanelEdge,
     pub panel_height: u32,
     pub menu_width: u32,
@@ -200,7 +212,9 @@ pub fn render_menu_follow_selection(
     ),
     String,
 > {
-    render_menu_with_glyphs(renderer, menu, state, viewport, tokens, options, transition, None)
+    render_menu_with_glyphs(
+        renderer, menu, state, viewport, tokens, options, transition, None,
+    )
 }
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
@@ -224,7 +238,10 @@ pub fn render_menu_with_glyphs<'a>(
     let adapter = if let Some(resolver) = glyph_resolver {
         adapter.with_glyph_resolver(resolver)
     } else {
-        adapter
+        // The normal render path passes None: supply the shell's populated
+        // default table rather than silently rendering every row text-only.
+        let table = default_glyph_resolver();
+        adapter.with_glyph_resolver(move |id| table.resolve(id))
     };
     let interaction = nuraloumi_render_cairo::InteractionState {
         selected_id: state.selected_id.clone(),
@@ -244,6 +261,11 @@ pub fn render_menu_with_glyphs<'a>(
 impl Default for ShellConfig {
     fn default() -> Self {
         Self {
+            config_version: 1,
+            surface: BTreeMap::new(),
+            providers: ProviderConfig::default(),
+            panel: PanelConfig::default(),
+            extra: BTreeMap::new(),
             panel_edge: PanelEdge::Top,
             panel_height: 40,
             menu_width: 448,
@@ -308,6 +330,34 @@ pub fn successful_action_requests_dismiss(
 
 impl ShellConfig {
     pub fn validate(&self) -> Result<(), String> {
+        if self.config_version > 1 {
+            return Err(format!(
+                "unsupported config_version {}; expected 0 or 1",
+                self.config_version
+            ));
+        }
+        if self.panel.quick_launch.len() > 16 {
+            return Err("panel.quick_launch allows at most 16 slots".into());
+        }
+        for (index, slot) in self.panel.quick_launch.iter().enumerate() {
+            slot.validate()
+                .map_err(|e| format!("panel.quick_launch[{index}]: {e}"))?;
+        }
+        if self.providers.weather_cache_seconds == 0
+            || self.providers.resources.refresh_interval_ms == 0
+            || self.providers.resources.top_process_count == 0
+        {
+            return Err(
+                "provider refresh/cache intervals and top_process_count must be positive".into(),
+            );
+        }
+        for (name, section) in &self.surface {
+            if section.refresh_interval_ms == Some(0) {
+                return Err(format!(
+                    "surface.{name}.refresh_interval_ms must be positive"
+                ));
+            }
+        }
         if !(40..=72).contains(&self.panel_height) {
             return Err(format!(
                 "panel_height {} is invalid; expected 40..=72 logical px",
@@ -394,7 +444,15 @@ pub fn load_config(path: impl AsRef<Path>) -> Result<ShellConfig, String> {
     let text = fs::read_to_string(path)
         .map_err(|err| format!("failed to read config {}: {err}", path.display()))?;
     let config: ShellConfig = parse_by_extension(path, &text)?;
-    config.validate()?;
+    config
+        .validate()
+        .map_err(|err| format!("invalid config {}: {err}", path.display()))?;
+    for key in config.extra.keys() {
+        eprintln!(
+            "warning: {}: unknown top-level config key {key:?} (ignored)",
+            path.display()
+        );
+    }
     Ok(config)
 }
 
@@ -3014,6 +3072,40 @@ pub fn live_backend_status() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_render_path_paints_glyphs_and_custom_resolver_overrides() {
+        use nuraloumi_render_cairo::{CairoRenderer, PaintNode, RenderOptions, Viewport};
+
+        let menu = build_family(MenuFamily::Power, &FixtureSnapshot::default());
+        let state = MenuState::default();
+        let renderer = CairoRenderer::default();
+        let viewport = Viewport::new(480.0, 480.0, 1.0);
+        let tokens = &nuraloumi_core::DARK_THEME;
+        let options = RenderOptions::default();
+        let (scene, _) =
+            render_menu_follow_selection(&renderer, &menu, &state, viewport, tokens, options, None)
+                .expect("render with default glyphs");
+        assert!(scene.paint.iter().any(|node| matches!(
+            node, PaintNode::Text { text, .. } if text == "󰤄"
+        )));
+
+        let custom = |_id: &str| Some('★');
+        let (custom_scene, _) = render_menu_with_glyphs(
+            &renderer,
+            &menu,
+            &state,
+            viewport,
+            tokens,
+            options,
+            None,
+            Some(&custom),
+        )
+        .expect("render with custom glyphs");
+        assert!(custom_scene.paint.iter().any(|node| matches!(
+            node, PaintNode::Text { text, .. } if text == "★"
+        )));
+    }
 
     #[test]
     fn pending_renderer_confirmation_is_visible_and_cancelable() {
