@@ -7,7 +7,10 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::{Read, Write};
+use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::UnixStream;
 use std::path::Path;
 
 use crate::ipc::SurfaceOpenState;
@@ -182,9 +185,29 @@ fn is_executable(binary_dir: &Path, name: &str) -> bool {
 /// The panel publishes a tiny immutable observation after event processing.
 /// Keeping the socket off the render thread allows it to respond even when
 /// Wayland is idle and blocking_dispatch has no pending compositor events.
+/// A validated IPC request handoff, consumed only by the Wayland owner.
+/// A response is returned on the same IPC connection after the owner commits.
+pub struct OwnerReloadRequest {
+    pub id: String,
+    issued: std::time::Instant,
+    reply: std::sync::mpsc::Sender<crate::ipc::IpcResponse>,
+}
+
+impl OwnerReloadRequest {
+    pub fn expired(&self) -> bool {
+        self.issued.elapsed() >= std::time::Duration::from_millis(850)
+    }
+
+    pub fn respond(self, response: crate::ipc::IpcResponse) {
+        let _ = self.reply.send(response);
+    }
+}
+
 pub struct IpcRuntime {
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     observations: std::sync::Arc<std::sync::Mutex<Vec<SurfaceObservation>>>,
+    reload_requests: std::sync::mpsc::Receiver<OwnerReloadRequest>,
+    wake_reader: UnixStream,
     worker: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -200,6 +223,17 @@ impl IpcRuntime {
             .map_err(|error| format!("cannot bind panel IPC {}: {error}", socket.display()))?;
         let stop = Arc::new(AtomicBool::new(false));
         let observations = Arc::new(Mutex::new(initial));
+        // A readable pipe wakes the owner out of Wayland's idle wait without
+        // requiring a periodic compositor roundtrip or mutating Wayland here.
+        let (wake_reader, mut wake_writer) = UnixStream::pair()
+            .map_err(|error| format!("cannot create IPC owner wakeup: {error}"))?;
+        wake_reader
+            .set_nonblocking(true)
+            .map_err(|error| format!("cannot configure IPC owner wakeup: {error}"))?;
+        wake_writer
+            .set_nonblocking(true)
+            .map_err(|error| format!("cannot configure IPC worker wakeup: {error}"))?;
+        let (reload_sender, reload_requests) = std::sync::mpsc::channel();
         let stop_worker = Arc::clone(&stop);
         let observations_worker = Arc::clone(&observations);
         let worker = std::thread::Builder::new()
@@ -222,7 +256,34 @@ impl IpcRuntime {
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
                             .clone();
                         let response =
-                            if matches!(request.command, crate::ipc::IpcCommand::Notify(_)) {
+                            if matches!(request.command, crate::ipc::IpcCommand::ReloadConfig(_)) {
+                                let (reply, outcome) = std::sync::mpsc::channel();
+                                let handoff = OwnerReloadRequest {
+                                    id: request.id.clone(),
+                                    issued: std::time::Instant::now(),
+                                    reply,
+                                };
+                                let queued = reload_sender.send(handoff).is_ok();
+                                let signalled = queued
+                                    && match wake_writer.write_all(&[1]) {
+                                        Ok(()) => true,
+                                        // Full nonblocking wake pipe is already readable.
+                                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => true,
+                                        Err(_) => false,
+                                    };
+                                if !signalled {
+                                    crate::ipc::IpcResponse::failure(
+                                        &request.id, "reload_unavailable",
+                                        "Wayland owner is not available for reload",
+                                    )
+                                } else {
+                                    outcome.recv_timeout(std::time::Duration::from_millis(850))
+                                        .unwrap_or_else(|_| crate::ipc::IpcResponse::failure(
+                                            &request.id, "reload_timeout",
+                                            "Wayland owner did not complete reload within IPC budget",
+                                        ))
+                                }
+                            } else if matches!(request.command, crate::ipc::IpcCommand::Notify(_)) {
                                 let available = toast_program
                                     .parent()
                                     .is_some_and(|dir| is_executable(dir, "nuraloumi-toast"))
@@ -274,8 +335,32 @@ impl IpcRuntime {
         Ok(Self {
             stop,
             observations,
+            reload_requests,
+            wake_reader,
             worker: Some(worker),
         })
+    }
+
+    /// Pollable event descriptor for the Wayland-owner event wait.
+    pub fn wake_fd(&self) -> RawFd {
+        self.wake_reader.as_raw_fd()
+    }
+
+    pub fn clear_wakeup(&mut self) {
+        let mut bytes = [0u8; 64];
+        loop {
+            match self.wake_reader.read(&mut bytes) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => break,
+            }
+        }
+    }
+
+    pub fn take_reload(&self) -> Option<OwnerReloadRequest> {
+        self.reload_requests.try_recv().ok()
     }
 
     /// The UI thread only takes a short lock to replace a bounded snapshot.
@@ -410,8 +495,8 @@ fn ipc_reply(
         },
         IpcCommand::ReloadConfig(_) => IpcResponse::failure(
             id,
-            "restart_required",
-            "config is validated at startup; live reload is not implemented",
+            "reload_unavailable",
+            "reload-config must be handled by the Wayland owner",
         ),
         IpcCommand::Navigate(_) => IpcResponse::failure(
             id,
@@ -458,6 +543,46 @@ mod tests {
         fn drop(&mut self) {
             fs::remove_dir_all(&self.0).expect("remove only test-owned fixture directory");
         }
+    }
+
+    #[test]
+    fn reload_ipc_handoff_waits_for_owner_acknowledgement() {
+        use crate::ipc::{Empty, IpcCommand, IpcRequest};
+        let dir = TestDir::new();
+        let socket = dir.0.join("panel.sock");
+        let mut runtime = IpcRuntime::start(&socket, Vec::new(), dir.0.join("not-installed-toast"))
+            .expect("start isolated test IPC runtime");
+        let client = std::thread::spawn(move || {
+            crate::ipc::request(
+                &socket,
+                &IpcRequest {
+                    id: "reload-1".into(),
+                    command: IpcCommand::ReloadConfig(Empty {}),
+                },
+            )
+        });
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(650);
+        let pending = loop {
+            if let Some(pending) = runtime.take_reload() {
+                break pending;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no reload delivered to owner"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        assert_eq!(pending.id, "reload-1");
+        assert!(!pending.expired());
+        runtime.clear_wakeup();
+        pending.respond(crate::ipc::IpcResponse::success(
+            "reload-1",
+            serde_json::json!({"applied": true}),
+        ));
+        let response = client.join().expect("client thread").expect("IPC response");
+        assert!(response.ok);
+        assert_eq!(response.result.unwrap()["applied"], true);
     }
 
     #[test]
@@ -692,7 +817,7 @@ mod tests {
             &state,
             std::time::Duration::ZERO,
         );
-        assert_eq!(reload.error.unwrap().code, "restart_required");
+        assert_eq!(reload.error.unwrap().code, "reload_unavailable");
         let notify = ipc_reply(
             &request(IpcCommand::Notify(crate::ipc::Notify {
                 summary: "fixture only".into(),

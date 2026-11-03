@@ -10,6 +10,8 @@ use nuraloumi_render_cairo::{
     CairoRenderer, Color, HitRegion as RenderHitRegion, PaintNode, Point, Rect, RenderOptions,
     RowKind, Scene, ScrollWindow, TextStyle, Theme as RenderTheme, Viewport,
 };
+use nuraloumi_shell::config_reload::{prepare_from_file, PreparedConfigReload};
+use nuraloumi_shell::ipc::IpcResponse;
 use nuraloumi_shell::surface_catalog::{IpcRuntime, SurfaceCatalog, SurfaceObservation};
 use nuraloumi_shell::{
     apply_launcher_preferences, blank_press_requests_dismiss, build_family,
@@ -37,7 +39,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::env;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 
 const PANEL_MENU_GAP: u32 = 6;
@@ -288,8 +290,6 @@ fn run() -> Result<(), String> {
     } else {
         FixtureSnapshot::default()
     };
-    apply_launcher_preferences(&mut snapshot.applications, &config.launcher);
-
     if args.live {
         let initial_family = args.open.as_deref().map(parse_family).transpose()?;
         return run_live(
@@ -303,9 +303,12 @@ fn run() -> Result<(), String> {
                 enable_renderer_switch: args.enable_renderer_switch,
             },
             defer_live_provider_refresh,
+            args.config.clone(),
+            args.reduced_motion,
         );
     }
 
+    apply_launcher_preferences(&mut snapshot.applications, &config.launcher);
     run_headless(config, snapshot, args.open.as_deref())
 }
 
@@ -345,14 +348,214 @@ fn run_headless(
     Ok(())
 }
 
+// The Wayland queue is never driven from the IPC thread. poll(2) waits on
+// the compositor and a one-byte IPC owner wakeup without an idle timer.
+// dispatch_pending handles already buffered events before the descriptor wait.
+fn wait_for_panel_events(backend: &mut WaylandBackend, ipc: &IpcRuntime) -> Result<(), String> {
+    #[repr(C)]
+    struct PollFd {
+        fd: i32,
+        events: i16,
+        revents: i16,
+    }
+    unsafe extern "C" {
+        fn poll(fds: *mut PollFd, count: usize, timeout_ms: i32) -> i32;
+    }
+    const POLLIN: i16 = 0x0001;
+    const POLLERR: i16 = 0x0008;
+    const POLLHUP: i16 = 0x0010;
+    const POLLNVAL: i16 = 0x0020;
+
+    if backend.dispatch_pending().map_err(|e| e.to_string())? > 0 {
+        return Ok(());
+    }
+    backend.flush().map_err(|e| e.to_string())?;
+    let mut fds = [
+        PollFd {
+            fd: backend.poll_fd(),
+            events: POLLIN,
+            revents: 0,
+        },
+        PollFd {
+            fd: ipc.wake_fd(),
+            events: POLLIN,
+            revents: 0,
+        },
+    ];
+    loop {
+        // SAFETY: two initialized C-compatible pollfd values are valid for
+        // the duration of this synchronous call; neither FD is closed here.
+        let result = unsafe { poll(fds.as_mut_ptr(), fds.len(), -1) };
+        if result >= 0 {
+            break;
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(format!("Wayland/IPC event wait failed: {error}"));
+        }
+    }
+    if fds[0].revents & (POLLERR | POLLHUP | POLLNVAL) != 0 {
+        return Err("Wayland compositor connection became unavailable".into());
+    }
+    if fds[1].revents & (POLLERR | POLLHUP | POLLNVAL) != 0 {
+        return Err("IPC owner wake descriptor became unavailable".into());
+    }
+    if fds[0].revents & POLLIN != 0 {
+        backend
+            .roundtrip()
+            .map_err(|e| format!("Wayland dispatch failed: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Complete a reload on the Wayland owner. Menu refresh is staged on a clone
+/// before any authoritative state is swapped, preserving selection on errors.
+#[allow(clippy::too_many_arguments)]
+fn apply_live_config_reload(
+    request: &nuraloumi_shell::surface_catalog::OwnerReloadRequest,
+    config_path: Option<&Path>,
+    forced_reduced_motion: bool,
+    config: &mut ShellConfig,
+    keybindings: &mut KeybindingRegistry,
+    snapshot: &mut FixtureSnapshot,
+    base_applications: &[ShellApplicationEntry],
+    active_menu: &mut Option<LiveMenu>,
+    panel_scene: &mut Option<Scene>,
+    backend: &mut WaylandBackend,
+    panel_surface: SurfaceId,
+    renderer: &CairoRenderer,
+    panel_geometry: Option<(u32, u32, i32)>,
+) -> IpcResponse {
+    let id = &request.id;
+    let prepared = match prepare_from_file(config, config_path, forced_reduced_motion) {
+        Ok(plan) => plan,
+        Err(error) => return IpcResponse::failure(id, error.code, error.message),
+    };
+    if !prepared.changed {
+        return IpcResponse::success(
+            id,
+            serde_json::json!({
+                "applied": false, "changed": false, "restart_required": false,
+                "source_version": prepared.source_version, "diagnostics": prepared.diagnostics,
+            }),
+        );
+    }
+    let PreparedConfigReload {
+        config: next_config,
+        keybindings: next_keybindings,
+        diagnostics,
+        source_version,
+        ..
+    } = prepared;
+
+    let mut staged_apps = base_applications.to_vec();
+    apply_launcher_preferences(&mut staged_apps, &next_config.launcher);
+    let mut staged_snapshot = snapshot.clone();
+    staged_snapshot.applications = staged_apps.clone();
+
+    let staged_shell = if let Some(menu) = active_menu.as_ref() {
+        let mut shell = menu.shell.clone();
+        shell.reduced_motion = next_config.reduced_motion;
+        if let Err(message) = shell.refresh_family(menu.family, &staged_snapshot) {
+            return IpcResponse::failure(id, "apply_error", message);
+        }
+        Some(shell)
+    } else {
+        None
+    };
+
+    // Avoid applying a candidate whose caller already exhausted its bounded
+    // IPC deadline while parsing or staging on a slow device.
+    if request.expired() {
+        return IpcResponse::failure(id, "reload_timeout", "reload expired before commit");
+    }
+
+    let old_config = std::mem::replace(config, next_config);
+    let old_keybindings = std::mem::replace(keybindings, next_keybindings);
+    let old_apps = std::mem::replace(&mut snapshot.applications, staged_apps);
+    let old_panel_scene = panel_scene.take();
+    let (old_shell, old_menu_scene) = if let Some(menu) = active_menu.as_mut() {
+        let shell = std::mem::replace(
+            &mut menu.shell,
+            staged_shell.expect("active menu has staged shell"),
+        );
+        (Some(shell), menu.scene.take())
+    } else {
+        (None, None)
+    };
+
+    // No provider action or input event can interleave this owner-thread
+    // transaction. On an application/render error restore all in-memory state.
+    let redraw = (|| -> Result<(), String> {
+        if let Some(menu) = active_menu.as_mut() {
+            if let Some(geometry) = menu.geometry {
+                menu.scene = Some(render_menu_and_present(
+                    backend,
+                    menu.surface,
+                    renderer,
+                    &menu.shell,
+                    snapshot,
+                    config,
+                    (geometry, None),
+                )?);
+            }
+        }
+        if let Some(geometry) = panel_geometry {
+            let search = panel_search_view(active_menu.as_ref());
+            *panel_scene = Some(render_panel_and_present(
+                backend,
+                panel_surface,
+                renderer,
+                snapshot,
+                config,
+                &search,
+                geometry,
+            )?);
+        }
+        Ok(())
+    })();
+
+    if let Err(message) = redraw {
+        *config = old_config;
+        *keybindings = old_keybindings;
+        snapshot.applications = old_apps;
+        *panel_scene = old_panel_scene;
+        if let (Some(menu), Some(shell)) = (active_menu.as_mut(), old_shell) {
+            menu.shell = shell;
+            menu.scene = old_menu_scene;
+        }
+        return IpcResponse::failure(id, "apply_error", message);
+    }
+    if config.reduced_motion {
+        if let Some(menu) = active_menu.as_mut() {
+            menu.motion = None;
+        }
+    }
+    IpcResponse::success(
+        id,
+        serde_json::json!({
+            "applied": true, "changed": true, "restart_required": false,
+            "source_version": source_version, "diagnostics": diagnostics,
+        }),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn run_live(
     config: ShellConfig,
     mut snapshot: FixtureSnapshot,
-    keybindings: KeybindingRegistry,
+    mut keybindings: KeybindingRegistry,
     initial_family: Option<MenuFamily>,
     policy: LivePolicy,
     defer_live_provider_refresh: bool,
+    config_path: Option<PathBuf>,
+    forced_reduced_motion: bool,
 ) -> Result<(), String> {
+    let mut config = config;
+    // Keep the unmodified application inventory to make label/pin changes
+    // reversible (including removing a previously applied override).
+    let mut base_applications = snapshot.applications.clone();
+    apply_launcher_preferences(&mut snapshot.applications, &config.launcher);
     let mut backend =
         WaylandBackend::connect().map_err(|error| format!("Wayland connection failed: {error}"))?;
     let capabilities = backend.capabilities();
@@ -423,7 +626,7 @@ fn run_live(
         .parent()
         .ok_or_else(|| "panel executable has no containing directory".to_owned())?;
     let surface_catalog = SurfaceCatalog::discover(binary_dir, &[]);
-    let ipc_runtime = IpcRuntime::start(
+    let mut ipc_runtime = IpcRuntime::start(
         &nuraloumi_shell::ipc::default_socket_path(),
         live_surface_observations(&surface_catalog, active_menu.as_ref()),
         binary_dir.join("nuraloumi-toast"),
@@ -452,10 +655,42 @@ fn run_live(
             backend
                 .roundtrip()
                 .map_err(|error| format!("Wayland startup roundtrip failed: {error}"))?;
+        } else if panel_first_frame_presented {
+            // Idle dispatch is event-driven on both Wayland and IPC owner-wake
+            // descriptors. There is no periodic roundtrip/polling timer.
+            wait_for_panel_events(&mut backend, &ipc_runtime)?;
         } else {
             backend
                 .blocking_dispatch()
                 .map_err(|error| format!("Wayland dispatch failed: {error}"))?;
+        }
+        ipc_runtime.clear_wakeup();
+        while let Some(request) = ipc_runtime.take_reload() {
+            if request.expired() {
+                let response = IpcResponse::failure(
+                    &request.id,
+                    "reload_timeout",
+                    "owner received an expired reload request",
+                );
+                request.respond(response);
+                continue;
+            }
+            let response = apply_live_config_reload(
+                &request,
+                config_path.as_deref(),
+                forced_reduced_motion,
+                &mut config,
+                &mut keybindings,
+                &mut snapshot,
+                &base_applications,
+                &mut active_menu,
+                &mut panel_scene,
+                &mut backend,
+                panel_surface,
+                &renderer,
+                panel_geometry,
+            );
+            request.respond(response);
         }
         let toplevel_changed = backend.drain_toplevel_events().count() > 0;
         let workspace_changed = backend.drain_workspace_events().count() > 0;
@@ -1042,7 +1277,13 @@ fn run_live(
                 .join()
                 .map_err(|_| "initial live provider probe panicked".to_owned())?;
             refresh_probe_snapshot(&mut snapshot, &probe, policy.enable_renderer_switch);
-            apply_application_snapshot(&mut snapshot, applications, &config.launcher);
+            apply_application_snapshot(
+                &mut snapshot,
+                applications,
+                &nuraloumi_shell::LauncherPreferences::default(),
+            );
+            base_applications = snapshot.applications.clone();
+            apply_launcher_preferences(&mut snapshot.applications, &config.launcher);
             apply_process_snapshot(&mut snapshot, tasks);
             if policy.execute_provider_actions {
                 refresh_window_snapshot(&mut snapshot, &backend);

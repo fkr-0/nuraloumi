@@ -1,7 +1,8 @@
 # 0.3 configuration migration foundation
 
-This is a **host-tested, pure migration foundation**, not a claim that IPC
-live reload is wired or that the configuration CLI has an installed binary.
+This includes the **host-tested, opt-in migration foundation** and a
+bounded transactional live-reload path for the running panel. It does not
+claim a deployed SL101 binary or hardware-qualified Wayland reload.
 
 ## Version policy
 
@@ -38,25 +39,43 @@ fully exclude hostile concurrent writers; ordinary config editing should be
 serialized. The CLI accepts only explicit .toml/.json file paths and caps
 input size at 1 MiB.
 
-## Integration contract for lane 02
+## Transactional live reload (host-qualified)
 
-- `src/config_migration.rs::prepare_reload(path, contents)` is pure and
-  returns `ValidatedReload { config, diagnostics, source_version }`.
-- Runtime owns a **validate -> prepare -> apply** boundary: only after full
-  parsing and validation succeeds should it replace the runtime config
-  atomically at an input/render-safe point; failed validation must leave the
-  active config unchanged and return structured diagnostics to IPC.
-- `plan(path, contents)` and `write_explicit(path, plan)` are *operator
-  tooling only*, never invoked by startup or IPC reload. Reload accepts
-  supported legacy v0 unchanged; migration is opt-in.
-- Source file `src/bin/config.rs` is ready for a shared-lane Cargo.toml
-  `[[bin]]` registration as `nuraloumi-config`; the standalone example is
-  buildable now. Do not claim IPC live reload until lane 02 wires it and
-  tests active runtime snapshot apply/rollback and IPC reporting.
+`nuraloumi-ctl reload-config` requests a fresh bounded JSON/TOML read
+from the explicit panel `--config` path, or from the same XDG config
+discovery order as startup. An absent/unreadable file **does not** reset the
+currently running configuration. Inputs are capped at 1 MiB.
 
-Validation and regression tests:
+- `config_migration::prepare_reload` parses and validates the candidate.
+  `config_reload::prepare_config_reload` classifies immutable changes
+  and validates the replacement keybinding registry before any mutation.
+- The IPC worker hands the command to the Wayland event owner through a
+  one-byte wake descriptor and waits for a bounded acknowledgment. The owner
+  alone stages and commits the replacement menu/application/config state.
+  There is **no background config polling** and no provider mutation from
+  rendering or the IPC thread.
+- Supported live changes: dark/light theme, reduced motion, launcher
+  labels/pinning/filter preferences, keybinding customization, and
+  `menu_dismissal.after_one_shot_action`. The UI is redrawn and
+  selected item identity is retained when still valid.
+- Structural changes return `restart_required` without applying any
+  part: panel edge/height, menu width, row height, quick-launch slots,
+  provider sections, per-surface settings, and outside-press backdrop policy.
+- Parse/validation/structural/staging/render errors return an explicit IPC
+  error and restore previous in-memory runtime state and selection. If
+  surface presentation fails after partial Wayland buffer submission, a
+  visual rollback cannot be guaranteed; the active state still rolls back.
+- The migration planner/writer remains separate operator tooling only.
+  Reload never writes a migration or backup, and supported v0 sources may
+  reload unchanged.
+
+Regression commands:
 
     cargo test -p nuraloumi-shell --test config_migration
+    cargo test -p nuraloumi-shell --test config_reload
+    cargo test -p nuraloumi-shell
     cargo clippy -p nuraloumi-shell --all-targets -- -D warnings
 
-All qualification here is host-only; no SL101 deployment or suspend testing.
+Qualification is **host-only**. SL101 Wayland/Cairo integration, latency and
+ARMv7/no-NEON runtime verification remain separate gates; no deployment or
+suspend experiment was performed here.
