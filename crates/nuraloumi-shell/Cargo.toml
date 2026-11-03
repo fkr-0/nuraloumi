@@ -1,5 +1,6 @@
 [package]
 name = "nuraloumi-shell"
+autobins = false
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -44,6 +45,10 @@ path = "src/bin/editor.rs"
 [[bin]]
 name = "nuraloumi-clipboard"
 path = "src/bin/clipboard.rs"
+
+[[bin]]
+name = "nuraloumi-screenshot"
+path = "src/bin/screenshot.rs"
 
 [[bin]]
 name = "nuraloumi-calendar"
