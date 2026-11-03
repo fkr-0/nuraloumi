@@ -8,6 +8,7 @@ pub mod audio;
 pub mod backlight;
 pub mod battery;
 pub mod bluetooth;
+pub mod calendar;
 pub mod clock;
 pub mod command;
 pub mod common;
@@ -20,6 +21,7 @@ pub mod processes;
 pub mod renderer;
 pub mod resources;
 pub mod session;
+pub mod weather;
 
 pub use applications::{
     ApplicationAction, ApplicationEntry, ApplicationProvider, ApplicationSnapshot,
@@ -28,6 +30,7 @@ pub use audio::{AudioAction, AudioProvider, AudioSnapshot};
 pub use backlight::{BacklightAction, BacklightProvider, BacklightSnapshot};
 pub use battery::{BatteryProvider, BatterySnapshot};
 pub use bluetooth::{BluetoothAction, BluetoothDevice, BluetoothProvider, BluetoothSnapshot};
+pub use calendar::{CalendarDate, CalendarDay, CalendarEvent, CalendarProvider, CalendarSnapshot};
 pub use clock::{ClockProvider, ClockSnapshot};
 pub use command::{
     CommandLimits, CommandOutput, CommandRunner, CommandSpec, FixtureCommandRunner,
@@ -47,5 +50,6 @@ pub use resources::{
     ResourceProvider, ResourceSnapshot, TemperatureReading,
 };
 pub use session::{SessionAction, SessionProvider, SessionSnapshot};
+pub use weather::{ForecastDay, WeatherProvider, WeatherSnapshot};
 
 pub const CRATE_READY: bool = true;
