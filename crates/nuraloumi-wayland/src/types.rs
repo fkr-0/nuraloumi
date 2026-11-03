@@ -122,6 +122,8 @@ pub struct BackendCapabilities {
     pub xrgb8888: bool,
     pub toplevel: ToplevelCapabilities,
     pub workspace: crate::WorkspaceCapabilities,
+    /// Advertised keyboard extension globals, not a claim that an IME is bound.
+    pub keyboard_protocols: KeyboardProtocolAvailability,
 }
 
 impl BackendCapabilities {
@@ -131,6 +133,17 @@ impl BackendCapabilities {
             PixelFormat::Xrgb8888 => self.xrgb8888,
         }
     }
+}
+
+/// Registry-only discovery; versions are the compositor-advertised maxima.
+///
+/// `zwp_input_method_manager_v2` is intended for input method *providers*,
+/// whereas ordinary text-entry clients need `zwp_text_input_manager_v3`.
+/// Neither protocol is bound or activated by the Wayland backend today.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct KeyboardProtocolAvailability {
+    pub input_method_v2_advertised: Option<u32>,
+    pub text_input_v3_advertised: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -372,6 +385,59 @@ pub fn normalize_output_point(
             x: height - y,
             y: width - x,
         },
+    }
+}
+
+/// Map a raw physical-output touch sample into a logical surface rectangle.
+///
+/// This is solely for calibration data or external raw-input adapters: the
+/// Wayland `wl_touch` and `wl_pointer` event coordinates are *already*
+/// `wl_surface`-local and MUST NOT be passed through this transform again.
+/// `surface_origin` is expressed in transformed output-logical coordinates;
+/// `surface_size` is the logical surface extent. Returns `None` for an
+/// invalid output mode, non-finite input, raw samples outside the output,
+/// or points outside the destination surface. Edges are inclusive.
+/// A compositor's xdg-output logical geometry, if available, supersedes the
+/// wl_output mode/scale estimates used here for non-integer scaling.
+pub fn map_physical_touch_to_surface(
+    raw: Point,
+    output: &OutputInfo,
+    surface_origin: Point,
+    surface_size: (u32, u32),
+) -> Option<Point> {
+    let width = f64::from(output.mode_width);
+    let height = f64::from(output.mode_height);
+    if width <= 0.0
+        || height <= 0.0
+        || surface_size.0 == 0
+        || surface_size.1 == 0
+        || !raw.x.is_finite()
+        || !raw.y.is_finite()
+        || !surface_origin.x.is_finite()
+        || !surface_origin.y.is_finite()
+        || !(0.0..=width).contains(&raw.x)
+        || !(0.0..=height).contains(&raw.y)
+    {
+        return None;
+    }
+
+    let point = normalize_output_point(
+        raw,
+        output.mode_width as u32,
+        output.mode_height as u32,
+        output.scale,
+        output.transform,
+    );
+    let local = Point {
+        x: point.x - surface_origin.x,
+        y: point.y - surface_origin.y,
+    };
+    if (0.0..=f64::from(surface_size.0)).contains(&local.x)
+        && (0.0..=f64::from(surface_size.1)).contains(&local.y)
+    {
+        Some(local)
+    } else {
+        None
     }
 }
 
@@ -663,6 +729,134 @@ mod tests {
             ),
             Point { x: 20.0, y: 350.0 },
         );
+    }
+
+    #[test]
+    fn physical_touch_maps_all_output_transform_corners() {
+        // A raw 800x600 panel: each transformed corner maps to the
+        // corresponding corner of the logical output. Scale is applied once.
+        let cases = [
+            (
+                OutputTransform::Normal,
+                Point { x: 0.0, y: 0.0 },
+                (400, 300),
+            ),
+            (
+                OutputTransform::Rotate90,
+                Point { x: 0.0, y: 600.0 },
+                (300, 400),
+            ),
+            (
+                OutputTransform::Rotate180,
+                Point { x: 800.0, y: 600.0 },
+                (400, 300),
+            ),
+            (
+                OutputTransform::Rotate270,
+                Point { x: 800.0, y: 0.0 },
+                (300, 400),
+            ),
+            (
+                OutputTransform::Flipped,
+                Point { x: 800.0, y: 0.0 },
+                (400, 300),
+            ),
+            (
+                OutputTransform::Flipped90,
+                Point { x: 0.0, y: 0.0 },
+                (300, 400),
+            ),
+            (
+                OutputTransform::Flipped180,
+                Point { x: 0.0, y: 600.0 },
+                (400, 300),
+            ),
+            (
+                OutputTransform::Flipped270,
+                Point { x: 800.0, y: 600.0 },
+                (300, 400),
+            ),
+        ];
+        for (transform, raw_corner, extent) in cases {
+            let mut output = OutputInfo::new(OutputId(1));
+            output.mode_width = 800;
+            output.mode_height = 600;
+            output.scale = 2;
+            output.transform = transform;
+            assert_point(
+                map_physical_touch_to_surface(raw_corner, &output, Point::default(), extent)
+                    .expect("mapped raw corner"),
+                Point::default(),
+            );
+        }
+    }
+
+    #[test]
+    fn physical_touch_rotation_respects_surface_origin_and_bounds() {
+        let mut output = OutputInfo::new(OutputId(1));
+        output.mode_width = 800;
+        output.mode_height = 600;
+        output.scale = 2;
+        output.transform = OutputTransform::Rotate90;
+        // (100, 400) raw -> (100, 50) output logical -> (80, 20) local.
+        assert_eq!(
+            map_physical_touch_to_surface(
+                Point { x: 100.0, y: 400.0 },
+                &output,
+                Point { x: 20.0, y: 30.0 },
+                (100, 80),
+            ),
+            Some(Point { x: 80.0, y: 20.0 })
+        );
+        assert_eq!(
+            map_physical_touch_to_surface(
+                Point { x: 100.0, y: 400.0 },
+                &output,
+                Point { x: 110.0, y: 30.0 },
+                (100, 80),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn physical_touch_rejects_invalid_and_outside_samples() {
+        let mut output = OutputInfo::new(OutputId(1));
+        output.mode_width = 800;
+        output.mode_height = 600;
+        let origin = Point::default();
+        for point in [
+            Point { x: -1.0, y: 20.0 },
+            Point { x: 801.0, y: 20.0 },
+            Point {
+                x: f64::NAN,
+                y: 20.0,
+            },
+            Point {
+                x: 20.0,
+                y: f64::INFINITY,
+            },
+        ] {
+            assert_eq!(
+                map_physical_touch_to_surface(point, &output, origin, (800, 600)),
+                None
+            );
+        }
+        assert_eq!(
+            map_physical_touch_to_surface(origin, &output, origin, (0, 600)),
+            None
+        );
+        assert_eq!(
+            map_physical_touch_to_surface(
+                origin,
+                &OutputInfo::new(OutputId(1)),
+                origin,
+                (800, 600)
+            ),
+            None
+        );
+        // A raw physical point is mapped exactly once; wl_touch values remain
+        // untouched by the backend because they are already surface-local.
     }
 
     #[test]

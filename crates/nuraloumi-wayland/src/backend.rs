@@ -35,10 +35,10 @@ use crate::{
     shm::{BufferKey, ShmBuffers},
     types::{semantic_key, sorted_touch_ids},
     workspace::WorkspaceStore,
-    BackendCapabilities, BackendError, BackendEvent, DismissBackdropConfig, Frame, MenuConfig,
-    Modifiers, OutputId, OutputInfo, OutputTransform, PanelConfig, PanelEdge, PlatformEvent,
-    Result, SurfaceId, ToplevelEvent, ToplevelId, ToplevelInfo, ToplevelSource, WorkspaceEvent,
-    WorkspaceId, WorkspaceInfo,
+    BackendCapabilities, BackendError, BackendEvent, DismissBackdropConfig, Frame,
+    KeyboardProtocolAvailability, MenuConfig, Modifiers, OutputId, OutputInfo, OutputTransform,
+    PanelConfig, PanelEdge, PlatformEvent, Result, SurfaceId, ToplevelEvent, ToplevelId,
+    ToplevelInfo, ToplevelSource, WorkspaceEvent, WorkspaceId, WorkspaceInfo,
 };
 
 struct OutputRecord {
@@ -151,6 +151,26 @@ impl KeyboardState {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum KeyboardProtocolGlobal {
+    InputMethodV2,
+    TextInputV3,
+}
+
+fn keyboard_protocol_availability(
+    globals: &HashMap<u32, (KeyboardProtocolGlobal, u32)>,
+) -> KeyboardProtocolAvailability {
+    let mut result = KeyboardProtocolAvailability::default();
+    for (kind, version) in globals.values() {
+        let reported = match kind {
+            KeyboardProtocolGlobal::InputMethodV2 => &mut result.input_method_v2_advertised,
+            KeyboardProtocolGlobal::TextInputV3 => &mut result.text_input_v3_advertised,
+        };
+        *reported = Some(reported.unwrap_or(0).max(*version));
+    }
+    result
+}
+
 #[derive(Default)]
 struct BackendState {
     compositor: Option<wl_compositor::WlCompositor>,
@@ -176,6 +196,8 @@ struct BackendState {
     keyboard_surface: Option<SurfaceId>,
     touch_surfaces: HashMap<i32, SurfaceId>,
     active_touches: BTreeSet<i32>,
+    /// Tracked by registry name to clear stale availability on global removal.
+    keyboard_protocol_globals: HashMap<u32, (KeyboardProtocolGlobal, u32)>,
     modifier_keys: BTreeSet<u32>,
     xkb: KeyboardState,
     foreign_toplevel: ForeignToplevelStore,
@@ -232,6 +254,9 @@ impl WaylandBackend {
             xrgb8888: self.state.shm_xrgb8888,
             toplevel: self.state.foreign_toplevel.capabilities(),
             workspace: self.state.workspace.capabilities(),
+            keyboard_protocols: keyboard_protocol_availability(
+                &self.state.keyboard_protocol_globals,
+            ),
         }
     }
 
@@ -729,11 +754,22 @@ impl Dispatch<wl_registry::WlRegistry, ()> for BackendState {
                 "ext_workspace_manager_v1" => {
                     state.workspace.record_global(name, version);
                 }
+                "zwp_input_method_manager_v2" => {
+                    state
+                        .keyboard_protocol_globals
+                        .insert(name, (KeyboardProtocolGlobal::InputMethodV2, version));
+                }
+                "zwp_text_input_manager_v3" => {
+                    state
+                        .keyboard_protocol_globals
+                        .insert(name, (KeyboardProtocolGlobal::TextInputV3, version));
+                }
                 _ => {}
             },
             wl_registry::Event::GlobalRemove { name } => {
                 state.foreign_toplevel.remove_global(name);
                 state.workspace.remove_global(name);
+                state.keyboard_protocol_globals.remove(&name);
                 let id = OutputId(name);
                 if let Some(output) = state.outputs.remove(&id) {
                     release_output(output.proxy);
@@ -1929,6 +1965,36 @@ mod tests {
         assert_eq!(state.keyboard_surface, None);
         assert_eq!(state.touch_surfaces, HashMap::from([(8, live)]));
         assert_eq!(state.active_touches, BTreeSet::from([8]));
+    }
+
+    #[test]
+    fn keyboard_protocol_globals_are_discovery_only_and_removal_safe() {
+        let mut globals = HashMap::new();
+        assert_eq!(
+            keyboard_protocol_availability(&globals),
+            KeyboardProtocolAvailability::default()
+        );
+        globals.insert(1, (KeyboardProtocolGlobal::InputMethodV2, 1));
+        globals.insert(2, (KeyboardProtocolGlobal::TextInputV3, 1));
+        globals.insert(3, (KeyboardProtocolGlobal::TextInputV3, 2));
+        assert_eq!(
+            keyboard_protocol_availability(&globals),
+            KeyboardProtocolAvailability {
+                input_method_v2_advertised: Some(1),
+                text_input_v3_advertised: Some(2),
+            }
+        );
+        globals.remove(&3);
+        assert_eq!(
+            keyboard_protocol_availability(&globals).text_input_v3_advertised,
+            Some(1)
+        );
+        globals.remove(&2);
+        globals.remove(&1);
+        assert_eq!(
+            keyboard_protocol_availability(&globals),
+            KeyboardProtocolAvailability::default()
+        );
     }
 
     #[test]

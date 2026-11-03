@@ -22,9 +22,10 @@ pub use thumbnail::{
     ToplevelThumbnailCapabilities, ToplevelThumbnailReport, ToplevelThumbnailRequest,
 };
 pub use types::{
-    normalize_output_point, BackendCapabilities, BackendEvent, DismissBackdropConfig, Frame, Key,
-    MediaKey, MenuConfig, Modifiers, OutputId, OutputInfo, OutputTransform, PanelConfig, PanelEdge,
-    PixelFormat, PlatformEvent, Point, SurfaceId,
+    map_physical_touch_to_surface, normalize_output_point, BackendCapabilities, BackendEvent,
+    DismissBackdropConfig, Frame, Key, KeyboardProtocolAvailability, MediaKey, MenuConfig,
+    Modifiers, OutputId, OutputInfo, OutputTransform, PanelConfig, PanelEdge, PixelFormat,
+    PlatformEvent, Point, SurfaceId,
 };
 pub use workspace::{
     WorkspaceCapabilities, WorkspaceEvent, WorkspaceId, WorkspaceInfo, WorkspaceState,

@@ -70,9 +70,20 @@ down/motion/up and cancel reports all active IDs. Seat capability loss and seat
 hot-unplug release v3+ pointer/keyboard/touch objects, reset keyboard modifier
 fallback state, and emit TouchCancel for contacts that were still active.
 
-Keyboard events expose arrows, Enter, Escape, Backspace, raw key codes, and a
-small US-layout text fallback. This fallback avoids a mandatory xkbcommon
-runtime dependency; a shell may layer richer keymap/text handling later.
+Keyboard events use the compositor XKB keymap when provided (including the
+SL101's German QWERTZ layout); a small US scancode fallback remains for
+missing/invalid keymaps. `xkbcommon` is a runtime dependency.
+
+`BackendCapabilities::keyboard_protocols` reports only the advertised versions
+of `zwp_input_method_manager_v2` (for virtual keyboard / input-method provider
+processes) and `zwp_text_input_manager_v3` (for client text-entry). These
+optional globals are observed and invalidated on removal, but **not bound**:
+NuraLoumi currently implements neither an input-method provider nor a
+text-input-v3 client state machine. An advertised global alone does not prove
+that labwc permits an input method to attach, that an OSK is installed, or that
+text will be delivered to a NuraLoumi surface. Ordinary XKB keyboard operation
+requires neither extension. Probe compositor support on the actual SL101
+before attempting 0.2 protocol activation.
 
 wl_output scale and transform metadata are tracked. Buffer scaling is sent only
 when the negotiated wl_surface version supports set_buffer_scale; scaled outputs
@@ -83,7 +94,13 @@ cannot accidentally resize the shell. OutputInfo::logical_size applies scale and
 90/270-degree axis swapping as a best-effort wl_output-only size; xdg-output
 logical_size remains more authoritative if added later. normalize_output_point
 is provided for calibration/tests that start with physical output coordinates
-and covers normal, 90, 180, 270 and flipped transforms.
+and covers normal, 90, 180, 270 and flipped transforms. For raw device samples,
+`map_physical_touch_to_surface` additionally subtracts a surface's transformed
+output-logical origin and rejects out-of-bounds/non-finite samples. It is **not**
+used on compositor-delivered `wl_touch` events: applying a second rotation to
+those would break correctly configured Wayland touch input. Hardware touch
+calibration/rotation is the compositor/libinput's responsibility, and actual
+four-corner correctness remains an on-device qualification gate.
 
 ## Live demo
 
