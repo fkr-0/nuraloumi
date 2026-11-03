@@ -98,9 +98,29 @@ pub struct Navigate {
     pub action: NavigationAction,
 }
 
+/// Whether this panel actually knows a surface's open/closed state.
+///
+/// An installed standalone executable is discoverable but not observed:
+/// its state is Unknown, not Closed. This is independent of installation.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum SurfaceOpenState {
+    Open,
+    Closed,
+    Unknown,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SurfaceState {
+    /// Legacy compatibility flag. Only authoritative if observation_supported
+    /// is Some(true); older peers may omit the new fields altogether.
     pub open: bool,
+    /// None means an older server did not provide explicit state semantics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_state: Option<SurfaceOpenState>,
+    /// Whether this panel can actually observe this surface's running state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation_supported: Option<bool>,
     pub selected_item: Option<String>,
     pub item_count: usize,
 }
@@ -108,7 +128,13 @@ pub struct SurfaceState {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SurfaceInfo {
     pub name: String,
+    /// Legacy compatibility flag; false is not proof of closure when
+    /// observation_supported is Some(false).
     pub open: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_state: Option<SurfaceOpenState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation_supported: Option<bool>,
     pub pid: u32,
 }
 
@@ -489,6 +515,37 @@ mod tests {
             assert_eq!(reply, decoded);
         }
     }
+    #[test]
+    fn surface_wire_extends_old_contract_without_requiring_new_fields() {
+        let old_info = r#"{"name":"calendar","open":false,"pid":0}"#;
+        let parsed: SurfaceInfo = serde_json::from_str(old_info).unwrap();
+        assert_eq!(parsed.open_state, None);
+        assert_eq!(parsed.observation_supported, None);
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), old_info);
+
+        let old_state = r#"{"open":true,"selected_item":null,"item_count":0}"#;
+        let parsed: SurfaceState = serde_json::from_str(old_state).unwrap();
+        assert_eq!(parsed.open_state, None);
+        assert_eq!(parsed.observation_supported, None);
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), old_state);
+
+        let modern = SurfaceState {
+            open: false,
+            open_state: Some(SurfaceOpenState::Unknown),
+            observation_supported: Some(false),
+            selected_item: None,
+            item_count: 0,
+        };
+        let wire = serde_json::to_value(&modern).unwrap();
+        assert_eq!(wire["open"], false);
+        assert_eq!(wire["open_state"], "unknown");
+        assert_eq!(wire["observation_supported"], false);
+        assert_eq!(
+            serde_json::from_value::<SurfaceState>(wire).unwrap(),
+            modern
+        );
+    }
+
     #[test]
     fn bounds_and_evict() {
         assert!(parse_request(&vec![b'x'; 4097]).is_err());

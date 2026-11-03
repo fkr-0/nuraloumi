@@ -10,6 +10,8 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
+use crate::ipc::SurfaceOpenState;
+
 const EMBEDDED_MENUS: &[&str] = &[
     "launcher",
     "control-center",
@@ -59,7 +61,9 @@ pub struct ReleasedBinary<'a> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SurfaceObservation {
     pub name: String,
-    pub open: bool,
+    /// This panel observes panel/embedded menu state; separately launched
+    /// binaries have an unknown state even when installed.
+    pub open_state: SurfaceOpenState,
     /// Zero means this shell has no knowledge of a running process.
     pub pid: u32,
     pub selected_item: Option<String>,
@@ -106,8 +110,8 @@ impl SurfaceCatalog {
         self.entries.contains_key(name)
     }
 
-    /// Inactive binaries are always reported as closed. Their PID is unknown,
-    /// rather than guessed from unrelated process names or /proc.
+    /// Standalone binaries are discoverable but never observed by this panel.
+    /// Do not infer closure (or a PID) from installation, process names or /proc.
     pub fn observe(
         &self,
         active_menu: Option<&str>,
@@ -118,23 +122,31 @@ impl SurfaceCatalog {
         self.entries
             .iter()
             .map(|(name, kind)| {
-                let open = match kind {
-                    SurfaceKind::Panel => true,
-                    SurfaceKind::EmbeddedMenu => active_menu == Some(name.as_str()),
-                    SurfaceKind::InstalledBinary => false,
+                let open_state = match kind {
+                    SurfaceKind::Panel => SurfaceOpenState::Open,
+                    SurfaceKind::EmbeddedMenu if active_menu == Some(name.as_str()) => {
+                        SurfaceOpenState::Open
+                    }
+                    SurfaceKind::EmbeddedMenu => SurfaceOpenState::Closed,
+                    SurfaceKind::InstalledBinary => SurfaceOpenState::Unknown,
                 };
                 SurfaceObservation {
                     name: name.clone(),
-                    open,
+                    open_state,
                     pid: match kind {
                         SurfaceKind::Panel => panel_pid,
-                        SurfaceKind::EmbeddedMenu if open => panel_pid,
+                        SurfaceKind::EmbeddedMenu if open_state == SurfaceOpenState::Open => {
+                            panel_pid
+                        }
                         _ => 0,
                     },
-                    selected_item: (*kind == SurfaceKind::EmbeddedMenu && open)
+                    selected_item: (*kind == SurfaceKind::EmbeddedMenu
+                        && open_state == SurfaceOpenState::Open)
                         .then(|| selected_item.map(str::to_owned))
                         .flatten(),
-                    item_count: if *kind == SurfaceKind::EmbeddedMenu && open {
+                    item_count: if *kind == SurfaceKind::EmbeddedMenu
+                        && open_state == SurfaceOpenState::Open
+                    {
                         item_count
                     } else {
                         0
@@ -254,7 +266,9 @@ fn ipc_reply(
                 .iter()
                 .map(|entry| SurfaceInfo {
                     name: entry.name.clone(),
-                    open: entry.open,
+                    open: entry.open_state == SurfaceOpenState::Open,
+                    open_state: Some(entry.open_state),
+                    observation_supported: Some(entry.open_state != SurfaceOpenState::Unknown),
                     pid: entry.pid,
                 })
                 .collect::<Vec<_>>(),
@@ -266,7 +280,9 @@ fn ipc_reply(
             Some(surface) => IpcResponse::success(
                 id,
                 SurfaceState {
-                    open: surface.open,
+                    open: surface.open_state == SurfaceOpenState::Open,
+                    open_state: Some(surface.open_state),
+                    observation_supported: Some(surface.open_state != SurfaceOpenState::Unknown),
                     selected_item: surface.selected_item.clone(),
                     item_count: surface.item_count,
                 },
@@ -343,11 +359,26 @@ mod tests {
         let rows = catalog.observe(Some("launcher"), Some("apps.first"), 13, 456);
         let panel = rows.iter().find(|row| row.name == "panel").unwrap();
         let launcher = rows.iter().find(|row| row.name == "launcher").unwrap();
-        assert_eq!((panel.open, panel.pid), (true, 456));
+        assert_eq!((panel.open_state, panel.pid), (SurfaceOpenState::Open, 456));
         assert_eq!(launcher.selected_item.as_deref(), Some("apps.first"));
         assert_eq!(launcher.item_count, 13);
-        assert_eq!((launcher.open, launcher.pid), (true, 456));
-        assert!(rows.iter().filter(|row| row.open).count() == 2);
+        assert_eq!(
+            (launcher.open_state, launcher.pid),
+            (SurfaceOpenState::Open, 456)
+        );
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row.open_state == SurfaceOpenState::Open)
+                .count(),
+            2
+        );
+        assert_eq!(
+            rows.iter()
+                .find(|row| row.name == "system")
+                .unwrap()
+                .open_state,
+            SurfaceOpenState::Closed
+        );
     }
 
     #[test]
@@ -366,7 +397,7 @@ mod tests {
             .into_iter()
             .find(|row| row.name == "calendar")
             .unwrap();
-        assert!(!item.open);
+        assert_eq!(item.open_state, SurfaceOpenState::Unknown);
         assert_eq!(item.pid, 0);
     }
 
@@ -383,13 +414,14 @@ mod tests {
             }],
         );
         assert!(catalog.contains("screenshot"));
-        assert!(
-            !catalog
+        assert_eq!(
+            catalog
                 .observe(None, None, 0, 1)
                 .iter()
                 .find(|row| row.name == "screenshot")
                 .unwrap()
-                .open
+                .open_state,
+            SurfaceOpenState::Unknown
         );
     }
 
@@ -421,7 +453,7 @@ mod tests {
             .into_iter()
             .find(|row| row.name == "panel")
             .unwrap();
-        assert!(panel.open);
+        assert_eq!(panel.open_state, SurfaceOpenState::Open);
         assert_eq!(panel.pid, 71);
     }
 
@@ -454,6 +486,12 @@ mod tests {
         assert!(rows
             .iter()
             .any(|row| row["name"] == "panel" && row["pid"] == 412));
+        assert!(rows.iter().any(|row| row["name"] == "panel"
+            && row["open_state"] == "open"
+            && row["observation_supported"] == true));
+        assert!(rows.iter().any(|row| row["name"] == "system"
+            && row["open_state"] == "closed"
+            && row["observation_supported"] == true));
 
         let current = ipc_reply(
             &request(IpcCommand::SurfaceState(SurfaceName {
@@ -488,6 +526,61 @@ mod tests {
             std::time::Duration::ZERO,
         );
         assert_eq!(notify.error.unwrap().code, "unsupported");
+    }
+
+    #[test]
+    fn ipc_distinguishes_known_open_closed_unknown_and_unregistered() {
+        use crate::ipc::{Empty, IpcCommand, IpcRequest, SurfaceName};
+        let dir = TestDir::new();
+        dir.executable("nuraloumi-calendar", 0o755);
+        let catalog = SurfaceCatalog::discover(&dir.0, &[]);
+        let observations = catalog.observe(Some("launcher"), Some("first"), 2, 982);
+        let request = |command| IpcRequest {
+            id: "truth".into(),
+            command,
+        };
+        let lookup = |name: &str| {
+            ipc_reply(
+                &request(IpcCommand::SurfaceState(SurfaceName {
+                    surface: name.into(),
+                })),
+                &observations,
+                std::time::Duration::ZERO,
+            )
+        };
+        let open = lookup("launcher").result.unwrap();
+        assert_eq!(open["open"], true);
+        assert_eq!(open["open_state"], "open");
+        assert_eq!(open["observation_supported"], true);
+        assert_eq!(open["selected_item"], "first");
+        assert_eq!(open["item_count"], 2);
+
+        let closed = lookup("system").result.unwrap();
+        assert_eq!(closed["open"], false);
+        assert_eq!(closed["open_state"], "closed");
+        assert_eq!(closed["observation_supported"], true);
+        assert_eq!(closed["item_count"], 0);
+
+        let unknown = lookup("calendar").result.unwrap();
+        assert_eq!(unknown["open"], false); // old-client compatibility only
+        assert_eq!(unknown["open_state"], "unknown");
+        assert_eq!(unknown["observation_supported"], false);
+        assert_eq!(unknown["selected_item"], serde_json::Value::Null);
+
+        let list = ipc_reply(
+            &request(IpcCommand::ListSurfaces(Empty {})),
+            &observations,
+            std::time::Duration::ZERO,
+        )
+        .result
+        .unwrap();
+        let rows = list.as_array().unwrap();
+        let calendar = rows.iter().find(|row| row["name"] == "calendar").unwrap();
+        assert_eq!(calendar["pid"], 0);
+        assert_eq!(calendar["open_state"], "unknown");
+        assert_eq!(calendar["observation_supported"], false);
+        assert!(rows.iter().all(|row| row["name"] != "missing"));
+        assert_eq!(lookup("missing").error.unwrap().code, "unknown_surface");
     }
 
     #[test]

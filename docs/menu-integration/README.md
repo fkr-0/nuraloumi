@@ -22,6 +22,25 @@ explicit checked state where the provider/model can establish one.
 
 ## Live renderer and input
 
+### Panel IPC surface observations
+
+`nuraloumi-ctl list-surfaces` and `surface-state --surface NAME` retain
+the legacy `open` boolean for older clients but now include
+`open_state` (`open`, `closed`, or `unknown`) and
+`observation_supported` (boolean). Prefer `open_state` for decisions:
+
+- The panel reports `open` while running. Embedded menus are known `open`
+  only while active and otherwise known `closed`; both support observation.
+- A separately packaged executable can be listed as installed but its running
+  state is `unknown` with `observation_supported: false` and `pid: 0`.
+  Its compatibility `open: false` **must not** be interpreted as closed.
+- Unregistered/absent surfaces are omitted from the list; querying one returns
+  `unknown_surface`. Do not confuse absence with a known-closed surface.
+
+Old responses that lack the two new fields still deserialize; those clients
+cannot determine whether the old `open: false` was observed. No process-name
+guessing or standalone-process polling is introduced.
+
 `nuraloumi-menu --live` now uses the native Wayland layer-shell backend and
 Cairo software renderer directly:
 
