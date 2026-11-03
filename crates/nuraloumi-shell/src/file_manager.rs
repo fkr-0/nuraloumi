@@ -1,0 +1,399 @@
+//! Rooted, bounded quick-browser operations. No command strings or renderer effects.
+use nuraloumi_providers::applications::ApplicationProvider;
+use nuraloumi_providers::command::{
+    CommandLimits, CommandRunner, CommandSpec, FixtureCommandRunner,
+};
+use nuraloumi_providers::Provider;
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+pub const MAX_VISIBLE_ENTRIES: usize = 128;
+pub const MAX_DIRECTORY_SCAN: usize = 512;
+pub const MAX_FILENAME_BYTES: usize = 255;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Entry {
+    pub name: String,
+    pub directory: bool,
+    pub len: u64,
+}
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Capabilities {
+    pub rename: bool,
+    pub delete: bool,
+}
+pub struct Browser {
+    pub root: PathBuf,
+    pub current: PathBuf,
+    pub entries: Vec<Entry>,
+    pub message: String,
+    pub capabilities: Capabilities,
+}
+pub fn valid_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && name.len() <= MAX_FILENAME_BYTES
+        && !name.starts_with('-')
+        && !name.contains(['/', '\\', '\0', '\r', '\n'])
+        && !name.chars().any(char::is_control)
+}
+pub fn valid_desktop_id(id: &str) -> bool {
+    id.len() <= 512
+        && id.ends_with(".desktop")
+        && id != ".desktop"
+        && !id.contains(['/', '\\', '\0', '\r', '\n'])
+}
+fn err(ctx: &str, e: io::Error) -> String {
+    format!("{ctx}: {e}")
+}
+impl Browser {
+    pub fn new(root: &Path, capabilities: Capabilities) -> Result<Self, String> {
+        let root = fs::canonicalize(root).map_err(|e| err("resolve browser root", e))?;
+        if !root.is_dir() {
+            return Err("browser root is not a directory".into());
+        }
+        let mut browse = Self {
+            current: root.clone(),
+            root,
+            entries: Vec::new(),
+            message: "Read-only by default; R rename / D delete / O open-with".into(),
+            capabilities,
+        };
+        browse.refresh()?;
+        Ok(browse)
+    }
+    fn ensure_current(&self) -> Result<(), String> {
+        let path =
+            fs::canonicalize(&self.current).map_err(|e| err("resolve current directory", e))?;
+        if !path.starts_with(&self.root) || path != self.current {
+            return Err("directory escaped root or became a symlink".into());
+        }
+        Ok(())
+    }
+    fn path_for(&self, index: usize) -> Result<(PathBuf, fs::Metadata), String> {
+        self.ensure_current()?;
+        let name = &self
+            .entries
+            .get(index)
+            .ok_or("entry index out of bounds")?
+            .name;
+        if !valid_name(name) {
+            return Err("unsafe entry name".into());
+        }
+        let path = self.current.join(name);
+        let meta = fs::symlink_metadata(&path).map_err(|e| err("inspect entry", e))?;
+        if meta.file_type().is_symlink() || (!meta.is_file() && !meta.is_dir()) {
+            return Err("symlinks and special files cannot be acted upon".into());
+        }
+        Ok((path, meta))
+    }
+    pub fn refresh(&mut self) -> Result<(), String> {
+        self.ensure_current()?;
+        let entries = fs::read_dir(&self.current).map_err(|e| err("list directory", e))?;
+        let mut result = Vec::new();
+        let mut rejected = 0usize;
+        for (scanned, e) in entries.enumerate() {
+            if scanned >= MAX_DIRECTORY_SCAN {
+                return Err("directory enumeration budget exceeded".into());
+            }
+            let entry = e.map_err(|e| err("read entry", e))?;
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                rejected += 1;
+                continue;
+            };
+            if name.starts_with('.') || !valid_name(&name) {
+                rejected += 1;
+                continue;
+            }
+            let meta = fs::symlink_metadata(entry.path()).map_err(|e| err("stat entry", e))?;
+            if meta.file_type().is_symlink() || (!meta.is_dir() && !meta.is_file()) {
+                rejected += 1;
+                continue;
+            }
+            if result.len() >= MAX_VISIBLE_ENTRIES {
+                return Err("directory entry cap exceeded".into());
+            }
+            result.push(Entry {
+                name,
+                directory: meta.is_dir(),
+                len: meta.len(),
+            });
+        }
+        result.sort_by(|a, b| {
+            b.directory.cmp(&a.directory).then_with(|| {
+                a.name
+                    .to_ascii_lowercase()
+                    .cmp(&b.name.to_ascii_lowercase())
+            })
+        });
+        self.entries = result;
+        if rejected > 0 {
+            self.message = format!("Skipped {rejected} hidden, unsafe or non-UTF8 entries");
+        }
+        Ok(())
+    }
+    pub fn enter(&mut self, index: usize) -> Result<bool, String> {
+        let (path, meta) = self.path_for(index)?;
+        if !meta.is_dir() {
+            return Ok(false);
+        }
+        let next = fs::canonicalize(&path).map_err(|e| err("resolve subdirectory", e))?;
+        if !next.starts_with(&self.root) {
+            return Err("directory escapes configured root".into());
+        }
+        self.current = next;
+        self.refresh()?;
+        Ok(true)
+    }
+    pub fn parent(&mut self) -> Result<bool, String> {
+        self.ensure_current()?;
+        if self.current == self.root {
+            return Ok(false);
+        }
+        self.current = self.current.parent().ok_or("missing parent")?.to_path_buf();
+        self.refresh()?;
+        Ok(true)
+    }
+    pub fn rename(&mut self, index: usize, new_name: &str, confirmed: bool) -> Result<(), String> {
+        if !self.capabilities.rename {
+            return Err("rename capability disabled".into());
+        }
+        if !confirmed {
+            return Err("explicit rename confirmation required".into());
+        }
+        if !valid_name(new_name) {
+            return Err("invalid new filename".into());
+        }
+        let (old, _) = self.path_for(index)?;
+        let dest = self.current.join(new_name);
+        if dest == old {
+            return Err("rename target unchanged".into());
+        }
+        match fs::symlink_metadata(&dest) {
+            Ok(_) => return Err("rename target already exists".into()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(err("inspect rename target", e)),
+        }
+        fs::rename(&old, &dest).map_err(|e| err("rename", e))?;
+        self.refresh()?;
+        self.message = format!("Renamed to {new_name}");
+        Ok(())
+    }
+    pub fn delete(
+        &mut self,
+        index: usize,
+        expected_name: &str,
+        confirmed: bool,
+    ) -> Result<(), String> {
+        if !self.capabilities.delete {
+            return Err("delete capability disabled".into());
+        }
+        if !confirmed {
+            return Err("explicit delete confirmation required".into());
+        }
+        if self
+            .entries
+            .get(index)
+            .is_none_or(|e| e.name != expected_name)
+        {
+            return Err("delete selection changed: confirmation invalidated".into());
+        }
+        let (path, meta) = self.path_for(index)?;
+        if meta.is_dir() {
+            fs::remove_dir(path).map_err(|e| err("remove empty directory", e))?;
+        } else {
+            fs::remove_file(path).map_err(|e| err("remove file", e))?;
+        }
+        self.refresh()?;
+        self.message = format!("Deleted {expected_name}");
+        Ok(())
+    }
+    /// Only discovered, validated .desktop entries may receive a file URI.
+    /// Uses Gio's desktop command semantics, NEVER a shell or .desktop Exec expansion.
+    pub fn open_with<R: CommandRunner>(
+        &self,
+        index: usize,
+        desktop_id: &str,
+        application_roots: Vec<PathBuf>,
+        runner: &mut R,
+    ) -> Result<(), String> {
+        if !valid_desktop_id(desktop_id) {
+            return Err("invalid desktop entry ID".into());
+        }
+        let (file, meta) = self.path_for(index)?;
+        if !meta.is_file() {
+            return Err("open-with accepts regular files only".into());
+        }
+        let mut provider =
+            ApplicationProvider::new(FixtureCommandRunner::default(), application_roots);
+        let snapshot = provider.snapshot().map_err(|e| e.to_string())?;
+        let entry = snapshot
+            .applications
+            .iter()
+            .find(|e| e.id == desktop_id && e.launchable)
+            .ok_or("desktop app ID not discovered or not launchable")?;
+        let app = entry
+            .desktop_file
+            .to_str()
+            .ok_or("non-UTF8 desktop app path")?;
+        let file = file.to_str().ok_or("non-UTF8 file path")?;
+        let spec = CommandSpec::new("gio").args(["launch", app, file]);
+        let output = runner
+            .run(&spec, CommandLimits::new(Duration::from_secs(3), 1024))
+            .map_err(|e| e.to_string())?;
+        if output.status != 0 {
+            return Err(format!("gio launch exited {}", output.status));
+        }
+        Ok(())
+    }
+}
+pub fn application_roots() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(value) = std::env::var_os("XDG_DATA_HOME") {
+        dirs.push(PathBuf::from(value).join("applications"));
+    } else if let Some(value) = std::env::var_os("HOME") {
+        dirs.push(PathBuf::from(value).join(".local/share/applications"));
+    }
+    let global =
+        std::env::var("XDG_DATA_DIRS").unwrap_or_else(|_| "/usr/local/share:/usr/share".into());
+    for dir in global.split(':').filter(|s| !s.is_empty()) {
+        dirs.push(PathBuf::from(dir).join("applications"));
+    }
+    dirs
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nuraloumi_providers::command::{CommandOutput, FixtureCommandRunner};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    fn temp() -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "nuraloumi-file-manager-{}-{stamp}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).unwrap();
+        root
+    }
+    #[test]
+    fn root_navigation_and_caps() {
+        let root = temp();
+        fs::create_dir(root.join("folder")).unwrap();
+        fs::write(root.join("file.txt"), b"hello").unwrap();
+        let mut b = Browser::new(&root, Capabilities::default()).unwrap();
+        assert_eq!(b.entries.len(), 2);
+        assert!(!b.parent().unwrap());
+        let folder = b.entries.iter().position(|e| e.directory).unwrap();
+        assert!(b.enter(folder).unwrap());
+        assert_eq!(b.entries.len(), 0);
+        assert!(b.parent().unwrap());
+        assert_eq!(b.current, b.root);
+        assert!(b.rename(1, "new", true).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn traversal_symlink_and_non_utf8() {
+        assert!(!valid_name("../escape"));
+        assert!(!valid_name(".."));
+        assert!(!valid_name("a/b"));
+        let root = temp();
+        let outside = temp();
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            use std::os::unix::fs::symlink;
+            symlink(&outside, root.join("outside")).unwrap();
+            fs::write(
+                root.join(std::ffi::OsString::from_vec(vec![0xff, 0xfe])),
+                b"xx",
+            )
+            .unwrap();
+        }
+        let mut b = Browser::new(&root, Capabilities::default()).unwrap();
+        assert!(b.entries.is_empty());
+        b.refresh().unwrap();
+        assert!(b.entries.is_empty());
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(outside).unwrap();
+    }
+    #[test]
+    fn rename_collision_confirmation_and_delete() {
+        let root = temp();
+        fs::write(root.join("a.txt"), b"a").unwrap();
+        fs::write(root.join("b.txt"), b"b").unwrap();
+        fs::create_dir(root.join("occupied")).unwrap();
+        fs::write(root.join("occupied").join("inside"), b"nested").unwrap();
+        let mut b = Browser::new(
+            &root,
+            Capabilities {
+                rename: true,
+                delete: true,
+            },
+        )
+        .unwrap();
+        let index = b.entries.iter().position(|e| e.name == "a.txt").unwrap();
+        assert!(b.rename(index, "new.txt", false).is_err());
+        assert!(b.rename(index, "b.txt", true).is_err());
+        b.rename(index, "new.txt", true).unwrap();
+        assert!(root.join("new.txt").exists());
+        let index = b.entries.iter().position(|e| e.name == "new.txt").unwrap();
+        assert!(b.delete(index, "new.txt", false).is_err());
+        assert!(b.delete(index, "b.txt", true).is_err());
+        b.delete(index, "new.txt", true).unwrap();
+        let occupied = b.entries.iter().position(|e| e.name == "occupied").unwrap();
+        assert!(b.delete(occupied, "occupied", true).is_err());
+        assert!(root.join("occupied/inside").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn directory_scan_is_bounded_even_for_hidden_entries() {
+        let root = temp();
+        for i in 0..(MAX_DIRECTORY_SCAN + 1) {
+            fs::write(root.join(format!(".hidden-{i}")), b"x").unwrap();
+        }
+        assert!(Browser::new(&root, Capabilities::default()).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn desktop_selection_and_exact_gio_argv() {
+        let root = temp();
+        let appdir = temp();
+        let file = root.join("note.txt");
+        fs::write(&file, b"hello").unwrap();
+        let desktop = appdir.join("view.desktop");
+        fs::write(
+            &desktop,
+            "[Desktop Entry]\nType=Application\nName=View\nExec=view %f\n",
+        )
+        .unwrap();
+        let b = Browser::new(&root, Capabilities::default()).unwrap();
+        let mut runner = FixtureCommandRunner::default();
+        runner.insert(
+            CommandSpec::new("gio").args([
+                "launch",
+                desktop.to_str().unwrap(),
+                file.to_str().unwrap(),
+            ]),
+            CommandOutput {
+                status: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        );
+        assert!(!valid_desktop_id("../view.desktop"));
+        b.open_with(0, "view.desktop", vec![appdir.clone()], &mut runner)
+            .unwrap();
+        assert!(b
+            .open_with(0, "none.desktop", vec![appdir.clone()], &mut runner)
+            .is_err());
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(appdir).unwrap();
+    }
+}

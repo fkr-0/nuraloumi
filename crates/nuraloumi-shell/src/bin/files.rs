@@ -1,508 +1,619 @@
+//! Safe quick browser for Home and removable-media roots, using Cairo/wl_shm.
+#[path = "../file_manager.rs"]
+mod file_manager;
+
+use file_manager::{application_roots, valid_name, Browser, Capabilities};
 use nuraloumi_core::{
-    MenuAction, MenuItem, MenuModel, MenuState, NavigationOutcome, SemanticInput, DARK_THEME,
-    LIGHT_THEME,
+    MenuAction, MenuItem, MenuModel, MenuState, SemanticInput, DARK_THEME, LIGHT_THEME,
 };
+use nuraloumi_providers::command::SystemCommandRunner;
 use nuraloumi_render_cairo::{CairoRenderer, RenderOptions, Scene, Viewport};
-use nuraloumi_shell::{load_config_or_default, render_menu_with_glyphs, ShellConfig, Theme as ShellTheme};
+use nuraloumi_shell::{load_config_or_default, render_menu_follow_selection, ShellConfig, Theme};
 use nuraloumi_wayland::{
-    BackendError, Frame, Key, MenuConfig as WaylandMenuConfig, PixelFormat,
-    PlatformEvent as WaylandEvent, SurfaceId, WaylandBackend,
+    BackendError, Frame, Key, MenuConfig, PixelFormat, PlatformEvent, SurfaceId, WaylandBackend,
 };
-use std::env;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode, Stdio};
+use std::{env, path::PathBuf, process::ExitCode};
 
-const HELP: &str = r#"nuraloumi-files — NuraLoumi file manager
-
-USAGE:
-    nuraloumi-files [OPTIONS] [PATH]
-
-OPTIONS:
-    --live                     Open a native Wayland/Cairo software-rendered file browser
-    --config <path>            Load JSON/TOML shell geometry/theme config
-    -h, --help                 Show this help
-
-DESCRIPTION:
-    A touch-friendly file manager built on the NuraLoumi menu model. Directories
-    navigate in-place, files open with xdg-open. Supports keyboard navigation,
-    search filter, and the standard 48px touch targets.
-"#;
+const HELP: &str = "nuraloumi-files [--live] [--config PATH] [--allow-rename] [--allow-delete] [--open-with DESKTOP_ID] [ROOT]\n\
+Default read-only. Select files/dirs, Enter opens; R rename, D delete (requires capability and two confirmations); O open-with discovered desktop ID; Esc cancel/exit. No recursive deletion.\n";
 
 #[derive(Debug)]
-struct Args {
+struct Options {
     live: bool,
     config: Option<PathBuf>,
-    start_path: PathBuf,
+    root: PathBuf,
+    capabilities: Capabilities,
+    open_with: Option<String>,
 }
-
-impl Default for Args {
-    fn default() -> Self {
-        Self {
-            live: false,
-            config: None,
-            start_path: env::var("HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| PathBuf::from("/")),
-        }
-    }
-}
-
-fn parse_args() -> Result<Args, String> {
-    let mut args = Args::default();
-    let mut argv = env::args().skip(1);
-    while let Some(arg) = argv.next() {
+fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Option<Options>, String> {
+    let mut out = Options {
+        live: false,
+        config: None,
+        root: env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/")),
+        capabilities: Capabilities::default(),
+        open_with: None,
+    };
+    let mut iter = args.into_iter();
+    let mut root_seen = false;
+    while let Some(arg) = iter.next() {
         match arg.as_str() {
             "-h" | "--help" => {
-                eprint!("{HELP}");
-                std::process::exit(0);
+                println!("{HELP}");
+                return Ok(None);
             }
-            "--live" => args.live = true,
-            "--config" => {
-                args.config = Some(argv.next().ok_or("--config requires a path")?.into());
+            "--live" => out.live = true,
+            "--config" => out.config = Some(iter.next().ok_or("--config needs PATH")?.into()),
+            "--allow-rename" => out.capabilities.rename = true,
+            "--allow-delete" => out.capabilities.delete = true,
+            "--open-with" => out.open_with = Some(iter.next().ok_or("--open-with needs ID")?),
+            other if !other.starts_with('-') && !root_seen => {
+                out.root = PathBuf::from(other);
+                root_seen = true;
             }
-            other if !other.starts_with('-') => {
-                args.start_path = PathBuf::from(other);
-            }
-            other => return Err(format!("unknown argument: {other}")),
+            _ => return Err(format!("unknown or repeated argument {arg}")),
         }
     }
-    Ok(args)
+    if let Some(id) = &out.open_with {
+        if !file_manager::valid_desktop_id(id) {
+            return Err("unsafe .desktop ID".into());
+        }
+    }
+    Ok(Some(out))
 }
 
-fn human_size(bytes: u64) -> String {
-    if bytes < 1024 {
-        format!("{bytes} B")
-    } else if bytes < 1024 * 1024 {
-        format!("{:.1} KiB", bytes as f64 / 1024.0)
-    } else if bytes < 1024 * 1024 * 1024 {
-        format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
-    } else {
-        format!("{:.1} GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Mode {
+    Normal,
+    RenameInput {
+        index: usize,
+        old: String,
+        name: String,
+    },
+    RenameConfirm {
+        index: usize,
+        old: String,
+        name: String,
+    },
+    DeleteConfirm {
+        index: usize,
+        old: String,
+    },
+}
+struct Ui {
+    browser: Browser,
+    selected: Option<usize>,
+    mode: Mode,
+    app: Option<String>,
+}
+fn action(kind: &str, payload: impl Into<String>) -> MenuAction {
+    MenuAction::Custom {
+        kind: kind.into(),
+        payload: payload.into(),
     }
 }
-
-fn build_directory_model(dir: &Path) -> MenuModel {
-    let title = dir
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("/")
-        .to_string();
-
-    let entries = match fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(e) => {
-            return MenuModel::new(
-                "files-error",
-                &title,
-                vec![MenuItem::status("err", format!("Cannot read: {e}"))],
+impl Ui {
+    fn new(options: &Options) -> Result<Self, String> {
+        let browser = Browser::new(&options.root, options.capabilities)?;
+        Ok(Self {
+            selected: (!browser.entries.is_empty()).then_some(0),
+            browser,
+            mode: Mode::Normal,
+            app: options.open_with.clone(),
+        })
+    }
+    fn selected_name(&self) -> Option<String> {
+        self.selected
+            .and_then(|i| self.browser.entries.get(i))
+            .map(|e| e.name.clone())
+    }
+    fn menu(&self) -> MenuModel {
+        let mut items = vec![
+            MenuItem::status("path", self.browser.current.display().to_string())
+                .with_subtitle(self.browser.message.clone()),
+            MenuItem::action("parent", ".. / parent directory", action("parent", "")),
+        ];
+        for (i, e) in self.browser.entries.iter().enumerate() {
+            let suffix = if e.directory { "/" } else { "" };
+            items.push(
+                MenuItem::action(
+                    format!("entry-{i}"),
+                    format!("{}{suffix}", e.name),
+                    action("select", i.to_string()),
+                )
+                .with_subtitle(if e.directory {
+                    "Directory".into()
+                } else {
+                    format!("{} bytes", e.len)
+                }),
             );
         }
+        if self.browser.entries.is_empty() {
+            items.push(MenuItem::status("empty", "No visible files"));
+        }
+        let label = self.selected_name().unwrap_or_else(|| "(none)".into());
+        items.push(MenuItem::status("focus", format!("Selected: {label}")));
+        items.push(MenuItem::action(
+            "open",
+            "Enter / Open selected",
+            action("open", ""),
+        ));
+        items.push(MenuItem::action(
+            "rename",
+            "R / Rename selected",
+            action("rename", ""),
+        ));
+        items.push(MenuItem::action(
+            "delete",
+            "D / Delete selected",
+            action("delete", ""),
+        ));
+        if let Some(id) = &self.app {
+            items.push(MenuItem::action(
+                "open-with",
+                format!("O / Open with {id}"),
+                action("open-with", ""),
+            ));
+        }
+        match &self.mode {
+            Mode::Normal => {}
+            Mode::RenameInput { old, name, .. } => {
+                items.push(MenuItem::status(
+                    "input",
+                    format!("Rename {old} to: {name}_"),
+                ));
+                items.push(MenuItem::action(
+                    "rename-next",
+                    "Confirm typed name",
+                    action("rename-next", ""),
+                ));
+                items.push(MenuItem::action(
+                    "cancel",
+                    "Cancel rename",
+                    action("cancel", ""),
+                ));
+            }
+            Mode::RenameConfirm { old, name, .. } => {
+                items.push(MenuItem::status(
+                    "warning",
+                    format!("Rename {old} → {name}?"),
+                ));
+                items.push(MenuItem::action(
+                    "confirm",
+                    "Confirm rename (second Enter)",
+                    action("confirm", ""),
+                ));
+                items.push(MenuItem::action(
+                    "cancel",
+                    "Cancel rename",
+                    action("cancel", ""),
+                ));
+            }
+            Mode::DeleteConfirm { old, .. } => {
+                items.push(MenuItem::status(
+                    "warning",
+                    format!("Delete {old}? This cannot be undone."),
+                ));
+                items.push(MenuItem::action(
+                    "confirm",
+                    "Confirm deletion (second Enter)",
+                    action("confirm", ""),
+                ));
+                items.push(MenuItem::action(
+                    "cancel",
+                    "Cancel deletion",
+                    action("cancel", ""),
+                ));
+            }
+        }
+        MenuModel::new("files", "File browser", items)
+    }
+    fn activate(&mut self, requested: MenuAction) -> Result<(), String> {
+        let MenuAction::Custom { kind, payload } = requested else {
+            return Ok(());
+        };
+        match kind.as_str() {
+            "cancel" => self.mode = Mode::Normal,
+            "select" => {
+                let Ok(index) = payload.parse::<usize>() else {
+                    return Ok(());
+                };
+                if index < self.browser.entries.len() {
+                    self.selected = Some(index);
+                    if self.mode == Mode::Normal {
+                        self.enter_selected()?;
+                    }
+                }
+            }
+            "parent" if self.mode == Mode::Normal => {
+                self.browser.parent()?;
+                self.selected = (!self.browser.entries.is_empty()).then_some(0);
+            }
+            "open" if self.mode == Mode::Normal => self.enter_selected()?,
+            "rename" if self.mode == Mode::Normal => self.begin_rename()?,
+            "delete" if self.mode == Mode::Normal => self.begin_delete()?,
+            "open-with" if self.mode == Mode::Normal => self.open_with()?,
+            "rename-next" => self.confirm_name()?,
+            "confirm" => self.confirm()?,
+            _ => {}
+        }
+        Ok(())
+    }
+    fn enter_selected(&mut self) -> Result<(), String> {
+        let Some(index) = self.selected else {
+            return Ok(());
+        };
+        if self.browser.entries.get(index).is_none() {
+            return Ok(());
+        }
+        if self.browser.enter(index)? {
+            self.selected = (!self.browser.entries.is_empty()).then_some(0);
+        } else {
+            self.open_with()?;
+        }
+        Ok(())
+    }
+    fn open_with(&mut self) -> Result<(), String> {
+        let Some(index) = self.selected else {
+            return Ok(());
+        };
+        let Some(id) = self.app.as_deref() else {
+            self.browser.message = "Use --open-with validated DESKTOP_ID to open a file".into();
+            return Ok(());
+        };
+        self.browser
+            .open_with(index, id, application_roots(), &mut SystemCommandRunner)?;
+        self.browser.message = format!("Requested {id} for selected file");
+        Ok(())
+    }
+    fn begin_rename(&mut self) -> Result<(), String> {
+        if !self.browser.capabilities.rename {
+            return Err("rename disabled; use --allow-rename".into());
+        }
+        let Some(index) = self.selected else {
+            return Ok(());
+        };
+        let Some(old) = self.selected_name() else {
+            return Ok(());
+        };
+        self.mode = Mode::RenameInput {
+            index,
+            old,
+            name: String::new(),
+        };
+        Ok(())
+    }
+    fn begin_delete(&mut self) -> Result<(), String> {
+        if !self.browser.capabilities.delete {
+            return Err("delete disabled; use --allow-delete".into());
+        }
+        let Some(index) = self.selected else {
+            return Ok(());
+        };
+        let Some(old) = self.selected_name() else {
+            return Ok(());
+        };
+        self.mode = Mode::DeleteConfirm { index, old };
+        Ok(())
+    }
+    fn confirm_name(&mut self) -> Result<(), String> {
+        if let Mode::RenameInput { index, old, name } = &self.mode {
+            if !valid_name(name) {
+                return Err("invalid new filename".into());
+            }
+            self.mode = Mode::RenameConfirm {
+                index: *index,
+                old: old.clone(),
+                name: name.clone(),
+            };
+        }
+        Ok(())
+    }
+    fn confirm(&mut self) -> Result<(), String> {
+        match self.mode.clone() {
+            Mode::RenameConfirm { index, old, name } => {
+                if self
+                    .browser
+                    .entries
+                    .get(index)
+                    .is_none_or(|e| e.name != old)
+                {
+                    return Err("rename selection changed".into());
+                }
+                self.browser.rename(index, &name, true)?;
+                self.selected = (!self.browser.entries.is_empty())
+                    .then_some(index.min(self.browser.entries.len() - 1));
+            }
+            Mode::DeleteConfirm { index, old } => {
+                self.browser.delete(index, &old, true)?;
+                self.selected = (!self.browser.entries.is_empty())
+                    .then_some(index.min(self.browser.entries.len() - 1));
+            }
+            _ => return Ok(()),
+        }
+        self.mode = Mode::Normal;
+        Ok(())
+    }
+    fn text(&mut self, t: &str) {
+        if let Mode::RenameInput { name, .. } = &mut self.mode {
+            if !t.chars().any(char::is_control)
+                && name.len() + t.len() <= file_manager::MAX_FILENAME_BYTES
+            {
+                name.push_str(t);
+            }
+        }
+    }
+    fn backspace(&mut self) {
+        if let Mode::RenameInput { name, .. } = &mut self.mode {
+            name.pop();
+        }
+    }
+    fn state(&self, menu: &MenuModel, selected_id: Option<String>) -> MenuState {
+        let mut state = MenuState::new(menu);
+        let prefer = selected_id.or_else(|| self.selected.map(|i| format!("entry-{i}")));
+        if let Some(id) = prefer {
+            if menu.item_by_id(&id).is_some_and(|m| m.action.is_some()) {
+                state.selected_id = Some(id);
+            }
+        }
+        state
+    }
+}
+#[allow(clippy::too_many_arguments)]
+fn render(
+    backend: &mut WaylandBackend,
+    id: SurfaceId,
+    renderer: &CairoRenderer,
+    config: &ShellConfig,
+    menu: &MenuModel,
+    state: &MenuState,
+    w: u32,
+    h: u32,
+    s: i32,
+) -> Result<Scene, String> {
+    if !(240..=2048).contains(&w)
+        || !(160..=2048).contains(&h)
+        || !(1..=3).contains(&s)
+        || u64::from(w) * u64::from(h) * (s as u64).pow(2) * 4 > 12 * 1024 * 1024
+    {
+        return Err("unsafe viewport dimensions".into());
+    }
+    let tokens = match config.theme {
+        Theme::Dark => &DARK_THEME,
+        Theme::Light => &LIGHT_THEME,
     };
-
-    let mut sorted: Vec<_> = entries.filter_map(|e| e.ok()).collect();
-    sorted.sort_by(|a, b| {
-        let a_dir = a.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        let b_dir = b.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        b_dir.cmp(&a_dir).then_with(|| {
-            a.file_name()
-                .to_string_lossy()
-                .to_lowercase()
-                .cmp(&b.file_name().to_string_lossy().to_lowercase())
-        })
-    });
-
-    let mut items = Vec::new();
-
-    items.push(MenuItem::status(
-        "path-display",
-        dir.to_string_lossy().into_owned(),
-    ));
-    items.push(MenuItem::separator("sep-path"));
-
-    if let Some(parent) = dir.parent() {
-        items.push(
-            MenuItem::action(
-                "nav-parent",
-                "..",
-                MenuAction::Navigate {
-                    target: parent.to_string_lossy().into_owned(),
+    let (scene, mut buffer) = render_menu_follow_selection(
+        renderer,
+        menu,
+        state,
+        Viewport::new(f64::from(w), f64::from(h), f64::from(s)),
+        tokens,
+        RenderOptions::default(),
+        None,
+    )?;
+    let info = buffer.info();
+    let result = buffer
+        .with_argb32_bytes(|pixels, _| {
+            backend.present(
+                id,
+                Frame {
+                    width: info.width as u32,
+                    height: info.height as u32,
+                    stride: info.stride as usize,
+                    format: PixelFormat::Argb8888,
+                    pixels,
                 },
             )
-            .with_subtitle("Parent directory".to_string()),
-        );
-    }
-
-    let mut has_dirs = false;
-    let mut has_files = false;
-
-    for entry in &sorted {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with('.') {
-            continue;
-        }
-        let path = entry.path();
-        let path_str = path.to_string_lossy().into_owned();
-        let id = format!("f-{}", path_str.replace('/', "-"));
-
-        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        if is_dir {
-            has_dirs = true;
-            items.push(
-                MenuItem::action(
-                    id,
-                    format!("{name}/"),
-                    MenuAction::Navigate {
-                        target: path_str,
-                    },
-                )
-                .with_subtitle("Directory".to_string()),
-            );
-        } else {
-            if !has_files && has_dirs {
-                items.push(MenuItem::separator("sep-files"));
-            }
-            has_files = true;
-            let subtitle = entry
-                .metadata()
-                .ok()
-                .map(|m| human_size(m.len()))
-                .unwrap_or_default();
-            items.push(
-                MenuItem::action(
-                    id,
-                    name,
-                    MenuAction::Custom {
-                        kind: "open".into(),
-                        payload: path_str,
-                    },
-                )
-                .with_subtitle(subtitle),
-            );
-        }
-    }
-
-    if items.len() <= 2 {
-        items.push(MenuItem::status("empty", "Empty directory"));
-    }
-
-    MenuModel::new("files", &title, items)
-}
-
-fn open_file(path: &str) -> Result<(), String> {
-    Command::new("xdg-open")
-        .arg(path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| format!("xdg-open failed: {e}"))?;
-    Ok(())
-}
-
-fn handle_action(action: &MenuAction, current_dir: &mut PathBuf, model: &mut MenuModel, state: &mut MenuState) -> HandleResult {
-    match action {
-        MenuAction::Navigate { target } => {
-            let path = PathBuf::from(target);
-            if path.is_dir() {
-                *current_dir = path;
-                *model = build_directory_model(current_dir);
-                *state = MenuState::new(model);
-                HandleResult::Redraw
-            } else {
-                HandleResult::Noop
-            }
-        }
-        MenuAction::Custom { kind, payload } if kind == "open" => {
-            let _ = open_file(payload);
-            HandleResult::Close
-        }
-        _ => HandleResult::Noop,
+        })
+        .map_err(|e| e.to_string())?;
+    match result {
+        Ok(()) | Err(BackendError::WouldBlock) => Ok(scene),
+        Err(e) => Err(e.to_string()),
     }
 }
-
-enum HandleResult {
-    Noop,
-    Redraw,
-    Close,
+fn hit(scene: &Option<Scene>, menu: &MenuModel, x: f64, y: f64) -> Option<MenuAction> {
+    menu.item_by_id(scene.as_ref()?.hit_test(x, y)?)?
+        .action
+        .clone()
 }
-
-fn run_live(config: ShellConfig, args: &Args) -> Result<(), String> {
-    let mut backend =
-        WaylandBackend::connect().map_err(|e| format!("Wayland connection failed: {e}"))?;
-    let capabilities = backend.capabilities();
-    if !capabilities.layer_shell {
-        return Err("compositor does not advertise zwlr_layer_shell_v1".into());
+fn run(opts: Options) -> Result<(), String> {
+    let config = load_config_or_default(opts.config.as_deref())?;
+    let mut ui = Ui::new(&opts)?;
+    if !opts.live {
+        println!("{}{}", HELP, ui.browser.current.display());
+        return Ok(());
     }
-
-    let mut current_dir = args.start_path.clone();
-    let mut model = build_directory_model(&current_dir);
-    let mut state = MenuState::new(&model);
-
+    let mut backend = WaylandBackend::connect().map_err(|e| e.to_string())?;
+    if !backend.capabilities().layer_shell {
+        return Err("layer-shell unavailable".into());
+    }
     let output = backend.outputs().into_iter().next();
-    let requested_width = output
-        .as_ref()
-        .and_then(|o| {
-            let scale = o.scale.max(1) as u32;
-            (o.mode_width > 0).then_some(o.mode_width as u32 / scale)
+    let id = backend
+        .create_menu(MenuConfig {
+            width: config.menu_width.clamp(320, 720),
+            height: 640,
+            margin_top: config.panel_height as i32,
+            margin_left: 0,
+            output: output.as_ref().map(|o| o.id),
+            namespace: "nuraloumi-files".into(),
         })
-        .map(|w| config.menu_width.min(w.saturating_sub(16).max(240)))
-        .unwrap_or(config.menu_width);
-    let requested_height = output
-        .as_ref()
-        .and_then(|o| {
-            let scale = o.scale.max(1) as u32;
-            (o.mode_height > 0).then_some(o.mode_height as u32 / scale)
-        })
-        .map(|h| {
-            h.saturating_sub(config.panel_height.saturating_add(16))
-                .clamp(300, 720)
-        })
-        .unwrap_or(640);
-
-    let surface = match backend.create_menu(WaylandMenuConfig {
-        width: requested_width,
-        height: requested_height,
-        margin_top: config.panel_height as i32,
-        margin_left: 0,
-        output: output.as_ref().map(|o| o.id),
-        namespace: "nuraloumi-files".into(),
-    }) {
-        Ok(s) => s,
-        Err(e) => return Err(format!("failed to create files surface: {e}")),
-    };
-
+        .map_err(|e| e.to_string())?;
     let renderer = CairoRenderer::default();
-    let tokens = match config.theme {
-        ShellTheme::Dark => &DARK_THEME,
-        ShellTheme::Light => &LIGHT_THEME,
-    };
-    let mut geometry: Option<(u32, u32, i32)> = None;
-    let mut scene: Option<Scene> = None;
-
+    let mut menu = ui.menu();
+    let mut state = ui.state(&menu, None);
+    let mut geometry = None;
+    let mut scene = None;
+    let mut touch: Option<(i32, MenuAction)> = None;
+    let mut pointer: Option<MenuAction> = None;
     loop {
-        backend
-            .blocking_dispatch()
-            .map_err(|e| format!("Wayland dispatch failed: {e}"))?;
-
-        let events: Vec<_> = backend.drain_events().collect();
-        for event in events {
-            if event.surface.is_some() && event.surface != Some(surface) {
+        backend.blocking_dispatch().map_err(|e| e.to_string())?;
+        for incoming in backend.drain_events().collect::<Vec<_>>() {
+            if incoming.surface.is_some() && incoming.surface != Some(id) {
                 continue;
             }
-
             let mut redraw = false;
-
-            match event.event {
-                WaylandEvent::Configure { width, height, scale }
-                    if event.surface == Some(surface) =>
-                {
+            let mut requested = None;
+            match incoming.event {
+                PlatformEvent::Configure {
+                    width,
+                    height,
+                    scale,
+                } => {
                     geometry = Some((width, height, scale));
                     redraw = true;
                 }
-                WaylandEvent::Key { key, pressed: true } => {
-                    let input = match key {
-                        Key::Up => Some(SemanticInput::Up),
-                        Key::Down => Some(SemanticInput::Down),
-                        Key::Left => Some(SemanticInput::Left),
-                        Key::Right => Some(SemanticInput::Right),
-                        Key::Enter => Some(SemanticInput::Activate),
-                        Key::Escape => Some(SemanticInput::Escape),
-                        Key::Backspace => Some(SemanticInput::Backspace),
-                        Key::Text(ref text) => {
-                            if !text.is_empty() && text.chars().all(|c| !c.is_control()) {
-                                Some(SemanticInput::Text(text.clone()))
+                PlatformEvent::Close => {
+                    let _ = backend.destroy_surface(id);
+                    return Ok(());
+                }
+                PlatformEvent::Key { pressed: true, key } => match key {
+                    Key::Escape if ui.mode != Mode::Normal => {
+                        ui.mode = Mode::Normal;
+                        redraw = true;
+                    }
+                    Key::Escape => {
+                        let _ = backend.destroy_surface(id);
+                        return Ok(());
+                    }
+                    Key::Enter if matches!(ui.mode, Mode::RenameInput { .. }) => {
+                        requested = Some(action("rename-next", ""));
+                    }
+                    Key::Enter if ui.mode != Mode::Normal => {
+                        requested = Some(action("confirm", ""));
+                    }
+                    Key::Backspace if matches!(ui.mode, Mode::RenameInput { .. }) => {
+                        ui.backspace();
+                        redraw = true;
+                    }
+                    Key::Text(t) if matches!(ui.mode, Mode::RenameInput { .. }) => {
+                        ui.text(&t);
+                        redraw = true;
+                    }
+                    Key::Up | Key::Down if ui.mode == Mode::Normal => {
+                        state.handle(
+                            &menu,
+                            if matches!(key, Key::Up) {
+                                SemanticInput::Up
                             } else {
-                                None
-                            }
-                        }
-                        _ => None,
-                    };
-                    if let Some(input) = input {
-                        let outcome = state.handle(&model, input);
-                        match outcome {
-                            NavigationOutcome::CloseRequested => {
-                                let _ = backend.destroy_surface(surface);
-                                return Ok(());
-                            }
-                            NavigationOutcome::ActionRequested { action, .. } => {
-                                match handle_action(&action, &mut current_dir, &mut model, &mut state) {
-                                    HandleResult::Close => {
-                                        let _ = backend.destroy_surface(surface);
-                                        return Ok(());
-                                    }
-                                    HandleResult::Redraw => {}
-                                    HandleResult::Noop => {}
-                                }
-                            }
-                            _ => {}
+                                SemanticInput::Down
+                            },
+                        );
+                        if let Some(index) = state
+                            .selected_id
+                            .as_deref()
+                            .and_then(|id| id.strip_prefix("entry-"))
+                            .and_then(|i| i.parse::<usize>().ok())
+                        {
+                            ui.selected = Some(index);
                         }
                         redraw = true;
                     }
-                }
-                WaylandEvent::PointerButton { x, y, pressed: true, .. } => {
-                    if let Some(ref s) = scene {
-                        if let Some(id) = find_hit_region(s, x, y) {
-                            let action = model.item_by_id(&id).and_then(|i| i.action.clone());
-                            if let Some(action) = action {
-                                match handle_action(&action, &mut current_dir, &mut model, &mut state) {
-                                    HandleResult::Close => {
-                                        let _ = backend.destroy_surface(surface);
-                                        return Ok(());
-                                    }
-                                    HandleResult::Redraw => redraw = true,
-                                    HandleResult::Noop => {}
-                                }
-                            }
-                        }
+                    Key::Enter => {
+                        requested = state
+                            .selected_id
+                            .as_deref()
+                            .and_then(|id| menu.item_by_id(id))
+                            .and_then(|i| i.action.clone())
+                    }
+                    Key::Backspace => requested = Some(action("parent", "")),
+                    Key::Text(t) if t == "r" || t == "R" => requested = Some(action("rename", "")),
+                    Key::Text(t) if t == "d" || t == "D" => requested = Some(action("delete", "")),
+                    Key::Text(t) if t == "o" || t == "O" => {
+                        requested = Some(action("open-with", ""))
+                    }
+                    _ => {}
+                },
+                PlatformEvent::TouchDown { id: tid, x, y } => {
+                    if touch.is_none() {
+                        touch = hit(&scene, &menu, x, y).map(|a| (tid, a));
                     }
                 }
-                WaylandEvent::TouchDown { x, y, .. } => {
-                    if let Some(ref s) = scene {
-                        if let Some(id) = find_hit_region(s, x, y) {
-                            let action = model.item_by_id(&id).and_then(|i| i.action.clone());
-                            if let Some(action) = action {
-                                match handle_action(&action, &mut current_dir, &mut model, &mut state) {
-                                    HandleResult::Close => {
-                                        let _ = backend.destroy_surface(surface);
-                                        return Ok(());
-                                    }
-                                    HandleResult::Redraw => redraw = true,
-                                    HandleResult::Noop => {}
-                                }
-                            }
-                        }
+                PlatformEvent::TouchMotion { id: tid, x, y } => {
+                    if touch.as_ref().is_some_and(|(id, a)| {
+                        *id == tid && hit(&scene, &menu, x, y).as_ref() != Some(a)
+                    }) {
+                        touch = None;
                     }
                 }
-                WaylandEvent::Close => {
-                    let _ = backend.destroy_surface(surface);
-                    return Ok(());
+                PlatformEvent::TouchUp { id: tid } => {
+                    if touch.as_ref().is_some_and(|(id, _)| *id == tid) {
+                        requested = touch.take().map(|(_, a)| a);
+                    }
+                }
+                PlatformEvent::TouchCancel { .. } => touch = None,
+                PlatformEvent::PointerButton {
+                    pressed: true,
+                    x,
+                    y,
+                    button: 0x110,
+                } => pointer = hit(&scene, &menu, x, y),
+                PlatformEvent::PointerButton {
+                    pressed: false,
+                    x,
+                    y,
+                    button: 0x110,
+                } => {
+                    if pointer
+                        .as_ref()
+                        .is_some_and(|a| hit(&scene, &menu, x, y).as_ref() == Some(a))
+                    {
+                        requested = pointer.take();
+                    } else {
+                        pointer = None;
+                    }
                 }
                 _ => {}
             }
-
+            if let Some(a) = requested {
+                if let Err(error) = ui.activate(a) {
+                    ui.browser.message = format!("Action refused: {error}");
+                }
+                redraw = true;
+            }
             if redraw {
+                let selected = state.selected_id.clone();
+                menu = ui.menu();
+                state = ui.state(&menu, selected);
                 if let Some((w, h, s)) = geometry {
-                    let resolver = |id: &str| file_glyph(id, &model);
-                    scene = Some(render_and_present(
-                        &mut backend, surface, &renderer, tokens, &model, &state, w, h, s,
-                        Some(&resolver),
+                    scene = Some(render(
+                        &mut backend,
+                        id,
+                        &renderer,
+                        &config,
+                        &menu,
+                        &state,
+                        w,
+                        h,
+                        s,
                     )?);
                 }
             }
         }
     }
 }
-
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
-fn render_and_present<'a>(
-    backend: &mut WaylandBackend,
-    surface: SurfaceId,
-    renderer: &CairoRenderer,
-    tokens: &nuraloumi_core::ThemeTokens,
-    model: &'a MenuModel,
-    state: &MenuState,
-    width: u32,
-    height: u32,
-    scale: i32,
-    glyph_resolver: Option<&'a dyn Fn(&str) -> Option<char>>,
-) -> Result<Scene, String> {
-    let viewport = Viewport::new(
-        f64::from(width),
-        f64::from(height),
-        f64::from(scale.max(1)),
-    );
-    let (scene, mut buffer) = render_menu_with_glyphs(
-        renderer, model, state, viewport, tokens, RenderOptions::default(), None,
-        glyph_resolver,
-    )
-    .map_err(|e| format!("Cairo render failed: {e}"))?;
-
-    let info = buffer.info();
-    let bw = u32::try_from(info.width).map_err(|_| "negative width".to_owned())?;
-    let bh = u32::try_from(info.height).map_err(|_| "negative height".to_owned())?;
-    let stride = usize::try_from(info.stride).map_err(|_| "negative stride".to_owned())?;
-    let present = buffer
-        .with_argb32_bytes(|pixels, _| {
-            backend.present(
-                surface,
-                Frame {
-                    width: bw,
-                    height: bh,
-                    stride,
-                    format: PixelFormat::Argb8888,
-                    pixels,
-                },
-            )
-        })
-        .map_err(|e| format!("pixel borrow failed: {e}"))?;
-    match present {
-        Ok(()) | Err(BackendError::WouldBlock) => Ok(scene),
-        Err(e) => Err(format!("present failed: {e}")),
-    }
-}
-
-fn find_hit_region(scene: &Scene, x: f64, y: f64) -> Option<String> {
-    scene.hit_test(x, y).map(str::to_owned)
-}
-
-fn file_glyph(id: &str, model: &MenuModel) -> Option<char> {
-    if id == "path-display" {
-        return Some('/');
-    }
-    if id == "nav-parent" {
-        return Some('<');
-    }
-    let item = model.item_by_id(id)?;
-    match &item.action {
-        Some(MenuAction::Navigate { .. }) => Some('/'),
-        Some(MenuAction::Custom { kind, payload }) if kind == "open" => {
-            let ext = std::path::Path::new(payload.as_str())
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("")
-                .to_lowercase();
-            match ext.as_str() {
-                "jpg" | "jpeg" | "png" | "gif" | "bmp" | "svg" | "webp" => Some('*'),
-                "mp3" | "flac" | "ogg" | "wav" | "opus" | "m4a" => Some('~'),
-                "mp4" | "mkv" | "avi" | "webm" | "mov" => Some('~'),
-                "pdf" => Some('@'),
-                "zip" | "tar" | "gz" | "xz" | "bz2" | "7z" => Some('%'),
-                "rs" | "py" | "sh" | "c" | "h" | "js" | "ts" | "toml" | "json" | "yaml" | "yml" => {
-                    Some('#')
-                }
-                _ => Some('-'),
-            }
-        }
-        _ => None,
-    }
-}
-
 fn main() -> ExitCode {
-    let args = match parse_args() {
-        Ok(a) => a,
+    match parse(env::args().skip(1)).and_then(|v| v.map(run).transpose()) {
+        Ok(_) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("nuraloumi-files: {e}");
-            return ExitCode::from(2);
+            ExitCode::FAILURE
         }
-    };
-
-    if !args.live {
-        eprintln!("{HELP}");
-        eprintln!("nuraloumi-files requires --live mode");
-        return ExitCode::from(2);
     }
-
-    let config = args
-        .config
-        .as_deref()
-        .map(|path| load_config_or_default(Some(path)))
-        .unwrap_or_else(|| load_config_or_default(None))
-        .unwrap_or_default();
-
-    if let Err(e) = run_live(config, &args) {
-        eprintln!("nuraloumi-files: {e}");
-        return ExitCode::FAILURE;
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn capabilities_default_safe() {
+        assert!(
+            parse(vec!["--live".into()])
+                .unwrap()
+                .unwrap()
+                .capabilities
+                .delete
+                == false
+        );
+        assert!(parse(vec!["--open-with".into(), "../../malicious.desktop".into()]).is_err());
     }
-    ExitCode::SUCCESS
 }
