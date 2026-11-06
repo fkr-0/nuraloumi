@@ -1,12 +1,9 @@
-//! Standalone favorites tests compile the new module before shared lib.rs
-//! registration is performed by the integration lane.
-#[path = "../src/favorites.rs"]
-mod favorites;
-
-use favorites::{
+//! Favorites fixture and storage tests against the public shell module.
+use nuraloumi_providers::{ApplicationProvider, FixtureCommandRunner, Provider};
+use nuraloumi_shell::favorites;
+use nuraloumi_shell::favorites::{
     state_path, FavoriteAction, FavoritesStore, MAX_FAVORITES, MAX_RECENT, MAX_STATE_BYTES,
 };
-use nuraloumi_providers::{ApplicationProvider, FixtureCommandRunner, Provider};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -323,4 +320,97 @@ fn empty_discovery_and_bad_selection_degrade_safely() {
     let visible = state.visible(&[] as &[String], String::as_str);
     assert_eq!(visible.selection(Some("a.desktop"), 0), None);
     assert!(visible.all().is_empty());
+}
+
+#[test]
+fn serialized_updates_reconcile_two_independent_process_like_writers() {
+    use std::sync::{Arc, Barrier};
+    let dir = Scratch::new();
+    let path = dir.config_path();
+    let known = ids(&["alpha.desktop", "terminal.desktop", "zeta.desktop"]);
+    let gate = Arc::new(Barrier::new(2));
+    let workers = ["alpha.desktop", "terminal.desktop"]
+        .into_iter()
+        .map(|id| {
+            let gate = gate.clone();
+            let path = path.clone();
+            let known = known.clone();
+            std::thread::spawn(move || {
+                gate.wait();
+                favorites::update_serialized(
+                    &path,
+                    &[],
+                    FavoriteAction::Pin(id.to_owned()),
+                    &known,
+                )
+                .unwrap();
+            })
+        })
+        .collect::<Vec<_>>();
+    for worker in workers {
+        worker.join().expect("writer thread");
+    }
+    let final_state = FavoritesStore::load(&path).unwrap();
+    assert_eq!(final_state.favorites().len(), 2);
+    assert!(final_state
+        .favorites()
+        .contains(&"alpha.desktop".to_owned()));
+    assert!(final_state
+        .favorites()
+        .contains(&"terminal.desktop".to_owned()));
+}
+
+#[test]
+fn serialized_update_fails_closed_when_lock_is_busy_or_symlinked() {
+    let dir = Scratch::new();
+    let path = dir.config_path();
+    let available = ids(&["alpha.desktop"]);
+    let lock_path = path.parent().unwrap().join(".launcher-state.lock");
+    let lock_file = fs::File::create(&lock_path).unwrap();
+    lock_file.lock().unwrap();
+    let error = favorites::update_serialized(
+        &path,
+        &[],
+        FavoriteAction::Pin("alpha.desktop".into()),
+        &available,
+    )
+    .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::WouldBlock);
+    assert!(!path.exists());
+    lock_file.unlock().unwrap();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        fs::remove_file(&lock_path).unwrap();
+        symlink(&path, &lock_path).unwrap();
+        assert_eq!(
+            favorites::update_serialized(
+                &path,
+                &[],
+                FavoriteAction::Pin("alpha.desktop".into()),
+                &available
+            )
+            .unwrap_err()
+            .kind(),
+            ErrorKind::InvalidInput
+        );
+        assert!(!path.exists());
+    }
+}
+
+#[test]
+fn serialized_state_refuses_symlinked_directory() {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        let dir = Scratch::new();
+        let elsewhere = dir.0.join("elsewhere");
+        fs::create_dir(&elsewhere).unwrap();
+        let link = dir.0.join("nuraloumi");
+        symlink(&elsewhere, &link).unwrap();
+        let path = link.join("launcher-state.json");
+        assert!(favorites::ensure_state_directory(&path).is_err());
+        assert!(!elsewhere.join("launcher-state.json").exists());
+    }
 }

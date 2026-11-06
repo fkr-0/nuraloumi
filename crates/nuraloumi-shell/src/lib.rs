@@ -15,6 +15,7 @@ pub use nuraloumi_core::{
 };
 
 mod config;
+pub mod favorites;
 pub mod glyphs;
 pub use glyphs::{default_glyph_resolver, GlyphStyle, GlyphTable};
 pub mod ipc;
@@ -682,6 +683,117 @@ pub fn apply_launcher_preferences(
     applications.extend(indexed.into_iter().map(|(_, application)| application));
 }
 
+/// Overlay persisted launcher state over the already-discovered, configured
+/// desktop entries. Preserve provider authority and display metadata.
+pub fn apply_launcher_state(snapshot: &mut FixtureSnapshot, state: &favorites::FavoritesStore) {
+    let visible = state.visible(&snapshot.applications, |app| app.id.as_str());
+    let ordered = visible.all();
+    let mut entries = std::mem::take(&mut snapshot.applications)
+        .into_iter()
+        .map(|entry| (entry.id.clone(), entry))
+        .collect::<BTreeMap<_, _>>();
+    snapshot.applications = ordered
+        .into_iter()
+        .filter_map(|id| {
+            entries.remove(&id).map(|mut entry| {
+                entry.pinned = visible.favorites.contains(&id);
+                entry
+            })
+        })
+        .collect();
+    snapshot.recent_application_ids = visible.recent;
+}
+
+/// Apply the persisted user state after XDG discovery/preferences, never to
+/// an arbitrary fixture or during rendering.
+pub fn refresh_user_launcher_state(
+    snapshot: &mut FixtureSnapshot,
+    preferences: &LauncherPreferences,
+) -> Result<(), String> {
+    let path = favorites::user_state_path().map_err(|error| error.to_string())?;
+    let store = favorites::FavoritesStore::load_or_seed(&path, &preferences.pinned)
+        .map_err(|error| format!("launcher state {}: {error}", path.display()))?;
+    apply_launcher_state(snapshot, &store);
+    Ok(())
+}
+
+/// Called on the shell action path, never by the Cairo renderer. Reloads the
+/// latest state under a bounded inter-process lock before applying an action.
+pub fn update_user_launcher_state(
+    snapshot: &mut FixtureSnapshot,
+    preferences: &LauncherPreferences,
+    action_kind: &str,
+    payload: &str,
+) -> Result<bool, String> {
+    if !matches!(
+        action_kind,
+        "launcher.favorite.toggle" | "launcher.favorite.move_up" | "launcher.recent.clear"
+    ) {
+        return Ok(false);
+    }
+    let path = favorites::user_state_path().map_err(|error| error.to_string())?;
+    update_user_launcher_state_at_path(snapshot, preferences, action_kind, payload, &path)
+}
+
+/// Testable action adapter with an explicit path; actions remain typed.
+pub fn update_user_launcher_state_at_path(
+    snapshot: &mut FixtureSnapshot,
+    preferences: &LauncherPreferences,
+    action_kind: &str,
+    payload: &str,
+    path: &Path,
+) -> Result<bool, String> {
+    use favorites::FavoriteAction;
+    let action = match action_kind {
+        "launcher.favorite.toggle" => FavoriteAction::Toggle(payload.to_owned()),
+        "launcher.favorite.move_up" => FavoriteAction::MoveEarlier(payload.to_owned()),
+        "launcher.recent.clear" => FavoriteAction::ClearRecent,
+        _ => return Ok(false),
+    };
+    persist_launcher_action_at_path(snapshot, preferences, action, path)?;
+    Ok(true)
+}
+
+pub fn record_user_application_activation(
+    snapshot: &mut FixtureSnapshot,
+    preferences: &LauncherPreferences,
+    id: &str,
+) -> Result<(), String> {
+    let path = favorites::user_state_path().map_err(|error| error.to_string())?;
+    record_user_application_activation_at_path(snapshot, preferences, id, &path)
+}
+
+pub fn record_user_application_activation_at_path(
+    snapshot: &mut FixtureSnapshot,
+    preferences: &LauncherPreferences,
+    id: &str,
+    path: &Path,
+) -> Result<(), String> {
+    persist_launcher_action_at_path(
+        snapshot,
+        preferences,
+        favorites::FavoriteAction::RecordLaunch(id.to_owned()),
+        path,
+    )
+}
+
+fn persist_launcher_action_at_path(
+    snapshot: &mut FixtureSnapshot,
+    preferences: &LauncherPreferences,
+    action: favorites::FavoriteAction,
+    path: &Path,
+) -> Result<(), String> {
+    let discovered = snapshot
+        .applications
+        .iter()
+        .map(|app| app.id.clone())
+        .collect::<Vec<_>>();
+    let state = favorites::update_serialized(path, &preferences.pinned, action, &discovered)
+        .map_err(|error| format!("launcher state {}: {error}", path.display()))?;
+    apply_launcher_state(snapshot, &state);
+    Ok(())
+}
+
 pub fn resolve_app_activation(
     desktop_id: &str,
     windows: &[WindowEntry],
@@ -967,6 +1079,9 @@ pub struct FixtureSnapshot {
     pub window_thumbnail_issue: Option<String>,
     #[serde(default)]
     pub applications: Vec<ApplicationEntry>,
+    /// Stable desktop IDs in most-recent-first order, excluding favorites.
+    #[serde(default)]
+    pub recent_application_ids: Vec<String>,
     #[serde(default)]
     pub desktops: Vec<DesktopEntry>,
     #[serde(default)]
@@ -1115,6 +1230,7 @@ impl Default for FixtureSnapshot {
                     pinned: false,
                 },
             ],
+            recent_application_ids: Vec::new(),
             desktops: vec![
                 DesktopEntry {
                     id: "1".into(),
@@ -1380,6 +1496,22 @@ fn build_launcher_menu_for_query(
     }
 
     if matches!(mode, OverviewMode::All | OverviewMode::Apps) {
+        let recent = snapshot
+            .recent_application_ids
+            .iter()
+            .filter_map(|id| snapshot.applications.iter().find(|app| &app.id == id))
+            .filter(|app| !app.pinned)
+            .map(launcher_application_item)
+            .filter(|item| !searching || nuraloumi_core::matches_query(item, query))
+            .take(8)
+            .collect::<Vec<_>>();
+        if !recent.is_empty() {
+            items.push(section("launcher.recent", "Recent applications"));
+            items.extend(recent);
+        }
+    }
+
+    if matches!(mode, OverviewMode::All | OverviewMode::Apps) {
         let application_limit = if mode == OverviewMode::All && !searching {
             12
         } else {
@@ -1388,7 +1520,9 @@ fn build_launcher_menu_for_query(
         let applications = snapshot
             .applications
             .iter()
-            .filter(|application| !application.pinned)
+            .filter(|application| {
+                !application.pinned && !snapshot.recent_application_ids.contains(&application.id)
+            })
             .map(launcher_application_item)
             .filter(|item| !searching || nuraloumi_core::matches_query(item, query))
             .take(application_limit)
@@ -1401,11 +1535,58 @@ fn build_launcher_menu_for_query(
                 if snapshot.applications.is_empty() {
                     "Desktop-entry provider has no visible applications"
                 } else {
-                    "All visible applications are pinned as favorites"
+                    "Other apps appear in Favorites or Recent applications"
                 },
             ));
         } else {
             items.extend(applications);
+        }
+    }
+
+    if mode == OverviewMode::Apps {
+        items.push(section("launcher.manage", "Manage favorites and history"));
+        for (position, application) in snapshot.applications.iter().enumerate().take(32) {
+            if searching
+                && !nuraloumi_core::matches_query(&launcher_application_item(application), query)
+            {
+                continue;
+            }
+            items.push(custom_action(
+                &format!("launcher.pin.{}", application.id),
+                &format!(
+                    "{} {}",
+                    if application.pinned { "★" } else { "☆" },
+                    application.label
+                ),
+                Some(if application.pinned {
+                    "Remove from favorites"
+                } else {
+                    "Add to favorites"
+                }),
+                "launcher.favorite.toggle",
+                &application.id,
+                true,
+            ));
+            if application.pinned && position > 0 {
+                items.push(custom_action(
+                    &format!("launcher.move_up.{}", application.id),
+                    &format!("Move {} earlier", application.label),
+                    None,
+                    "launcher.favorite.move_up",
+                    &application.id,
+                    true,
+                ));
+            }
+        }
+        if !snapshot.recent_application_ids.is_empty() {
+            items.push(custom_action(
+                "launcher.clear_recent",
+                "Clear recent applications",
+                None,
+                "launcher.recent.clear",
+                "",
+                true,
+            ));
         }
     }
 

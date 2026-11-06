@@ -18,7 +18,8 @@ use nuraloumi_shell::{
     dismiss_backdrop_enabled_for_renderer, dismiss_backdrop_margins, dispatch_keybinding,
     execute_window_command, launcher_search_input, load_config_or_default, load_fixture_snapshot,
     panel_affordances, parse_desktop_command, parse_family, parse_window_command,
-    render_menu_follow_selection, resolve_app_activation, successful_action_requests_dismiss,
+    record_user_application_activation, refresh_user_launcher_state, render_menu_follow_selection,
+    resolve_app_activation, successful_action_requests_dismiss, update_user_launcher_state,
     window_entries, ActionReport, AppActivation, ApplicationEntry as ShellApplicationEntry,
     BluetoothDeviceEntry, ControlCenterTab, DesktopCommand, DesktopControlCapabilities,
     DesktopEntry, FixtureSnapshot, HitRegion as ShellHitRegion, KeybindingRegistry,
@@ -452,6 +453,10 @@ fn apply_live_config_reload(
     apply_launcher_preferences(&mut staged_apps, &next_config.launcher);
     let mut staged_snapshot = snapshot.clone();
     staged_snapshot.applications = staged_apps.clone();
+    if let Err(message) = refresh_user_launcher_state(&mut staged_snapshot, &next_config.launcher) {
+        return IpcResponse::failure(id, "launcher_state_error", message);
+    }
+    staged_apps = staged_snapshot.applications.clone();
 
     let staged_shell = if let Some(menu) = active_menu.as_ref() {
         let mut shell = menu.shell.clone();
@@ -473,6 +478,10 @@ fn apply_live_config_reload(
     let old_config = std::mem::replace(config, next_config);
     let old_keybindings = std::mem::replace(keybindings, next_keybindings);
     let old_apps = std::mem::replace(&mut snapshot.applications, staged_apps);
+    let old_recent = std::mem::replace(
+        &mut snapshot.recent_application_ids,
+        staged_snapshot.recent_application_ids.clone(),
+    );
     let old_panel_scene = panel_scene.take();
     let (old_shell, old_menu_scene) = if let Some(menu) = active_menu.as_mut() {
         let shell = std::mem::replace(
@@ -519,6 +528,7 @@ fn apply_live_config_reload(
         *config = old_config;
         *keybindings = old_keybindings;
         snapshot.applications = old_apps;
+        snapshot.recent_application_ids = old_recent;
         *panel_scene = old_panel_scene;
         if let (Some(menu), Some(shell)) = (active_menu.as_mut(), old_shell) {
             menu.shell = shell;
@@ -556,6 +566,9 @@ fn run_live(
     // reversible (including removing a previously applied override).
     let mut base_applications = snapshot.applications.clone();
     apply_launcher_preferences(&mut snapshot.applications, &config.launcher);
+    if policy.execute_provider_actions {
+        refresh_user_launcher_state(&mut snapshot, &config.launcher)?;
+    }
     let mut backend =
         WaylandBackend::connect().map_err(|error| format!("Wayland connection failed: {error}"))?;
     let capabilities = backend.capabilities();
@@ -1054,7 +1067,26 @@ fn run_live(
                                     || kind == "overview.mode"
                                     || kind == "control.tab"
                         );
-                        if !is_navigation {
+                        let launcher_action_handled = if policy.execute_provider_actions {
+                            if let MenuAction::Custom { kind, payload } = action {
+                                update_user_launcher_state(
+                                    &mut snapshot,
+                                    &config.launcher,
+                                    kind,
+                                    payload,
+                                )?
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        };
+                        if launcher_action_handled {
+                            menu.shell.refresh_family(menu.family, &snapshot)?;
+                            panel_scene = None;
+                            redraw = true;
+                        }
+                        if !is_navigation && !launcher_action_handled {
                             if let Some(command) = parse_desktop_command(action, &snapshot)? {
                                 match command {
                                     DesktopCommand::Switch { desktop_id } => {
@@ -1109,8 +1141,21 @@ fn run_live(
                                             &config.launcher,
                                         ) {
                                             AppActivation::AlreadyFocused => {
+                                                if let Err(error) =
+                                                    record_user_application_activation(
+                                                        &mut snapshot,
+                                                        &config.launcher,
+                                                        payload,
+                                                    )
+                                                {
+                                                    eprintln!(
+                                                        "nuraloumi-launcher-state-error: {error}"
+                                                    );
+                                                }
                                                 close = close_after_success;
                                                 if !close {
+                                                    menu.shell.refresh_family(menu.family, &snapshot)?;
+                                                    panel_scene = None;
                                                     redraw = true;
                                                 }
                                                 app_reused = true;
@@ -1127,6 +1172,17 @@ fn run_live(
                                                                 .to_owned()
                                                         })?;
                                                 execute_window_command(&mut backend, command)?;
+                                                if let Err(error) =
+                                                    record_user_application_activation(
+                                                        &mut snapshot,
+                                                        &config.launcher,
+                                                        payload,
+                                                    )
+                                                {
+                                                    eprintln!(
+                                                        "nuraloumi-launcher-state-error: {error}"
+                                                    );
+                                                }
                                                 close = close_after_success;
                                                 if !close {
                                                     backend.roundtrip().map_err(|error| {
@@ -1165,6 +1221,22 @@ fn run_live(
                                                     "nuraloumi-panel: compositor restart completed; exiting stale Wayland session"
                                                 );
                                                 return Ok(());
+                                            }
+                                            if result.executed && !result.dry_run {
+                                                if let MenuAction::Custom { kind, payload } = action
+                                                {
+                                                    if kind == "app.launch" {
+                                                        if let Err(error) =
+                                                            record_user_application_activation(
+                                                                &mut snapshot,
+                                                                &config.launcher,
+                                                                payload,
+                                                            )
+                                                        {
+                                                            eprintln!("nuraloumi-launcher-state-error: {error}");
+                                                        }
+                                                    }
+                                                }
                                             }
                                             if close_after_success && result.executed {
                                                 close = true;
@@ -1284,6 +1356,9 @@ fn run_live(
             );
             base_applications = snapshot.applications.clone();
             apply_launcher_preferences(&mut snapshot.applications, &config.launcher);
+            if policy.execute_provider_actions {
+                refresh_user_launcher_state(&mut snapshot, &config.launcher)?;
+            }
             apply_process_snapshot(&mut snapshot, tasks);
             if policy.execute_provider_actions {
                 refresh_window_snapshot(&mut snapshot, &backend);
@@ -2196,6 +2271,7 @@ fn fixture_snapshot_from_probe(probe: &ProbeSnapshot) -> FixtureSnapshot {
         window_thumbnails_available: false,
         window_thumbnail_issue: None,
         applications: Vec::new(),
+        recent_application_ids: Vec::new(),
         desktops: Vec::new(),
         desktop_capabilities: DesktopControlCapabilities::unavailable(),
     }
@@ -2208,6 +2284,7 @@ fn refresh_probe_snapshot(
 ) {
     let tasks = std::mem::take(&mut snapshot.tasks);
     let applications = std::mem::take(&mut snapshot.applications);
+    let recent_application_ids = std::mem::take(&mut snapshot.recent_application_ids);
     let windows = std::mem::take(&mut snapshot.windows);
     let window_thumbnails = std::mem::take(&mut snapshot.window_thumbnails);
     let window_thumbnails_available = snapshot.window_thumbnails_available;
@@ -2222,6 +2299,7 @@ fn refresh_probe_snapshot(
     snapshot.renderer_switch_available &= enable_renderer_switch;
     snapshot.tasks = tasks;
     snapshot.applications = applications;
+    snapshot.recent_application_ids = recent_application_ids;
     snapshot.windows = windows;
     snapshot.window_thumbnails = window_thumbnails;
     snapshot.window_thumbnails_available = window_thumbnails_available;

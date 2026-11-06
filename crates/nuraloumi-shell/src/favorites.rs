@@ -29,6 +29,7 @@ pub enum FavoriteAction {
     Unpin(String),
     Toggle(String),
     Move { id: String, index: usize },
+    MoveEarlier(String),
     RecordLaunch(String),
     ForgetRecent(String),
     ClearRecent,
@@ -112,6 +113,104 @@ fn dedup(ids: Vec<String>, max: usize) -> io::Result<Vec<String>> {
 /// Caller-supplied base directory; no global environment modification needed.
 pub fn state_path(config_home: &Path) -> PathBuf {
     config_home.join("nuraloumi/launcher-state.json")
+}
+
+/// Resolve user state without requiring or modifying a Wayland session.
+pub fn user_state_path() -> io::Result<PathBuf> {
+    let root = match std::env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
+        Some(root) => PathBuf::from(root),
+        None => {
+            let home = std::env::var_os("HOME")
+                .ok_or_else(|| bad_input("HOME or XDG_CONFIG_HOME is required"))?;
+            PathBuf::from(home).join(".config")
+        }
+    };
+    if !root.is_absolute() {
+        return Err(bad_input("XDG configuration directory must be absolute"));
+    }
+    Ok(state_path(&root))
+}
+
+/// Ensure that the leaf state directory is real (not a symlink).
+/// New directories have private permissions; an existing XDG root is respected.
+pub fn ensure_state_directory(path: &Path) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| bad_input("state path has no parent"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        let mut builder = fs::DirBuilder::new();
+        builder.recursive(true).mode(0o700);
+        builder.create(parent)?;
+    }
+    #[cfg(not(unix))]
+    fs::create_dir_all(parent)?;
+    if !fs::symlink_metadata(parent)?.file_type().is_dir() {
+        return Err(bad_input("launcher state directory may not be a symlink"));
+    }
+    Ok(())
+}
+
+/// One transaction with an inter-process file lock. Load inside the lock so
+/// multiple menu/panel processes do not overwrite each other's recent IDs.
+/// The bounded lock is taken only on the shell action path, not during paint.
+pub fn update_serialized(
+    path: &Path,
+    initial_pins: &[String],
+    action: FavoriteAction,
+    discovered_ids: &[String],
+) -> io::Result<FavoritesStore> {
+    ensure_state_directory(path)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| bad_input("state path has no parent"))?;
+    let lock_path = parent.join(".launcher-state.lock");
+    match fs::symlink_metadata(&lock_path) {
+        Ok(meta) if !meta.file_type().is_file() => {
+            return Err(bad_input("launcher lock must be a regular file"))
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let lock = options.open(&lock_path)?;
+    let mut locked = false;
+    for _ in 0..20 {
+        match lock.try_lock() {
+            Ok(()) => {
+                locked = true;
+                break;
+            }
+            Err(fs::TryLockError::WouldBlock) => {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Err(fs::TryLockError::Error(error)) => return Err(error),
+        }
+    }
+    if !locked {
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "launcher state is busy; retry later",
+        ));
+    }
+
+    let result = (|| {
+        let mut latest = FavoritesStore::load_or_seed(path, initial_pins)?;
+        latest.apply(action, discovered_ids)?;
+        latest.save(path)?;
+        Ok(latest)
+    })();
+    // The lock is also released by Drop on errors.
+    let _ = lock.unlock();
+    result
 }
 
 impl FavoritesStore {
@@ -222,6 +321,7 @@ impl FavoritesStore {
             | Unpin(id)
             | Toggle(id)
             | Move { id, .. }
+            | MoveEarlier(id)
             | RecordLaunch(id)
             | ForgetRecent(id) => Some(id.as_str()),
             ClearRecent => None,
@@ -257,6 +357,15 @@ impl FavoritesStore {
                 if let Some(old) = self.favorites.iter().position(|item| item == &id) {
                     self.favorites.remove(old);
                     self.favorites.insert(index.min(self.favorites.len()), id);
+                } else {
+                    return Err(bad_input("cannot move an unpinned application"));
+                }
+            }
+            MoveEarlier(id) => {
+                if let Some(index) = self.favorites.iter().position(|item| item == &id) {
+                    if index > 0 {
+                        self.favorites.swap(index - 1, index);
+                    }
                 } else {
                     return Err(bad_input("cannot move an unpinned application"));
                 }

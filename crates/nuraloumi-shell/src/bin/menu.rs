@@ -11,7 +11,8 @@ use nuraloumi_shell::{
     dismiss_backdrop_enabled_for_renderer, dismiss_backdrop_margins, dispatch_keybinding,
     execute_window_command, launcher_search_input, load_config_or_default, load_fixture_snapshot,
     load_menu, parse_desktop_command, parse_family, parse_window_command,
-    render_menu_follow_selection, resolve_app_activation, successful_action_requests_dismiss,
+    record_user_application_activation, refresh_user_launcher_state, render_menu_follow_selection,
+    resolve_app_activation, successful_action_requests_dismiss, update_user_launcher_state,
     window_entries, ActionReport, AppActivation, ApplicationEntry as ShellApplicationEntry,
     BluetoothDeviceEntry, ControlCenterTab, DesktopCommand, DesktopControlCapabilities,
     DesktopEntry, FixtureSnapshot, HitRegion as ShellHitRegion, KeybindingRegistry,
@@ -84,6 +85,7 @@ struct Args {
 fn refresh_probe_snapshot(snapshot: &mut FixtureSnapshot, probe: &ProbeSnapshot) {
     let tasks = std::mem::take(&mut snapshot.tasks);
     let applications = std::mem::take(&mut snapshot.applications);
+    let recent_application_ids = std::mem::take(&mut snapshot.recent_application_ids);
     let windows = std::mem::take(&mut snapshot.windows);
     let window_thumbnails = std::mem::take(&mut snapshot.window_thumbnails);
     let window_thumbnails_available = snapshot.window_thumbnails_available;
@@ -97,6 +99,7 @@ fn refresh_probe_snapshot(snapshot: &mut FixtureSnapshot, probe: &ProbeSnapshot)
     *snapshot = fixture_snapshot_from_probe(probe);
     snapshot.tasks = tasks;
     snapshot.applications = applications;
+    snapshot.recent_application_ids = recent_application_ids;
     snapshot.windows = windows;
     snapshot.window_thumbnails = window_thumbnails;
     snapshot.window_thumbnails_available = window_thumbnails_available;
@@ -232,6 +235,9 @@ fn run() -> Result<(), String> {
     let family = parse_family(args.family.as_deref().unwrap_or("launcher"))?;
     if args.live && args.providers.is_none() {
         refresh_application_snapshot(&mut snapshot, &config.launcher);
+        if args.fixture.is_none() {
+            refresh_user_launcher_state(&mut snapshot, &config.launcher)?;
+        }
         if matches!(family, MenuFamily::Launcher | MenuFamily::Tasks) {
             refresh_process_snapshot(&mut snapshot);
         }
@@ -924,6 +930,12 @@ fn handle_live_report(
 
     if policy.execute_provider_actions {
         if let ActionReport::Dispatched { action, .. } = report {
+            if let MenuAction::Custom { kind, payload } = action {
+                if update_user_launcher_state(snapshot, &config.launcher, kind, payload)? {
+                    refresh_builtin_menu(shell, snapshot)?;
+                    return Ok(false);
+                }
+            }
             let close_after_success =
                 successful_action_requests_dismiss(config.menu_dismissal, action);
             if let Some(command) = parse_desktop_command(action, snapshot)? {
@@ -964,7 +976,19 @@ fn handle_live_report(
             if let MenuAction::Custom { kind, payload } = action {
                 if kind == "app.launch" {
                     match resolve_app_activation(payload, &snapshot.windows, &config.launcher) {
-                        AppActivation::AlreadyFocused => return Ok(close_after_success),
+                        AppActivation::AlreadyFocused => {
+                            if let Err(error) = record_user_application_activation(
+                                snapshot,
+                                &config.launcher,
+                                payload,
+                            ) {
+                                eprintln!("nuraloumi-launcher-state-error: {error}");
+                            }
+                            if !close_after_success {
+                                refresh_builtin_menu(shell, snapshot)?;
+                            }
+                            return Ok(close_after_success);
+                        }
                         AppActivation::FocusWindow(window_id) => {
                             let focus = MenuAction::Custom {
                                 kind: "window.focus".into(),
@@ -975,6 +999,13 @@ fn handle_live_report(
                                     "resolved app focus did not produce a window command".to_owned()
                                 })?;
                             execute_window_command(backend, command)?;
+                            if let Err(error) = record_user_application_activation(
+                                snapshot,
+                                &config.launcher,
+                                payload,
+                            ) {
+                                eprintln!("nuraloumi-launcher-state-error: {error}");
+                            }
                             if !close_after_success {
                                 backend.roundtrip().map_err(|error| {
                                     format!("toplevel focus roundtrip failed: {error}")
@@ -998,6 +1029,19 @@ fn handle_live_report(
                         "nuraloumi-provider-result: executed={} dry_run={} message={}",
                         result.executed, result.dry_run, result.message
                     );
+                    if result.executed && !result.dry_run {
+                        if let MenuAction::Custom { kind, payload } = action {
+                            if kind == "app.launch" {
+                                if let Err(error) = record_user_application_activation(
+                                    snapshot,
+                                    &config.launcher,
+                                    payload,
+                                ) {
+                                    eprintln!("nuraloumi-launcher-state-error: {error}");
+                                }
+                            }
+                        }
+                    }
                     if close_after_success && result.executed {
                         return Ok(true);
                     }
@@ -1422,6 +1466,7 @@ fn fixture_snapshot_from_probe(probe: &ProbeSnapshot) -> FixtureSnapshot {
         window_thumbnails_available: false,
         window_thumbnail_issue: None,
         applications: Vec::new(),
+        recent_application_ids: Vec::new(),
         desktops: Vec::new(),
         desktop_capabilities: DesktopControlCapabilities::unavailable(),
     }
