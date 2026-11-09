@@ -39,6 +39,14 @@ jobs:
       CFLAGS_armv7_unknown_linux_gnueabihf: -march=armv7-a -mfpu=vfpv3-d16 -mfloat-abi=hard
 
     steps:
+      - name: Install Git before checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
+            git ca-certificates
+
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
@@ -94,8 +102,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # In the Debian job container Git's parent-directory discovery can
-          # stop at a mount boundary. Bind metadata explicitly to the checkout.
+          # Fail closed if checkout did not retain commit provenance.
+          # Explicit Git paths make the metadata checks independent of cwd.
           export GIT_DIR="$PWD/.git"
           export GIT_WORK_TREE="$PWD"
           test -d "$GIT_DIR"

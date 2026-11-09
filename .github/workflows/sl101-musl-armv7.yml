@@ -65,7 +65,7 @@ jobs:
         run: |
           set -euo pipefail
           rustup target list --installed | grep -Fx "$TARGET"
-          rustup component list --installed | grep -E '^rust-src '
+          rustup component list --installed | grep -Fx 'rust-src'
           python3 -m unittest scripts/test_musl_ci.py -v
 
       - name: Prepare signed Alpine armv7 sysroot (never accesses tablet)

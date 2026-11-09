@@ -6,6 +6,7 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/sl101-musl-armv7.yml"
 SCRIPT = ROOT / "scripts/prepare-ci-musl-sysroot.sh"
 DOC = ROOT / "docs/qualification/MUSL-GITHUB-CI.md"
+HOST_CI = ROOT / ".github/workflows/ci.yml"
 
 
 class MuslCiContractTests(unittest.TestCase):
@@ -27,6 +28,9 @@ class MuslCiContractTests(unittest.TestCase):
         ):
             self.assertIn(part, self.ci)
         self.assertNotIn("armv7-unknown-linux-gnueabihf", self.ci)
+
+    def test_host_ci_installs_xkbcommon_needed_by_tests(self):
+        self.assertIn("libxkbcommon-dev", HOST_CI.read_text())
 
     def test_sysroot_is_signed_native_alpine_and_safe(self):
         for part in (

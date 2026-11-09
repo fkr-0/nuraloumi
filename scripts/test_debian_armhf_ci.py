@@ -29,6 +29,13 @@ class DebianArmhfCiTests(unittest.TestCase):
     def test_main_push_generates_glibc_artifact(self):
         self.assertIn("  push:\n    branches:\n      - main", self.ci)
 
+    def test_git_installed_before_checkout_to_preserve_provenance(self):
+        self.assertLess(
+            self.ci.index("- name: Install Git before checkout"),
+            self.ci.index("- uses: actions/checkout@v4"),
+        )
+        self.assertIn("git ca-certificates", self.ci)
+
     def test_glibc_not_alpine(self):
         for part in (
             "armv7-unknown-linux-gnueabihf",
