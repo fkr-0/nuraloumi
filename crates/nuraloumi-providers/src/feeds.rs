@@ -757,7 +757,7 @@ fn unhex(hex: &str) -> Result<String, FeedError> {
         _ => None,
     };
     let mut out = Vec::with_capacity(hex.len() / 2);
-    for pair in hex.as_bytes().chunks_exact(2) {
+    for pair in hex.as_bytes().as_chunks::<2>().0 {
         out.push(
             (digit(pair[0]).ok_or(FeedError::Invalid("read-state hex"))? << 4)
                 | digit(pair[1]).ok_or(FeedError::Invalid("read-state hex"))?,

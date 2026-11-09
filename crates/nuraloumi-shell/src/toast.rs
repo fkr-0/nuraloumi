@@ -115,10 +115,10 @@ impl Toast {
                 }
                 self.touch_id = None;
             }
-            PlatformEvent::TouchCancel { ids } => {
-                if self.touch_id.is_some_and(|id| ids.contains(&id)) {
-                    self.touch_id = None;
-                }
+            PlatformEvent::TouchCancel { ids }
+                if self.touch_id.is_some_and(|id| ids.contains(&id)) =>
+            {
+                self.touch_id = None;
             }
             _ => {}
         }

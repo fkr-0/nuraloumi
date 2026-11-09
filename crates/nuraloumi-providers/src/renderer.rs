@@ -335,7 +335,7 @@ mod tests {
         assert_eq!(fixture.run(), "Unknown", "PID reused while probing");
 
         let mut fixture = FixtureProc::measured();
-        fixture.second_stat = Some(stat(12345).into_iter().chain([b' ']).collect());
+        fixture.second_stat = Some(stat(12345).into_iter().chain(*b" ").collect());
         assert_eq!(fixture.run(), "Grate", "scheduling counters may change");
     }
 

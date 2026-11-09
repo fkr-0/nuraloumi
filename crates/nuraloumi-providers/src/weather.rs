@@ -98,11 +98,7 @@ fn objects<'a>(input: &'a str, key: &str) -> Vec<&'a str> {
                     }
                 }
             }
-            ']' => {
-                if depth == 0 {
-                    break;
-                }
-            }
+            ']' if depth == 0 => break,
             _ => {}
         }
     }

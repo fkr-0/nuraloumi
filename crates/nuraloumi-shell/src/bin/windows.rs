@@ -303,14 +303,14 @@ fn run_live(config: ShellConfig) -> Result<(), String> {
                         state.handle(&model, SemanticInput::Up);
                         redraw = true;
                     }
-                    Key::Text(ref text) => {
-                        if !text.is_empty() && text.chars().all(|c| !c.is_control()) {
-                            query.push_str(text);
-                            let tls = backend.toplevels();
-                            model = build_window_model(&tls, &query);
-                            state = MenuState::new(&model);
-                            redraw = true;
-                        }
+                    Key::Text(ref text)
+                        if !text.is_empty() && text.chars().all(|c| !c.is_control()) =>
+                    {
+                        query.push_str(text);
+                        let tls = backend.toplevels();
+                        model = build_window_model(&tls, &query);
+                        state = MenuState::new(&model);
+                        redraw = true;
                     }
                     _ => {}
                 },

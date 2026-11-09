@@ -146,7 +146,7 @@ fn collect_recent_files() -> Vec<RecentEntry> {
         }
     }
 
-    entries.sort_by(|a, b| b.0.cmp(&a.0));
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.0));
     entries.truncate(100);
     entries.into_iter().map(|(_, e)| e).collect()
 }
@@ -516,13 +516,13 @@ fn run_live(config: ShellConfig, args: &Args) -> Result<(), String> {
                             }
                         }
                     }
-                    Key::Text(text) => {
-                        if !text.is_empty() && text.chars().all(|c| !c.is_control()) {
-                            query.push_str(&text);
-                            model = build_run_model(prompt, &executables, &recent, &query);
-                            state = MenuState::new(&model);
-                            redraw = true;
-                        }
+                    Key::Text(text)
+                        if !text.is_empty() && text.chars().all(|c| !c.is_control()) =>
+                    {
+                        query.push_str(&text);
+                        model = build_run_model(prompt, &executables, &recent, &query);
+                        state = MenuState::new(&model);
+                        redraw = true;
                     }
                     _ => {}
                 },
