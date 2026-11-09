@@ -235,10 +235,7 @@ impl<'a> CoreMenuAdapter<'a> {
         }
     }
 
-    pub fn with_glyph_resolver(
-        mut self,
-        resolver: impl Fn(&str) -> Option<char> + 'a,
-    ) -> Self {
+    pub fn with_glyph_resolver(mut self, resolver: impl Fn(&str) -> Option<char> + 'a) -> Self {
         self.glyph_fn = Some(Box::new(resolver));
         self
     }
@@ -259,10 +256,7 @@ impl MenuSource for CoreMenuAdapter<'_> {
 
     fn item(&self, index: usize) -> MenuItemRef<'_> {
         let item = self.visible_items[index];
-        let glyph = self
-            .glyph_fn
-            .as_ref()
-            .and_then(|f| f(&item.id));
+        let glyph = self.glyph_fn.as_ref().and_then(|f| f(&item.id));
         MenuItemRef {
             id: &item.id,
             label: &item.label,

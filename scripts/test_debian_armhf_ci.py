@@ -26,6 +26,9 @@ class DebianArmhfCiTests(unittest.TestCase):
         ):
             self.assertIn(part, self.ci)
 
+    def test_main_push_generates_glibc_artifact(self):
+        self.assertIn("  push:\n    branches:\n      - main", self.ci)
+
     def test_glibc_not_alpine(self):
         for part in (
             "armv7-unknown-linux-gnueabihf",
@@ -52,6 +55,8 @@ class DebianArmhfCiTests(unittest.TestCase):
             "BUILD-INFO.txt",
             "upload-artifact@v4",
             "retention-days: 14",
+            'export GIT_DIR="$PWD/.git"',
+            'export GIT_WORK_TREE="$PWD"',
         ):
             self.assertIn(part, self.ci)
 

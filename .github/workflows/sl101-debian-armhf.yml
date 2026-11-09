@@ -4,6 +4,7 @@ on:
   workflow_dispatch:
   push:
     branches:
+      - main
       - ci/sl101-debian-armhf-*
   pull_request:
     paths:
@@ -93,6 +94,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # In the Debian job container Git's parent-directory discovery can
+          # stop at a mount boundary. Bind metadata explicitly to the checkout.
+          export GIT_DIR="$PWD/.git"
+          export GIT_WORK_TREE="$PWD"
+          test -d "$GIT_DIR"
+          git rev-parse --verify HEAD
+          test -z "$(git status --porcelain)"
           cargo xtask package --target "$TARGET" --out target/gha-artifact/nuraloumi-ci
           cargo xtask package-check --dir target/gha-artifact/nuraloumi-ci
           test -s target/gha-artifact/nuraloumi-ci.tar

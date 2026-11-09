@@ -1,11 +1,13 @@
-use nuraloumi_core::{MenuAction, MenuItem, MenuModel, MenuState, SemanticInput, DARK_THEME, LIGHT_THEME};
+use nuraloumi_core::{
+    MenuAction, MenuItem, MenuModel, MenuState, SemanticInput, DARK_THEME, LIGHT_THEME,
+};
 use nuraloumi_render_cairo::{CairoRenderer, RenderOptions, Scene, Viewport};
 use nuraloumi_shell::{
     load_config_or_default, render_menu_with_glyphs, ShellConfig, Theme as ShellTheme,
 };
 use nuraloumi_wayland::{
-    BackendError, DismissBackdropConfig, Frame, MenuConfig as WaylandMenuConfig, PixelFormat,
-    PlatformEvent as WaylandEvent, Key, SurfaceId, WaylandBackend,
+    BackendError, DismissBackdropConfig, Frame, Key, MenuConfig as WaylandMenuConfig, PixelFormat,
+    PlatformEvent as WaylandEvent, SurfaceId, WaylandBackend,
 };
 use std::env;
 use std::fs;
@@ -212,7 +214,11 @@ fn build_run_model(
                 items.push(MenuItem::separator("sep-recent"));
                 has_header = true;
             }
-            let kind = if entry.is_dir { "open-dir" } else { "open-file" };
+            let kind = if entry.is_dir {
+                "open-dir"
+            } else {
+                "open-file"
+            };
             let subtitle = if entry.is_dir {
                 "Directory".to_string()
             } else {
@@ -303,13 +309,12 @@ fn glyph_for_item_with_dirs(id: &str, recent: &[RecentEntry]) -> Option<char> {
         return Some('$');
     }
     if id.starts_with("recent-") {
-        if let Some(idx) = id.strip_prefix("recent-").and_then(|s| s.parse::<usize>().ok()) {
+        if let Some(idx) = id
+            .strip_prefix("recent-")
+            .and_then(|s| s.parse::<usize>().ok())
+        {
             if let Some(entry) = recent.get(idx) {
-                return if entry.is_dir {
-                    Some('/')
-                } else {
-                    Some('~')
-                };
+                return if entry.is_dir { Some('/') } else { Some('~') };
             }
         }
         return Some('~');
@@ -366,10 +371,8 @@ fn run_live(config: ShellConfig, args: &Args) -> Result<(), String> {
         .unwrap_or(400);
 
     let dismiss_surface = {
-        let (mt, mr, mb, ml) = nuraloumi_shell::dismiss_backdrop_margins(
-            config.panel_edge,
-            config.panel_height,
-        );
+        let (mt, mr, mb, ml) =
+            nuraloumi_shell::dismiss_backdrop_margins(config.panel_edge, config.panel_height);
         backend
             .create_dismiss_backdrop(DismissBackdropConfig {
                 margin_top: mt,
@@ -417,7 +420,11 @@ fn run_live(config: ShellConfig, args: &Args) -> Result<(), String> {
             if let Some(ds) = dismiss_surface {
                 if event.surface == Some(ds) {
                     match event.event {
-                        WaylandEvent::Configure { width, height, scale } => {
+                        WaylandEvent::Configure {
+                            width,
+                            height,
+                            scale,
+                        } => {
                             present_transparent(&mut backend, ds, width, height, scale)?;
                         }
                         WaylandEvent::PointerButton { pressed: true, .. }
@@ -441,92 +448,90 @@ fn run_live(config: ShellConfig, args: &Args) -> Result<(), String> {
             let mut redraw = false;
 
             match event.event {
-                WaylandEvent::Configure { width, height, scale }
-                    if event.surface == Some(surface) =>
-                {
+                WaylandEvent::Configure {
+                    width,
+                    height,
+                    scale,
+                } if event.surface == Some(surface) => {
                     geometry = Some((width, height, scale));
                     redraw = true;
                 }
-                WaylandEvent::Key { key, pressed: true } => {
-                    match key {
-                        Key::Escape => {
-                            close_surfaces(&mut backend, surface, dismiss_surface)?;
-                            return Ok(());
-                        }
-                        Key::Enter => {
-                            let action = if let Some(sel) = &state.selected_id {
-                                if sel == "run-execute" {
-                                    Some(("execute".to_string(), query.clone()))
-                                } else if let Some(item) = model.item_by_id(sel) {
-                                    if let Some(MenuAction::Custom { kind, payload }) =
-                                        &item.action
-                                    {
-                                        Some((kind.clone(), payload.clone()))
-                                    } else {
-                                        Some(("execute".to_string(), query.clone()))
-                                    }
+                WaylandEvent::Key { key, pressed: true } => match key {
+                    Key::Escape => {
+                        close_surfaces(&mut backend, surface, dismiss_surface)?;
+                        return Ok(());
+                    }
+                    Key::Enter => {
+                        let action = if let Some(sel) = &state.selected_id {
+                            if sel == "run-execute" {
+                                Some(("execute".to_string(), query.clone()))
+                            } else if let Some(item) = model.item_by_id(sel) {
+                                if let Some(MenuAction::Custom { kind, payload }) = &item.action {
+                                    Some((kind.clone(), payload.clone()))
                                 } else {
                                     Some(("execute".to_string(), query.clone()))
                                 }
-                            } else if !query.is_empty() {
-                                Some(("execute".to_string(), query.clone()))
                             } else {
-                                None
-                            };
-                            if let Some((kind, payload)) = action {
-                                if !payload.is_empty() {
-                                    close_surfaces(&mut backend, surface, dismiss_surface)?;
-                                    dispatch_action(&kind, &payload);
-                                    return Ok(());
+                                Some(("execute".to_string(), query.clone()))
+                            }
+                        } else if !query.is_empty() {
+                            Some(("execute".to_string(), query.clone()))
+                        } else {
+                            None
+                        };
+                        if let Some((kind, payload)) = action {
+                            if !payload.is_empty() {
+                                close_surfaces(&mut backend, surface, dismiss_surface)?;
+                                dispatch_action(&kind, &payload);
+                                return Ok(());
+                            }
+                        }
+                    }
+                    Key::Backspace => {
+                        query.pop();
+                        model = build_run_model(prompt, &executables, &recent, &query);
+                        state = MenuState::new(&model);
+                        redraw = true;
+                    }
+                    Key::Up => {
+                        state.handle(&model, SemanticInput::Up);
+                        redraw = true;
+                    }
+                    Key::Down => {
+                        state.handle(&model, SemanticInput::Down);
+                        redraw = true;
+                    }
+                    Key::Tab => {
+                        if let Some(sel) = &state.selected_id {
+                            if let Some(item) = model.item_by_id(sel) {
+                                if let Some(MenuAction::Custom { kind, payload }) = &item.action {
+                                    if kind == "execute" {
+                                        query = payload.clone();
+                                        model =
+                                            build_run_model(prompt, &executables, &recent, &query);
+                                        state = MenuState::new(&model);
+                                        redraw = true;
+                                    }
                                 }
                             }
                         }
-                        Key::Backspace => {
-                            query.pop();
+                    }
+                    Key::Text(text) => {
+                        if !text.is_empty() && text.chars().all(|c| !c.is_control()) {
+                            query.push_str(&text);
                             model = build_run_model(prompt, &executables, &recent, &query);
                             state = MenuState::new(&model);
                             redraw = true;
                         }
-                        Key::Up => {
-                            state.handle(&model, SemanticInput::Up);
-                            redraw = true;
-                        }
-                        Key::Down => {
-                            state.handle(&model, SemanticInput::Down);
-                            redraw = true;
-                        }
-                        Key::Tab => {
-                            if let Some(sel) = &state.selected_id {
-                                if let Some(item) = model.item_by_id(sel) {
-                                    if let Some(MenuAction::Custom { kind, payload }) = &item.action
-                                    {
-                                        if kind == "execute" {
-                                            query = payload.clone();
-                                            model = build_run_model(
-                                                prompt,
-                                                &executables,
-                                                &recent,
-                                                &query,
-                                            );
-                                            state = MenuState::new(&model);
-                                            redraw = true;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        Key::Text(text) => {
-                            if !text.is_empty() && text.chars().all(|c| !c.is_control()) {
-                                query.push_str(&text);
-                                model = build_run_model(prompt, &executables, &recent, &query);
-                                state = MenuState::new(&model);
-                                redraw = true;
-                            }
-                        }
-                        _ => {}
                     }
-                }
-                WaylandEvent::PointerButton { x, y, pressed: true, .. } => {
+                    _ => {}
+                },
+                WaylandEvent::PointerButton {
+                    x,
+                    y,
+                    pressed: true,
+                    ..
+                } => {
                     if let Some(ref s) = scene {
                         if let Some(id) = find_hit_region(s, x, y) {
                             if let Some(item) = model.item_by_id(&id) {
@@ -563,7 +568,15 @@ fn run_live(config: ShellConfig, args: &Args) -> Result<(), String> {
                 if let Some((w, h, s)) = geometry {
                     let resolver = |id: &str| glyph_for_item_with_dirs(id, &recent);
                     scene = Some(render_and_present(
-                        &mut backend, surface, &renderer, tokens, &model, &state, w, h, s,
+                        &mut backend,
+                        surface,
+                        &renderer,
+                        tokens,
+                        &model,
+                        &state,
+                        w,
+                        h,
+                        s,
                         Some(&resolver),
                     )?);
                 }
@@ -585,13 +598,15 @@ fn render_and_present<'a>(
     scale: i32,
     glyph_resolver: Option<&'a dyn Fn(&str) -> Option<char>>,
 ) -> Result<Scene, String> {
-    let viewport = Viewport::new(
-        f64::from(width),
-        f64::from(height),
-        f64::from(scale.max(1)),
-    );
+    let viewport = Viewport::new(f64::from(width), f64::from(height), f64::from(scale.max(1)));
     let (scene, mut buffer) = render_menu_with_glyphs(
-        renderer, model, state, viewport, tokens, RenderOptions::default(), None,
+        renderer,
+        model,
+        state,
+        viewport,
+        tokens,
+        RenderOptions::default(),
+        None,
         glyph_resolver,
     )
     .map_err(|e| format!("Cairo render failed: {e}"))?;
@@ -640,7 +655,10 @@ fn present_transparent(
         .and_then(|n| n.checked_mul(4))
         .ok_or("buffer too large")?;
     let pixels = vec![0_u8; byte_len];
-    match backend.present(surface, Frame::packed(pw, ph, PixelFormat::Argb8888, &pixels)) {
+    match backend.present(
+        surface,
+        Frame::packed(pw, ph, PixelFormat::Argb8888, &pixels),
+    ) {
         Ok(()) | Err(BackendError::WouldBlock) => Ok(()),
         Err(e) => Err(format!("present dismiss: {e}")),
     }
@@ -652,9 +670,13 @@ fn close_surfaces(
     dismiss: Option<SurfaceId>,
 ) -> Result<(), String> {
     if let Some(ds) = dismiss {
-        backend.destroy_surface(ds).map_err(|e| format!("destroy dismiss: {e}"))?;
+        backend
+            .destroy_surface(ds)
+            .map_err(|e| format!("destroy dismiss: {e}"))?;
     }
-    backend.destroy_surface(surface).map_err(|e| format!("destroy surface: {e}"))?;
+    backend
+        .destroy_surface(surface)
+        .map_err(|e| format!("destroy surface: {e}"))?;
     Ok(())
 }
 

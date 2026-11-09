@@ -1154,7 +1154,8 @@ fn run_live(
                                                 }
                                                 close = close_after_success;
                                                 if !close {
-                                                    menu.shell.refresh_family(menu.family, &snapshot)?;
+                                                    menu.shell
+                                                        .refresh_family(menu.family, &snapshot)?;
                                                     panel_scene = None;
                                                     redraw = true;
                                                 }

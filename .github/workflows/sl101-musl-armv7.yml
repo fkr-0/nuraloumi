@@ -1,0 +1,154 @@
+name: SL101 Alpine armv7 musl package
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+  pull_request:
+    paths:
+      - .github/workflows/sl101-musl-armv7.yml
+      - .cargo/**
+      - Cargo.toml
+      - Cargo.lock
+      - crates/**
+      - packaging/**
+      - scripts/prepare-ci-musl-sysroot.sh
+      - scripts/build-sl101-armv7.sh
+      - scripts/armv7-sl101-linker.sh
+      - scripts/inspect-armv7-elf.sh
+      - scripts/package-binaries.py
+      - scripts/test_musl_ci.py
+
+permissions:
+  contents: read
+
+jobs:
+  alpine-armv7-musl:
+    name: Alpine armv7 hard-float musl, VFPv3-D16, no NEON
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    env:
+      TARGET: armv7-unknown-linux-musleabihf
+      NURALOUMI_SL101_CROSS_ROOT: ${{ github.workspace }}/target/sl101-cross-ci
+      CARGO_INCREMENTAL: "0"
+      CARGO_BUILD_JOBS: "2"
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install host tools for cross compilation and audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            clang lld llvm pkg-config binutils file python3
+          docker --version
+          clang --version
+          llvm-objdump --version | head -n 2
+
+      - name: Enable native armv7 package install through QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: armv7-unknown-linux-musleabihf
+          components: rust-src
+
+      - name: Validate CI contract and build target
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup target list --installed | grep -Fx "$TARGET"
+          rustup component list --installed | grep -E '^rust-src '
+          python3 -m unittest scripts/test_musl_ci.py -v
+
+      - name: Prepare signed Alpine armv7 sysroot (never accesses tablet)
+        shell: bash
+        run: |
+          set -euo pipefail
+          sh scripts/prepare-ci-musl-sysroot.sh
+          cat "$NURALOUMI_SL101_CROSS_ROOT/source.txt"
+
+      - name: Build and audit all ARMv7/musl release binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p target/gha-artifact
+          sh scripts/build-sl101-armv7.sh | tee target/gha-artifact/BUILD-LOG.txt
+          grep -F 'SL101_CROSS_BUILD=PASS' target/gha-artifact/BUILD-LOG.txt
+          python3 scripts/package-binaries.py > target/gha-artifact/BINARY-LIST.txt
+          test "$(wc -l < target/gha-artifact/BINARY-LIST.txt)" -ge 4
+
+      - name: Package the exact committed build
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Ensure xtask Git subprocesses resolve the CI checkout when
+          # a compiler embeds an alternate CARGO_MANIFEST_DIR mount prefix.
+          export GIT_DIR="$PWD/.git"
+          export GIT_WORK_TREE="$PWD"
+          test -d "$GIT_DIR"
+          git rev-parse --verify HEAD
+          test -z "$(git status --porcelain)"
+          cargo xtask package --target "$TARGET" --out target/gha-artifact/nuraloumi-ci
+          cargo xtask package-check --dir target/gha-artifact/nuraloumi-ci
+          test -s target/gha-artifact/nuraloumi-ci.tar
+          test -s target/gha-artifact/nuraloumi-ci/MANIFEST.txt
+          grep -Fx "target=$TARGET" target/gha-artifact/nuraloumi-ci/MANIFEST.txt
+          grep -Fx 'git_dirty=false' target/gha-artifact/nuraloumi-ci/MANIFEST.txt
+          printf 'git_sha=%s\n' "$(git rev-parse HEAD)" > target/gha-artifact/BUILD-INFO.txt
+          rustc -vV >> target/gha-artifact/BUILD-INFO.txt
+          cat "$NURALOUMI_SL101_CROSS_ROOT/source.txt" >> target/gha-artifact/BUILD-INFO.txt
+
+      - name: Fail closed on wrong ELF, musl ABI or missing surface binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          audit=target/gha-artifact/ELF-AUDIT.txt
+          : > "$audit"
+          while IFS= read -r name; do
+            bin="target/gha-artifact/nuraloumi-ci/bin/$name"
+            test -x "$bin"
+            file "$bin" | tee -a "$audit"
+            readelf -h "$bin" | grep -Eq 'Class:[[:space:]]+ELF32'
+            readelf -h "$bin" | grep -Eq 'Machine:[[:space:]]+ARM'
+            readelf -h "$bin" | grep -Fq 'hard-float ABI'
+            readelf -A "$bin" | grep -Fq 'Tag_ABI_VFP_args: VFP registers'
+            readelf -A "$bin" | grep -Eq 'Tag_FP_arch: VFPv3-D16'
+            if readelf -A "$bin" | grep -Eiq 'Advanced_SIMD|NEON'; then
+              echo "FAIL: NEON attributes in $bin" >&2
+              exit 1
+            fi
+            readelf -l "$bin" | grep -Fq '/lib/ld-musl-armhf.so.1'
+            readelf -d "$bin" | grep -Fq '[libc.musl-armv7.so.1]'
+            if readelf -d "$bin" | grep -Eq 'libc.so.6|RPATH|RUNPATH'; then
+              echo "FAIL: glibc dependency or embedded dynamic path in $bin" >&2
+              exit 1
+            fi
+            printf 'PASS %s ELF32 ARM VFPv3-D16 hardfloat musl no-NEON-attributes\n' "$name" | tee -a "$audit"
+          done < target/gha-artifact/BINARY-LIST.txt
+          count=$(grep -c '^PASS ' "$audit")
+          test "$count" -eq "$(wc -l < target/gha-artifact/BINARY-LIST.txt)"
+          (cd target/gha-artifact && sha256sum nuraloumi-ci.tar > SHA256SUMS.txt)
+          echo 'ELF_AUDIT=PASS heuristic-only; physical SL101 no-SIGILL remains pending'
+
+      - name: Upload Alpine armv7 musl tarball and qualification evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuraloumi-alpine322-armv7-musleabihf-${{ github.run_number }}
+          path: |
+            target/gha-artifact/nuraloumi-ci.tar
+            target/gha-artifact/nuraloumi-ci/MANIFEST.txt
+            target/gha-artifact/SHA256SUMS.txt
+            target/gha-artifact/BUILD-INFO.txt
+            target/gha-artifact/ELF-AUDIT.txt
+            target/gha-artifact/BUILD-LOG.txt
+            target/gha-artifact/BINARY-LIST.txt
+          if-no-files-found: error
+          retention-days: 14

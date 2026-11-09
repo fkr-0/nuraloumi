@@ -27,10 +27,11 @@ Workflow: .github/workflows/sl101-debian-armhf.yml
   NEON ELF attributes. This does not replace physical no-SIGILL tests.
 - Build output and dependencies do not consume local target/ disk space.
 
-A push to a branch matching ci/sl101-debian-armhf-* triggers the build.
-After the workflow enters the GitHub default branch, workflow_dispatch
-also provides a manual rebuild. Pull requests touching supported source
-or build files also trigger it.
+A push to main or a branch matching ci/sl101-debian-armhf-* triggers the
+build. workflow_dispatch provides a manual rebuild. Pull requests touching
+supported source or build files also trigger it. The independent
+sl101-musl-armv7.yml workflow runs on main pushes as well, so the same pushed
+Git SHA produces both glibc and musl artifacts. See MUSL-GITHUB-CI.md.
 
 GitHub Actions uploads a downloadable artifact containing:
 
@@ -65,8 +66,8 @@ and use the previous desktop. Avoid overwriting production binaries.
 
 ## Qualification limitations
 
-- The workflow packages one committed Git source revision. Uncommitted
-  renderer changes from other agents are not implicitly included.
+- Both workflows package one committed and pushed Git source revision.
+  Uncommitted changes from other agents are not implicitly included.
 - Debian:trixie multiarch repositories and stable Rust are live moving
   inputs; the workflow records versions, but currently does not pin
   digest-addressed container images, an apt snapshot or a specific

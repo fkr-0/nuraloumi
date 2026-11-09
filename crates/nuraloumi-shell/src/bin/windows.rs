@@ -1,13 +1,14 @@
-use nuraloumi_core::{MenuAction, MenuItem, MenuModel, MenuState, SemanticInput, DARK_THEME, LIGHT_THEME};
+use nuraloumi_core::{
+    MenuAction, MenuItem, MenuModel, MenuState, SemanticInput, DARK_THEME, LIGHT_THEME,
+};
 use nuraloumi_render_cairo::{CairoRenderer, RenderOptions, Scene, Viewport};
 use nuraloumi_shell::{
-    load_config_or_default, render_menu_with_glyphs, dismiss_backdrop_margins,
-    ShellConfig, Theme as ShellTheme,
+    dismiss_backdrop_margins, load_config_or_default, render_menu_with_glyphs, ShellConfig,
+    Theme as ShellTheme,
 };
 use nuraloumi_wayland::{
-    BackendError, DismissBackdropConfig, Frame, Key, MenuConfig as WaylandMenuConfig,
-    PixelFormat, PlatformEvent as WaylandEvent, SurfaceId, ToplevelId, ToplevelInfo,
-    WaylandBackend,
+    BackendError, DismissBackdropConfig, Frame, Key, MenuConfig as WaylandMenuConfig, PixelFormat,
+    PlatformEvent as WaylandEvent, SurfaceId, ToplevelId, ToplevelInfo, WaylandBackend,
 };
 use std::env;
 use std::path::PathBuf;
@@ -169,8 +170,7 @@ fn run_live(config: ShellConfig) -> Result<(), String> {
         .unwrap_or(400);
 
     let dismiss_surface = {
-        let (mt, mr, mb, ml) =
-            dismiss_backdrop_margins(config.panel_edge, config.panel_height);
+        let (mt, mr, mb, ml) = dismiss_backdrop_margins(config.panel_edge, config.panel_height);
         backend
             .create_dismiss_backdrop(DismissBackdropConfig {
                 margin_top: mt,
@@ -221,7 +221,11 @@ fn run_live(config: ShellConfig) -> Result<(), String> {
             if let Some(ds) = dismiss_surface {
                 if event.surface == Some(ds) {
                     match event.event {
-                        WaylandEvent::Configure { width, height, scale } => {
+                        WaylandEvent::Configure {
+                            width,
+                            height,
+                            scale,
+                        } => {
                             present_transparent(&mut backend, ds, width, height, scale)?;
                         }
                         WaylandEvent::PointerButton { pressed: true, .. }
@@ -245,9 +249,11 @@ fn run_live(config: ShellConfig) -> Result<(), String> {
             let mut redraw = false;
 
             match event.event {
-                WaylandEvent::Configure { width, height, scale }
-                    if event.surface == Some(surface) =>
-                {
+                WaylandEvent::Configure {
+                    width,
+                    height,
+                    scale,
+                } if event.surface == Some(surface) => {
                     geometry = Some((width, height, scale));
                     redraw = true;
                 }
@@ -290,7 +296,10 @@ fn run_live(config: ShellConfig) -> Result<(), String> {
                         state.handle(&model, SemanticInput::Down);
                         redraw = true;
                     }
-                    Key::Modified { ref key, ref modifiers } if matches!(**key, Key::Tab) && modifiers.shift => {
+                    Key::Modified {
+                        ref key,
+                        ref modifiers,
+                    } if matches!(**key, Key::Tab) && modifiers.shift => {
                         state.handle(&model, SemanticInput::Up);
                         redraw = true;
                     }
@@ -305,14 +314,13 @@ fn run_live(config: ShellConfig) -> Result<(), String> {
                     }
                     _ => {}
                 },
-                WaylandEvent::Key { key, pressed: false } if is_alt_key(&key) => {
+                WaylandEvent::Key {
+                    key,
+                    pressed: false,
+                } if is_alt_key(&key) => {
                     if let Some(action) = selected_action(&model, &state) {
-                        match handle_window_action(
-                            &action,
-                            &mut backend,
-                            surface,
-                            dismiss_surface,
-                        )? {
+                        match handle_window_action(&action, &mut backend, surface, dismiss_surface)?
+                        {
                             ActionResult::Close => return Ok(()),
                             ActionResult::Refresh => {}
                             ActionResult::Noop => {}
@@ -328,12 +336,8 @@ fn run_live(config: ShellConfig) -> Result<(), String> {
                     ..
                 } => {
                     if let Some(action) = hit_action(&scene, &model, x, y) {
-                        match handle_window_action(
-                            &action,
-                            &mut backend,
-                            surface,
-                            dismiss_surface,
-                        )? {
+                        match handle_window_action(&action, &mut backend, surface, dismiss_surface)?
+                        {
                             ActionResult::Close => return Ok(()),
                             ActionResult::Refresh => {
                                 let tls = backend.toplevels();
@@ -347,12 +351,8 @@ fn run_live(config: ShellConfig) -> Result<(), String> {
                 }
                 WaylandEvent::TouchDown { x, y, .. } => {
                     if let Some(action) = hit_action(&scene, &model, x, y) {
-                        match handle_window_action(
-                            &action,
-                            &mut backend,
-                            surface,
-                            dismiss_surface,
-                        )? {
+                        match handle_window_action(&action, &mut backend, surface, dismiss_surface)?
+                        {
                             ActionResult::Close => return Ok(()),
                             ActionResult::Refresh => {
                                 let tls = backend.toplevels();
@@ -382,7 +382,15 @@ fn run_live(config: ShellConfig) -> Result<(), String> {
                 if let Some((w, h, s)) = geometry {
                     let resolver = |id: &str| window_glyph(id);
                     scene = Some(render_and_present(
-                        &mut backend, surface, &renderer, tokens, &model, &state, w, h, s,
+                        &mut backend,
+                        surface,
+                        &renderer,
+                        tokens,
+                        &model,
+                        &state,
+                        w,
+                        h,
+                        s,
                         Some(&resolver),
                     )?);
                 }
@@ -449,13 +457,15 @@ fn render_and_present<'a>(
     scale: i32,
     glyph_resolver: Option<&'a dyn Fn(&str) -> Option<char>>,
 ) -> Result<Scene, String> {
-    let viewport = Viewport::new(
-        f64::from(width),
-        f64::from(height),
-        f64::from(scale.max(1)),
-    );
+    let viewport = Viewport::new(f64::from(width), f64::from(height), f64::from(scale.max(1)));
     let (scene, mut buffer) = render_menu_with_glyphs(
-        renderer, model, state, viewport, tokens, RenderOptions::default(), None,
+        renderer,
+        model,
+        state,
+        viewport,
+        tokens,
+        RenderOptions::default(),
+        None,
         glyph_resolver,
     )
     .map_err(|e| format!("Cairo render failed: {e}"))?;
