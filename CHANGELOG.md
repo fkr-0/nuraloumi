@@ -2,6 +2,26 @@
 
 All notable user-visible changes to NuraLoumi are recorded here.
 
+## [Unreleased] - 2026-11-09
+
+### Fixed
+
+- Renderer indicator identifies Grate on Sway/sl101-sway with date- or label-suffixed
+  `/opt/grate-mesa25-musl-*/lib/libgallium-25.0.7.so` installations, the
+  glibc clean-prefix layout, and legacy Grate libraries. Detection requires the
+  actual mapped library pathname and the expected GLES2/Grate environment.
+- Probe failure and unknown compositor state are shown as unavailable, not a
+  ready renderer. The renderer switch UI now refers to the compositor rather
+  than labwc only. The privileged renderer-switch helper and its arguments
+  are unchanged.
+
+### Verification
+
+- Added a fixture from the coordinator's 2026-11-09 Sway session and regression
+  tests for recognized layouts, false positives, missing/oversized/unreadable
+  procfs inputs, and compositor PID reuse. Device deployment and validation
+  remain coordinator-owned.
+
 ## [0.0.4-dev.1] - 2026-11-03
 
 Development checkpoint toward 0.2 and 0.3; not SL101 release qualified.

@@ -2739,7 +2739,7 @@ fn renderer_items(snapshot: &FixtureSnapshot) -> Vec<MenuItem> {
             "Restart desktop?",
             Some("This closes application windows. Boot defaults stay unchanged. Grate has known pixel differences; failed startup returns to Pixman.".into()),
             MenuAction::Custom { kind: "renderer.switch".into(), payload: mode.into() },
-        )).with_subtitle("Restarts labwc and closes application windows");
+        )).with_subtitle("Restarts the compositor and closes application windows");
         if !snapshot.renderer_switch_available || snapshot.renderer.as_deref() == Some(current) {
             item.enabled = false;
             item.action = None;
@@ -3197,7 +3197,11 @@ pub fn panel_affordances(snapshot: &FixtureSnapshot) -> Vec<PanelAffordance> {
                 .clone()
                 .unwrap_or_else(|| "Unknown".into()),
             value: None,
-            state: if snapshot.renderer.is_some() {
+            state: if snapshot
+                .renderer
+                .as_deref()
+                .is_some_and(|value| value != "Unknown")
+            {
                 ValueState::Ready
             } else {
                 ValueState::Unavailable
@@ -3348,6 +3352,29 @@ mod tests {
             .unwrap();
         assert_eq!(affordances[clock - 1].id, "renderer");
         assert_eq!(affordances[clock - 1].label, "Pixman");
+    }
+
+    #[test]
+    fn unknown_renderer_is_unavailable_in_panel_and_system_controls() {
+        let snapshot = FixtureSnapshot {
+            renderer: Some("Unknown".into()),
+            ..FixtureSnapshot::default()
+        };
+        let renderer = panel_affordances(&snapshot)
+            .into_iter()
+            .find(|item| item.id == "renderer")
+            .unwrap();
+        assert_eq!(renderer.label, "Unknown");
+        assert_eq!(renderer.state, ValueState::Unavailable);
+        let row = renderer_items(&snapshot)
+            .into_iter()
+            .find(|item| item.id == "renderer.current")
+            .unwrap();
+        assert_eq!(row.subtitle.as_deref(), Some("Unknown"));
+        let json = serde_json::to_value(&snapshot).expect("fixture status JSON");
+        assert_eq!(json["renderer"], "Unknown");
+        let restored: FixtureSnapshot = serde_json::from_value(json).unwrap();
+        assert_eq!(restored.renderer.as_deref(), Some("Unknown"));
     }
 
     fn shell_with(menu: MenuModel) -> ShellState {
