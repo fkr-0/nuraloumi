@@ -1,0 +1,151 @@
+name: SL101 Debian armhf glibc package
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - ci/sl101-debian-armhf-*
+  pull_request:
+    paths:
+      - .github/workflows/sl101-debian-armhf.yml
+      - .cargo/**
+      - Cargo.toml
+      - Cargo.lock
+      - crates/**
+      - packaging/**
+      - scripts/package-binaries.py
+      - scripts/test_debian_armhf_ci.py
+
+permissions:
+  contents: read
+
+jobs:
+  debian-armhf:
+    name: Debian 13 armv7 hard-float, VFPv3-D16, no NEON
+    runs-on: ubuntu-24.04
+    container:
+      image: debian:trixie
+    timeout-minutes: 55
+    env:
+      TARGET: armv7-unknown-linux-gnueabihf
+      CARGO_INCREMENTAL: "0"
+      CARGO_BUILD_JOBS: "2"
+      CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER: /tmp/sl101-armhf-linker
+      PKG_CONFIG_ALLOW_CROSS: "1"
+      PKG_CONFIG_SYSROOT_DIR: /
+      PKG_CONFIG_LIBDIR: /usr/lib/arm-linux-gnueabihf/pkgconfig:/usr/share/pkgconfig
+      PKG_CONFIG_PATH: /usr/lib/arm-linux-gnueabihf/pkgconfig:/usr/share/pkgconfig
+      CFLAGS_armv7_unknown_linux_gnueabihf: -march=armv7-a -mfpu=vfpv3-d16 -mfloat-abi=hard
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Debian 13 ARM hard-float toolchain and native libraries
+        shell: bash
+        run: |
+          set -euo pipefail
+          dpkg --add-architecture armhf
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
+            ca-certificates curl git python3 pkgconf file make \
+            gcc-arm-linux-gnueabihf binutils-arm-linux-gnueabihf \
+            libc6-dev-armhf-cross \
+            libcairo2-dev:armhf libwayland-dev:armhf libxkbcommon-dev:armhf
+          cat > /tmp/sl101-armhf-linker <<'LINKER'
+          #!/bin/sh
+          exec arm-linux-gnueabihf-gcc -march=armv7-a -mfpu=vfpv3-d16 -mfloat-abi=hard "$@"
+          LINKER
+          chmod 755 /tmp/sl101-armhf-linker
+          test -r /usr/arm-linux-gnueabihf/lib/ld-linux-armhf.so.3
+          test -e /usr/lib/arm-linux-gnueabihf/libcairo.so
+          test -e /usr/lib/arm-linux-gnueabihf/libwayland-client.so
+          test -e /usr/lib/arm-linux-gnueabihf/libxkbcommon.so
+          pkg-config --libs cairo wayland-client xkbcommon
+          dpkg-query -W gcc-arm-linux-gnueabihf libc6:armhf libcairo2:armhf libwayland-client0:armhf libxkbcommon0:armhf
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: armv7-unknown-linux-gnueabihf
+
+      - name: Validate target and tracked CI contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup target list --installed | grep -Fx "$TARGET"
+          python3 -m unittest scripts/test_debian_armhf_ci.py -v
+
+      - name: Cross-compile every release binary on GitHub infrastructure
+        shell: bash
+        env:
+          RUSTFLAGS: -C target-feature=-neon,-d32,-hwdiv,-hwdiv-arm
+        run: |
+          set -euo pipefail
+          rustc -vV
+          cargo build --locked --release --workspace --bins --target "$TARGET"
+          python3 scripts/package-binaries.py | tee /tmp/sl101-runtime-binaries.txt
+          test "$(wc -l < /tmp/sl101-runtime-binaries.txt)" -ge 4
+          du -sh "target/$TARGET/release"
+          df -h .
+
+      - name: Package all Cargo-declared runtime binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo xtask package --target "$TARGET" --out target/gha-artifact/nuraloumi-ci
+          cargo xtask package-check --dir target/gha-artifact/nuraloumi-ci
+          test -s target/gha-artifact/nuraloumi-ci.tar
+          test -s target/gha-artifact/nuraloumi-ci/MANIFEST.txt
+          grep -Fx "target=$TARGET" target/gha-artifact/nuraloumi-ci/MANIFEST.txt
+          grep -Fx 'git_dirty=false' target/gha-artifact/nuraloumi-ci/MANIFEST.txt
+          printf 'git_sha=%s\n' "$(git rev-parse HEAD)" > target/gha-artifact/BUILD-INFO.txt
+          rustc -vV >> target/gha-artifact/BUILD-INFO.txt
+          dpkg-query -W libc6:armhf libwayland-client0:armhf libcairo2:armhf libxkbcommon0:armhf \
+            >> target/gha-artifact/BUILD-INFO.txt
+
+      - name: Fail closed on wrong ELF, glibc, ABI or missing surface binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          audit=target/gha-artifact/ELF-AUDIT.txt
+          : > "$audit"
+          while IFS= read -r name; do
+            bin="target/gha-artifact/nuraloumi-ci/bin/$name"
+            test -x "$bin"
+            file "$bin" | tee -a "$audit"
+            readelf -h "$bin" | grep -Eq 'Class:[[:space:]]+ELF32'
+            readelf -h "$bin" | grep -Eq 'Machine:[[:space:]]+ARM'
+            readelf -h "$bin" | grep -Fq 'hard-float ABI'
+            readelf -A "$bin" | grep -Fq 'Tag_ABI_VFP_args: VFP registers'
+            readelf -A "$bin" | grep -Eq 'Tag_FP_arch: VFPv3-D16'
+            if readelf -A "$bin" | grep -Eiq 'Advanced_SIMD|NEON'; then
+              echo "FAIL: NEON attributes in $bin" >&2
+              exit 1
+            fi
+            readelf -l "$bin" | grep -Fq '/lib/ld-linux-armhf.so.3'
+            readelf -d "$bin" | grep -Fq '[libc.so.6]'
+            if readelf -d "$bin" | grep -Eq 'RPATH|RUNPATH'; then
+              echo "FAIL: non-hermetic dynamic path in $bin" >&2
+              exit 1
+            fi
+            printf 'PASS %s ELF32 ARM VFPv3-D16 hardfloat glibc no-NEON-attributes\n' "$name" | tee -a "$audit"
+          done < /tmp/sl101-runtime-binaries.txt
+          count=$(grep -c '^PASS ' "$audit")
+          test "$count" -eq "$(wc -l < /tmp/sl101-runtime-binaries.txt)"
+          (cd target/gha-artifact && sha256sum nuraloumi-ci.tar > SHA256SUMS.txt)
+          cat target/gha-artifact/SHA256SUMS.txt
+          echo 'ELF_AUDIT=PASS heuristic-only; SL101 hardware SIGILL check remains pending'
+
+      - name: Upload Debian armhf tarball, manifests and ELF evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuraloumi-debian13-armv7-gnueabihf-${{ github.run_number }}
+          path: |
+            target/gha-artifact/nuraloumi-ci.tar
+            target/gha-artifact/nuraloumi-ci/MANIFEST.txt
+            target/gha-artifact/SHA256SUMS.txt
+            target/gha-artifact/BUILD-INFO.txt
+            target/gha-artifact/ELF-AUDIT.txt
+          if-no-files-found: error
+          retention-days: 14
