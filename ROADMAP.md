@@ -147,10 +147,17 @@ parallel:
   integration, so concurrent GR3D contexts (compositor + GPU client)
   corrupt each other. Kernel + Mesa patches are being designed
   (sl101_linux task 2ed89). Required for sway on grate.
-- **Sway EGL shim** — wlroots 0.20 EGL_PLATFORM_DEVICE init poisons
-  grate's EGL state, preventing GBM fallback. A wrapper libEGL.so.1 is
-  built but not loaded by sway under musl; needs investigation of musl
-  SONAME collision behavior. NuraLoumi works on labwc regardless.
+- **Sway EGL shim** — wlroots 0.20 attempts EGL_PLATFORM_DEVICE before
+  GBM; the device-path failure is a suspected cause of broken Grate fallback.
+  On SL101 (2026-11-05), the existing wrapper libEGL.so.1 was **confirmed to
+  resolve via LD_LIBRARY_PATH under musl** (ldd), and a read-only ctypes probe
+  verified its eglGetProcAddress interception: eglQueryDevicesEXT returns
+  EGL_TRUE with zero devices. The older claim that musl cannot load it is
+  disproven. This is not yet proof of Sway renderer/DRM startup or correct
+  pixels: isolate and test the complete pinned EGL/GBM/wlroots library group
+  without taking the active labwc KMS/seat ownership. See
+  sl101_linux/docs/sl101-sway-egl-no-upstream-review-20261105.md.
+  NuraLoumi's Cairo/wl_shm software path remains unaffected.
 
 None of these block 0.1.0. They affect the broader SL101 desktop experience.
 

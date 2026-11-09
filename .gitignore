@@ -6,6 +6,10 @@ target/
 *.swp
 *.swo
 
+# Generated Python bytecode and local interpreter caches.
+__pycache__/
+*.py[cod]
+
 # Local Workspace Bridge coordination/runtime state.
 .ws-bridge/
 
