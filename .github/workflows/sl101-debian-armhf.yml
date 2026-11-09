@@ -49,7 +49,7 @@ jobs:
           dpkg --add-architecture armhf
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
-            ca-certificates curl git python3 pkgconf file make \
+            ca-certificates curl git python3 pkgconf file make gcc g++ \
             gcc-arm-linux-gnueabihf binutils-arm-linux-gnueabihf \
             libc6-dev-armhf-cross \
             libcairo2-dev:armhf libwayland-dev:armhf libxkbcommon-dev:armhf

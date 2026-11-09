@@ -22,6 +22,7 @@ class DebianArmhfCiTests(unittest.TestCase):
             "libcairo2-dev:armhf",
             "libwayland-dev:armhf",
             "libxkbcommon-dev:armhf",
+            "make gcc g++",
         ):
             self.assertIn(part, self.ci)
 
