@@ -79,6 +79,10 @@ path = "src/bin/files.rs"
 name = "nuraloumi-windows"
 path = "src/bin/windows.rs"
 
+[[bin]]
+name = "nuraloumi-sway-workspace-switcher"
+path = "src/bin/sway_workspace_switcher.rs"
+
 
 [[bin]]
 name = "nuraloumi-config"

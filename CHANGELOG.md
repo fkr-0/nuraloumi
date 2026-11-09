@@ -4,6 +4,15 @@ All notable user-visible changes to NuraLoumi are recorded here.
 
 ## [Unreleased] - 2026-11-09
 
+### Added
+
+- A standalone Sway workspace switcher (`nuraloumi-sway-workspace-switcher`)
+  showing numbered workspace cards, cached desktop previews, and a blue border
+  around the most recently selected workspace. Sway Super+1–9 bindings switch
+  the compositor immediately; Super-key release dismisses the overlay.
+  Previews of inactive workspaces are displayed only after those workspaces
+  have been seen on screen; unavailable captures have an explicit placeholder.
+
 ### Fixed
 
 - Renderer indicator identifies Grate on Sway/sl101-sway with date- or label-suffixed

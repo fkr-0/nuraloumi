@@ -1,5 +1,13 @@
 # Transparent keybindings
 
+## Sway-global workspace shortcut integration
+
+Sway consumes Super+number at compositor scope before normal Wayland clients
+receive the shortcut. The standalone NuraLoumi switcher therefore uses
+**Sway bindsym** instead of the in-surface keybinding registry:
+see [Sway workspace switcher qualification](qualification/SWAY-WORKSPACE-SWITCHER.md).
+This preserves the scope and confirmation rules for ordinary shell bindings.
+
 Status: the single-action keybinding registry, configuration, resolver, and
 introspection contract is implemented for the 0.0.3 line. Combined actions
 remain a later stage.
