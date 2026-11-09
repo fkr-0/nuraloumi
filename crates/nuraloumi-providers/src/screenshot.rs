@@ -774,11 +774,38 @@ mod tests {
 
     #[test]
     fn descendant_retained_stdin_has_bounded_clipboard_write() {
-        // The grandchild keeps stdin open but never drains it. A 1 MiB
-        // payload exceeds a Linux pipe's capacity even if the parent exited.
+        // A non-interactive shell may redirect stdin for background commands
+        // differently (e.g. dash on Ubuntu CI vs bash). If its grandchild
+        // closes the read end before the deadline, BrokenPipe (io) is correct;
+        // if it retains stdin, the bounded writer must time out. Both cases
+        // must clean up promptly instead of waiting for a descendant.
         let mut command = Command::new("sh");
         command
             .args(["-c", "sleep 30 <&0 & exit 0"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let start = Instant::now();
+        let result = write_command(
+            command,
+            &vec![7_u8; 1024 * 1024],
+            Instant::now() + Duration::from_millis(180),
+        );
+        let error = result.unwrap_err();
+        assert!(
+            matches!(error.category.as_str(), "timeout" | "io"),
+            "unexpected clipboard result: {error:?}"
+        );
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn non_draining_clipboard_consumer_reaches_deadline() {
+        // A foreground non-consuming process retains its own stdin
+        // reliably across shells. A 1 MiB write cannot fit in its pipe.
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "sleep 30"])
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
