@@ -151,23 +151,22 @@ jobs:
           (cd target/gha-artifact && sha256sum nuraloumi-ci.tar > SHA256SUMS.txt)
           echo 'ELF_AUDIT=PASS heuristic-only; physical SL101 no-SIGILL remains pending'
 
-      - name: Sign an Alpine armv7 .apk from exactly these audited binaries
+      - name: Sign an Alpine armv7 development .apk from these audited binaries
         shell: bash
         run: |
           set -euo pipefail
-          # The ephemeral key is intended for test package review only.
-          # Do not trust it globally or deploy automatically to SL101.
-          docker run --rm --platform linux/arm/v7 +            -v "$PWD:/work:ro" +            -v "$PWD/target/gha-artifact:/output" +            alpine:3.22 /bin/sh -ec '
-              # Copy-only APK assembly; compile and ELF qualification already ran.
-              # Manual runtime Depends are protected by the readelf allowlist;
-              # no separate compiler nor target runtime is needed for copying.
+          # A development artifact is never an authorized production deployment.
+          docker run --rm --platform linux/arm/v7 \
+            -v "$PWD:/work:ro" \
+            -v "$PWD/target/gha-artifact:/output" \
+            alpine:3.22 /bin/sh -ec '
               apk add --no-cache abuild openssl tar coreutils
-              sh /work/scripts/build-ci-alpine-apk.sh +                /work/target/gha-artifact/nuraloumi-ci /output/native-apk "$1"
-            ' sh "${GITHUB_SHA}"
+              sh /work/scripts/build-ci-alpine-apk.sh \
+                /work/target/gha-artifact/nuraloumi-ci /output/native-apk "$1"
+            ' sh "$GITHUB_SHA"
           test -s target/gha-artifact/native-apk/CI-EPHEMERAL-KEY.rsa.pub
           test -s target/gha-artifact/native-apk/NURALOUMI-APK-SHA256SUMS.txt
           find target/gha-artifact/native-apk -name 'nuraloumi-*.apk' -type f -size +0c | grep -q .
-
       - name: Upload Alpine armv7 musl tarball, signed development APK and qualification evidence
         uses: actions/upload-artifact@v4
         with:

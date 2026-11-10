@@ -55,8 +55,13 @@ def sample(folder: Path, target: str = "debian") -> None:
         (dest / "NURALOUMI-APK-SHA256SUMS.txt").write_text(
             f"{digest}  tmp/armv7/{pkg.name}\n"
         )
-        (dest / "CI-EPHEMERAL-KEY.rsa.pub").write_text("dummy public key\n")
-        (dest / "CI-APK-SIGNING-POLICY.txt").write_text("CI_EPHEMERAL_KEY=true\n")
+        key = b"dummy public key\n"
+        (dest / "CI-EPHEMERAL-KEY.rsa.pub").write_bytes(key)
+        (dest / "CI-APK-SIGNING-POLICY.txt").write_text(
+            f"SIGNING_MODE=ephemeral-ci-development-only\n"
+            f"GIT_SHA={SHA}\n"
+            f"PUBLIC_KEY_SHA256={hashlib.sha256(key).hexdigest()}\n"
+        )
 
 
 class VerifierTests(unittest.TestCase):

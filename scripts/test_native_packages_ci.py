@@ -38,12 +38,19 @@ class NativePackageCiContract(unittest.TestCase):
         for token in (
             "abuild-keygen -a -n", "abuild -F checksum", "abuild -F -d",
             "CI-EPHEMERAL-KEY.rsa.pub", "apk --keys-dir /root/.abuild verify",
-            "CI_EPHEMERAL_KEY=true", 'git_commit=$expected_sha', "git_dirty=false",
+            "SIGNING_MODE=$signing_mode",
+            "signing_mode=ephemeral-ci-development-only",
+            'git_commit=$expected_sha', "git_dirty=false",
         ):
             self.assertIn(token, APK_SCRIPT)
         self.assertNotIn("apk add --allow-untrusted", APK_SCRIPT + MUSL)
         self.assertIn('install -m0644 "$key" "/etc/apk/keys/', APK_SCRIPT)
         self.assertIn("The physical devices never receive this key automatically", APK_SCRIPT)
+        self.assertIn("NURALOUMI_APK_RELEASE_PUBLIC_SHA256", APK_SCRIPT)
+        # Current main workflow is development-only, never mounts production keys.
+        self.assertNotIn("NURALOUMI_APK_RELEASE_KEYS_DIR", MUSL)
+        self.assertNotIn("+            -v", MUSL)
+        self.assertNotIn("+                /work", MUSL)
 
     def test_deb_has_armhf_control_and_no_maintainer_scripts(self):
         for token in (

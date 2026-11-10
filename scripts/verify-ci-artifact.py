@@ -123,9 +123,18 @@ def verify_downloaded(folder: Path, lane: str, sha: str) -> dict:
         checked = checksum_file(base, base / "NURALOUMI-APK-SHA256SUMS.txt")
         require(str(packages[0].relative_to(base)) in checked, "APK not in checksums")
         require((base / "CI-EPHEMERAL-KEY.rsa.pub").is_file(), "missing APK public key")
+        policy = (base / "CI-APK-SIGNING-POLICY.txt").read_text()
         require(
-            "CI_EPHEMERAL_KEY=true" in (base / "CI-APK-SIGNING-POLICY.txt").read_text(),
-            "missing development-signing warning",
+            "SIGNING_MODE=ephemeral-ci-development-only" in policy.splitlines(),
+            "missing or invalid development-signing policy",
+        )
+        require(f"GIT_SHA={sha}" in policy.splitlines(), "APK signing provenance SHA mismatch")
+        fingerprint = hashlib.sha256(
+            (base / "CI-EPHEMERAL-KEY.rsa.pub").read_bytes()
+        ).hexdigest()
+        require(
+            f"PUBLIC_KEY_SHA256={fingerprint}" in policy.splitlines(),
+            "APK signing public key fingerprint mismatch",
         )
     else:
         base = folder / "native-deb"
