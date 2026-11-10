@@ -18,6 +18,9 @@ on:
       - scripts/armv7-sl101-linker.sh
       - scripts/inspect-armv7-elf.sh
       - scripts/package-binaries.py
+      - scripts/build-ci-alpine-apk.sh
+      - scripts/test_native_packages_ci.py
+      - packaging/alpine/**
       - scripts/test_musl_ci.py
 
 permissions:
@@ -67,6 +70,8 @@ jobs:
           rustup target list --installed | grep -Fx "$TARGET"
           rustup component list --installed | grep -Fx 'rust-src'
           python3 -m unittest scripts/test_musl_ci.py -v
+          python3 -m unittest scripts/test_native_packages_ci.py -v
+          python3 -m unittest scripts/test_verify_ci_artifact.py -v
 
       - name: Prepare signed Alpine armv7 sysroot (never accesses tablet)
         shell: bash
@@ -131,6 +136,14 @@ jobs:
               echo "FAIL: glibc dependency or embedded dynamic path in $bin" >&2
               exit 1
             fi
+            # The APKBUILD uses explicit deps (!tracedeps) so new direct ELF
+            # dependencies cannot silently enter a signed installable package.
+            while IFS= read -r soname; do
+              case "$soname" in
+                libc.musl-armv7.so.1|libcairo.so.2|libgcc_s.so.1|libxkbcommon.so.0) ;;
+                *) echo "FAIL: unmapped Alpine runtime dependency $soname in $bin" >&2; exit 1 ;;
+              esac
+            done < <(readelf -d "$bin" | sed -n 's/.*Shared library: \[\([^]]*\)\].*/\1/p')
             printf 'PASS %s ELF32 ARM VFPv3-D16 hardfloat musl no-NEON-attributes\n' "$name" | tee -a "$audit"
           done < target/gha-artifact/BINARY-LIST.txt
           count=$(grep -c '^PASS ' "$audit")
@@ -138,13 +151,31 @@ jobs:
           (cd target/gha-artifact && sha256sum nuraloumi-ci.tar > SHA256SUMS.txt)
           echo 'ELF_AUDIT=PASS heuristic-only; physical SL101 no-SIGILL remains pending'
 
-      - name: Upload Alpine armv7 musl tarball and qualification evidence
+      - name: Sign an Alpine armv7 .apk from exactly these audited binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The ephemeral key is intended for test package review only.
+          # Do not trust it globally or deploy automatically to SL101.
+          docker run --rm --platform linux/arm/v7 +            -v "$PWD:/work:ro" +            -v "$PWD/target/gha-artifact:/output" +            alpine:3.22 /bin/sh -ec '
+              # Copy-only APK assembly; compile and ELF qualification already ran.
+              # Manual runtime Depends are protected by the readelf allowlist;
+              # no separate compiler nor target runtime is needed for copying.
+              apk add --no-cache abuild openssl tar coreutils
+              sh /work/scripts/build-ci-alpine-apk.sh +                /work/target/gha-artifact/nuraloumi-ci /output/native-apk "$1"
+            ' sh "${GITHUB_SHA}"
+          test -s target/gha-artifact/native-apk/CI-EPHEMERAL-KEY.rsa.pub
+          test -s target/gha-artifact/native-apk/NURALOUMI-APK-SHA256SUMS.txt
+          find target/gha-artifact/native-apk -name 'nuraloumi-*.apk' -type f -size +0c | grep -q .
+
+      - name: Upload Alpine armv7 musl tarball, signed development APK and qualification evidence
         uses: actions/upload-artifact@v4
         with:
-          name: nuraloumi-alpine322-armv7-musleabihf-${{ github.run_number }}
+          name: nuraloumi-alpine322-armv7-musleabihf-${{ github.run_number }}-${{ github.sha }}
           path: |
             target/gha-artifact/nuraloumi-ci.tar
             target/gha-artifact/nuraloumi-ci/MANIFEST.txt
+            target/gha-artifact/native-apk/**
             target/gha-artifact/SHA256SUMS.txt
             target/gha-artifact/BUILD-INFO.txt
             target/gha-artifact/ELF-AUDIT.txt

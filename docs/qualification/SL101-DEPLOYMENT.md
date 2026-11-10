@@ -16,13 +16,30 @@ The tablet's known recovery model is:
 
 ## Stage
 
-On the build host:
+**CI-ONLY POLICY (2026-11-10):** the former local `cargo xtask build-release`
+deployment path is prohibited. Local builds are only for development and are
+never eligible as the tablet's deployable binary source.
 
-    cargo xtask build-release --target armv7-unknown-linux-musleabihf
-    cargo xtask qualify-armv7
-    cargo xtask package --target armv7-unknown-linux-musleabihf
+On the build host, identify an exact successful GitHub Actions run for the
+reviewed Git SHA and ABI. Download and verify the artifact:
 
-Copy the produced tar or stage directory to the tablet. On the tablet, use a
+    python3 scripts/verify-ci-artifact.py --lane alpine \
+      --run-id <SUCCESSFUL_MUSL_CI_RUN_ID> \
+      --sha <EXACT_40_HEX_GIT_SHA> \
+      --out /tmp/nuraloumi-verified-ci-alpine
+
+For Debian, use `--lane debian` with the corresponding successful Debian
+armhf run. The verifier rejects wrong ABI, non-main runs, SHA mismatch,
+expired/missing artifact, corrupt tarballs and missing package checksums.
+It never SSHes or installs anything.
+
+For the first physical test, copy only the **verified original tar** to an
+isolated unprivileged staging directory; do not install the new `.apk`/`.deb`
+system-wide until the device-specific qualification is accepted. The Alpine
+development APK has an ephemeral CI key and is **not** a production trust
+root. No verification script imports keys into /etc/apk/keys.
+
+On the tablet, use a
 versioned path under the user's home directory, for example:
 
     mkdir -p "$HOME/.local/opt/nuraloumi-staging"

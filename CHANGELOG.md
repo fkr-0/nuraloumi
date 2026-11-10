@@ -4,6 +4,18 @@ All notable user-visible changes to NuraLoumi are recorded here.
 
 ## [Unreleased]
 
+### Build and distribution
+
+- Native CI packaging now assembles Debian 13 ARMHF `.deb` and Alpine 3.22
+  ARMv7 `.apk` artifacts from the **exact, previously ELF-audited** staging
+  binaries, alongside the original copy-only tar bundles. Build artifacts
+  carry Git SHA, SHA256 checksums and manifest/ABI evidence.
+- Added an exact-run GitHub Actions artifact verifier for CI-only deployment
+  staging. Alpine development APK signatures use a CI-ephemeral key; production
+  trust enrollment and physical SL101 qualification remain mandatory.
+- Flatpak remains a separate desktop-only proposal: current standard
+  Freedesktop runtimes do not target the SL101's 32-bit ARMv7 architecture.
+
 ## [0.0.4-dev.2] - 2026-11-10
 
 Development prerelease; **not** a production-qualified SL101 release.

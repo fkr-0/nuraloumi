@@ -15,6 +15,9 @@ on:
       - crates/**
       - packaging/**
       - scripts/package-binaries.py
+      - scripts/build-ci-debian-deb.sh
+      - scripts/test_native_packages_ci.py
+      - packaging/debian/**
       - scripts/test_debian_armhf_ci.py
 
 permissions:
@@ -84,6 +87,8 @@ jobs:
           set -euo pipefail
           rustup target list --installed | grep -Fx "$TARGET"
           python3 -m unittest scripts/test_debian_armhf_ci.py -v
+          python3 -m unittest scripts/test_native_packages_ci.py -v
+          python3 -m unittest scripts/test_verify_ci_artifact.py -v
 
       - name: Cross-compile every release binary on GitHub infrastructure
         shell: bash
@@ -145,6 +150,14 @@ jobs:
               echo "FAIL: non-hermetic dynamic path in $bin" >&2
               exit 1
             fi
+            # Keep Debian control Depends synchronized with actual NEEDED
+            # libraries; new SONAMEs must be explicitly reviewed.
+            while IFS= read -r soname; do
+              case "$soname" in
+                libc.so.6|libm.so.6|libcairo.so.2|libgcc_s.so.1|libxkbcommon.so.0|libwayland-client.so.0) ;;
+                *) echo "FAIL: unmapped Debian dependency $soname in $bin" >&2; exit 1 ;;
+              esac
+            done < <(readelf -d "$bin" | sed -n 's/.*Shared library: \[\([^]]*\)\].*/\1/p')
             printf 'PASS %s ELF32 ARM VFPv3-D16 hardfloat glibc no-NEON-attributes\n' "$name" | tee -a "$audit"
           done < /tmp/sl101-runtime-binaries.txt
           count=$(grep -c '^PASS ' "$audit")
@@ -153,13 +166,22 @@ jobs:
           cat target/gha-artifact/SHA256SUMS.txt
           echo 'ELF_AUDIT=PASS heuristic-only; SL101 hardware SIGILL check remains pending'
 
-      - name: Upload Debian armhf tarball, manifests and ELF evidence
+      - name: Assemble a Debian 13 armhf .deb from these verified binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          sh scripts/build-ci-debian-deb.sh +            target/gha-artifact/nuraloumi-ci target/gha-artifact/native-deb "$GITHUB_SHA"
+          find target/gha-artifact/native-deb -name 'nuraloumi_*_armhf.deb' -type f -size +0c | grep -q .
+          test -s target/gha-artifact/native-deb/nuraloumi_*_armhf.deb.sha256
+
+      - name: Upload Debian armhf tarball, installable DEB, manifests and ELF evidence
         uses: actions/upload-artifact@v4
         with:
-          name: nuraloumi-debian13-armv7-gnueabihf-${{ github.run_number }}
+          name: nuraloumi-debian13-armv7-gnueabihf-${{ github.run_number }}-${{ github.sha }}
           path: |
             target/gha-artifact/nuraloumi-ci.tar
             target/gha-artifact/nuraloumi-ci/MANIFEST.txt
+            target/gha-artifact/native-deb/**
             target/gha-artifact/SHA256SUMS.txt
             target/gha-artifact/BUILD-INFO.txt
             target/gha-artifact/ELF-AUDIT.txt

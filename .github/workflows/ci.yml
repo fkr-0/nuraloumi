@@ -23,6 +23,8 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Check
         run: cargo check --workspace --locked
+      - name: Native package and GitHub artifact provenance contracts
+        run: python3 -m unittest scripts/test_native_packages_ci.py scripts/test_verify_ci_artifact.py scripts/test_musl_ci.py scripts/test_debian_armhf_ci.py -v
       - name: Test
         run: cargo test --workspace --locked
       - name: Clippy
