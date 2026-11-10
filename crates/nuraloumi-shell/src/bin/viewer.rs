@@ -15,6 +15,10 @@ use std::{
     path::{Path, PathBuf},
     process::ExitCode,
 };
+use std::{
+    sync::mpsc::{self, Receiver, TryRecvError},
+    thread,
+};
 use viewer_scene::{Content, Scene};
 
 struct Options {
@@ -61,6 +65,53 @@ fn load_scene(path: &Path) -> Scene {
     Scene { name, content }
 }
 
+fn pending_scene(path: &Path) -> Scene {
+    let name = path.file_name().unwrap_or(path.as_os_str());
+    Scene {
+        name: viewer_diagnostics::sanitize(&name.to_string_lossy()),
+        content: Content::Diagnostic(
+            "Opening file…\nPNG/JPEG decoding or file identification in progress.".into(),
+        ),
+    }
+}
+
+fn spawn_loader(job: impl FnOnce() -> Scene + Send + 'static) -> Receiver<Scene> {
+    // A single bounded handoff. Never mutate Wayland or Cairo from the worker.
+    let (tx, rx) = mpsc::sync_channel(1);
+    thread::spawn(move || {
+        let result = job();
+        let _ = tx.send(result); // Receiver is dropped if the user closes early.
+    });
+    rx
+}
+
+/// Multiplex compositor events while a single file job is pending. Once the
+/// worker replies, return to blocking Wayland dispatch without periodic polls.
+fn dispatch_while_loading(backend: &mut WaylandBackend) -> Result<(), String> {
+    backend.flush().map_err(|e| e.to_string())?;
+    let mut fd = libc::pollfd {
+        fd: backend.poll_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let result = unsafe { libc::poll(&mut fd, 1, 40) };
+    if result < 0 {
+        let err = std::io::Error::last_os_error();
+        if err.kind() != std::io::ErrorKind::Interrupted {
+            return Err(format!("polling Wayland while loading: {err}"));
+        }
+    } else if result > 0 {
+        if fd.revents & libc::POLLIN != 0 {
+            backend.blocking_dispatch().map_err(|e| e.to_string())?;
+        } else if fd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+            return Err("Wayland fd closed or failed during loading".into());
+        }
+    } else {
+        backend.dispatch_pending().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 fn draw(
     backend: &mut WaylandBackend,
     id: SurfaceId,
@@ -85,12 +136,14 @@ fn draw(
 fn close(backend: &mut WaylandBackend, id: SurfaceId) {
     let _ = backend.destroy_surface(id);
 }
-fn run_live(scene: &Scene) -> Result<(), String> {
+fn run_live(path: &Path) -> Result<(), String> {
     let mut backend = WaylandBackend::connect().map_err(|e| e.to_string())?;
     if !backend.capabilities().layer_shell {
         return Err("Wayland layer shell unavailable".into());
     }
-    backend.blocking_dispatch().map_err(|e| e.to_string())?;
+    // connect() has already performed registry roundtrips. Do not block
+    // waiting for unrelated events before creating a surface: the compositor
+    // sends our first Configure only after create_menu() commits.
     let output = backend.outputs().into_iter().next();
     let (width, height) = output
         .as_ref()
@@ -112,12 +165,37 @@ fn run_live(scene: &Scene) -> Result<(), String> {
             namespace: "nuraloumi-viewer".into(),
         })
         .map_err(|e| e.to_string())?;
+    // Create and configure the UI before any potentially slow read/decode.
+    let mut scene = pending_scene(path);
+    let worker_path = path.to_path_buf();
+    let replies = spawn_loader(move || load_scene(&worker_path));
+    let mut busy = true;
     let mut geometry = None::<(u32, u32, i32)>;
     let mut pointer_pressed = false;
     let mut touch_close_id = None::<i32>;
     loop {
-        backend.blocking_dispatch().map_err(|e| e.to_string())?;
+        if busy {
+            dispatch_while_loading(&mut backend)?;
+        } else {
+            backend.blocking_dispatch().map_err(|e| e.to_string())?;
+        }
         let mut redraw = false;
+        if busy {
+            match replies.try_recv() {
+                Ok(loaded) => {
+                    scene = loaded;
+                    busy = false;
+                    redraw = true;
+                }
+                Err(TryRecvError::Disconnected) => {
+                    scene.content =
+                        Content::Diagnostic("File loading worker terminated unexpectedly".into());
+                    busy = false;
+                    redraw = true;
+                }
+                Err(TryRecvError::Empty) => {}
+            }
+        }
         for incoming in backend.drain_events().collect::<Vec<_>>() {
             if incoming.surface != Some(surface) {
                 continue;
@@ -182,16 +260,16 @@ fn run_live(scene: &Scene) -> Result<(), String> {
         }
         if redraw {
             if let Some(size) = geometry {
-                draw(&mut backend, surface, scene, size)?;
+                draw(&mut backend, surface, &scene, size)?;
             }
         }
     }
 }
 fn run(options: Options) -> Result<(), String> {
-    let scene = load_scene(&options.path);
     if options.live {
-        run_live(&scene)
+        run_live(&options.path)
     } else {
+        let scene = load_scene(&options.path);
         let (frame, _, width, height) = viewer_scene::render(&scene, 800, 480, 1)?;
         let nonblank = frame
             .chunks_exact(4)
@@ -233,6 +311,25 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+    #[test]
+    fn loading_scene_is_visible_before_slow_worker_finishes() {
+        let started = std::time::Instant::now();
+        let replies = spawn_loader(|| {
+            thread::sleep(Duration::from_millis(150));
+            Scene {
+                name: "done.png".into(),
+                content: Content::Diagnostic("Ready".into()),
+            }
+        });
+        let pending = pending_scene(Path::new("slow-file.jpg"));
+        let (frame, _, _, _) = viewer_scene::render(&pending, 320, 240, 1).unwrap();
+        assert!(!frame.is_empty());
+        assert!(matches!(replies.try_recv(), Err(TryRecvError::Empty)));
+        assert!(started.elapsed() < Duration::from_millis(145));
+        let finished = replies.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(finished.name, "done.png");
+    }
     #[test]
     fn exact_argv_and_leading_hyphen() {
         let opts = parse([OsString::from("--live"), OsString::from("-unsafe.jpeg")])

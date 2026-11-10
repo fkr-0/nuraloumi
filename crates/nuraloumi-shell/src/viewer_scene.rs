@@ -134,7 +134,9 @@ pub fn render(
             let avail_h = (f64::from(height) - 166.0).max(16.0);
             let iw = f64::from(image.width);
             let ih = f64::from(image.height);
-            let factor = (avail_w / iw).min(avail_h / ih).clamp(0.01, 16.0);
+            // The image may be arbitrarily tall and narrow; a minimum zoom would
+            // spill into the toolbar at SL101-small configurations.
+            let factor = (avail_w / iw).min(avail_h / ih).min(16.0);
             let dw = iw * factor;
             let dh = ih * factor;
             let x = left + (avail_w - dw) / 2.0;
@@ -149,6 +151,8 @@ pub fn render(
             )
             .map_err(|e| e.to_string())?;
             ctx.save().map_err(|e| e.to_string())?;
+            ctx.rectangle(left, top, avail_w, avail_h);
+            ctx.clip();
             ctx.translate(x, y);
             ctx.scale(factor, factor);
             ctx.set_source_surface(&source, 0.0, 0.0)
@@ -203,6 +207,26 @@ mod tests {
         assert!(center[2] > 100 || center[1] > 100);
         let outer = &buffer[(90 * stride + 25 * 4)..][..4];
         assert_ne!(outer, center);
+    }
+    #[test]
+    fn extreme_aspect_ratio_cannot_paint_outside_image_area() {
+        let image = Image {
+            width: 1,
+            height: 4096,
+            argb: vec![0, 0, 255, 255].repeat(4096),
+            format: "PNG",
+        };
+        let scene = Scene {
+            content: Content::Image(image),
+            name: "very-tall.png".into(),
+        };
+        let (pixels, stride, ..) = render(&scene, 160, 160, 1).unwrap();
+        // The picture viewport ends at y=100 (top 84 + available 16).
+        // Red must not bleed into the footer after aspect-ratio fit/clipping.
+        for y in 102..155 {
+            let rgb = &pixels[y * stride + 80 * 4..y * stride + 80 * 4 + 3];
+            assert!(rgb[2] < 100, "red image escaped clipping at y={y}: {rgb:?}");
+        }
     }
     #[test]
     fn diagnostic_scene_nonblank_and_hit_regions() {
