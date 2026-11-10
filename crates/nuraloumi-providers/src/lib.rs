@@ -14,6 +14,7 @@ pub mod command;
 pub mod common;
 pub mod error;
 pub mod feeds;
+pub mod file_open;
 pub mod maps;
 pub mod media;
 pub mod network;

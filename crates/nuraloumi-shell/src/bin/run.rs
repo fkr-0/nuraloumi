@@ -1,6 +1,7 @@
 use nuraloumi_core::{
     MenuAction, MenuItem, MenuModel, MenuState, SemanticInput, DARK_THEME, LIGHT_THEME,
 };
+use nuraloumi_providers::file_open::{self, DesktopHandler, OpenOutcome};
 use nuraloumi_render_cairo::{CairoRenderer, RenderOptions, Scene, Viewport};
 use nuraloumi_shell::{
     load_config_or_default, render_menu_with_glyphs, ShellConfig, Theme as ShellTheme,
@@ -93,7 +94,7 @@ fn collect_path_executables() -> Vec<String> {
 
 struct RecentEntry {
     display: String,
-    path: String,
+    path: PathBuf,
     is_dir: bool,
 }
 
@@ -133,13 +134,12 @@ fn collect_recent_files() -> Vec<RecentEntry> {
             };
             let mtime = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
             let path = entry.path();
-            let path_str = path.to_string_lossy().into_owned();
-            let display = shorten_path(&path_str, &home);
+            let display = shorten_path(&path.to_string_lossy(), &home);
             entries.push((
                 mtime,
                 RecentEntry {
                     display,
-                    path: path_str,
+                    path,
                     is_dir: meta.is_dir(),
                 },
             ));
@@ -199,10 +199,14 @@ fn build_run_model(
     if !recent.is_empty() {
         let mut file_count = 0;
         let mut has_header = false;
-        for entry in recent {
+        for (index, entry) in recent.iter().enumerate() {
             if !query.is_empty()
                 && !entry.display.to_lowercase().contains(&lower_query)
-                && !entry.path.to_lowercase().contains(&lower_query)
+                && !entry
+                    .path
+                    .to_string_lossy()
+                    .to_lowercase()
+                    .contains(&lower_query)
             {
                 continue;
             }
@@ -214,11 +218,7 @@ fn build_run_model(
                 items.push(MenuItem::separator("sep-recent"));
                 has_header = true;
             }
-            let kind = if entry.is_dir {
-                "open-dir"
-            } else {
-                "open-file"
-            };
+            let kind = "open-recent";
             let subtitle = if entry.is_dir {
                 "Directory".to_string()
             } else {
@@ -226,11 +226,11 @@ fn build_run_model(
             };
             items.push(
                 MenuItem::action(
-                    format!("recent-{file_count}"),
+                    format!("recent-{index}"),
                     entry.display.clone(),
                     MenuAction::Custom {
                         kind: kind.into(),
-                        payload: entry.path.clone(),
+                        payload: index.to_string(),
                     },
                 )
                 .with_subtitle(subtitle),
@@ -278,26 +278,244 @@ fn execute_command(command: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn open_path(path: &str) -> Result<(), String> {
-    Command::new("xdg-open")
-        .arg(path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| format!("xdg-open failed: {e}"))?;
-    Ok(())
+#[derive(Debug)]
+enum DialogState {
+    Run,
+    OpenWith {
+        path: PathBuf,
+        reason: String,
+        handlers: Vec<DesktopHandler>,
+        page: usize,
+    },
+    Diagnostic {
+        path: Option<PathBuf>,
+        reason: String,
+        description: String,
+    },
 }
-
-fn dispatch_action(kind: &str, payload: &str) {
+fn safe_label(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .take(160)
+        .collect()
+}
+fn diagnostic(path: Option<PathBuf>, reason: String) -> DialogState {
+    let description = path
+        .as_deref()
+        .map(|p| file_open::describe_file(p).unwrap_or_else(|e| format!("file -- PATH: {e}")))
+        .unwrap_or_else(|| "No file was opened".into());
+    DialogState::Diagnostic {
+        path,
+        reason,
+        description,
+    }
+}
+fn build_dialog_model(
+    prompt: &str,
+    commands: &[String],
+    recent: &[RecentEntry],
+    query: &str,
+    dialog: &DialogState,
+) -> MenuModel {
+    match dialog {
+        DialogState::Run => build_run_model(prompt, commands, recent, query),
+        DialogState::OpenWith {
+            path,
+            reason,
+            handlers,
+            page,
+        } => {
+            let mut items = vec![
+                MenuItem::status(
+                    "open-with-header",
+                    format!("Open With: {}", safe_label(&path.to_string_lossy())),
+                )
+                .with_subtitle(safe_label(reason)),
+                MenuItem::separator("sep-open-with"),
+            ];
+            const PAGE: usize = 7;
+            for (index, app) in handlers.iter().enumerate().skip(page * PAGE).take(PAGE) {
+                items.push(
+                    MenuItem::action(
+                        format!("handler-{index}"),
+                        app.name.clone(),
+                        MenuAction::Custom {
+                            kind: "choose-handler".into(),
+                            payload: index.to_string(),
+                        },
+                    )
+                    .with_subtitle(app.id.clone()),
+                );
+            }
+            if *page > 0 {
+                items.push(MenuItem::action(
+                    "handler-prev",
+                    "Previous handlers",
+                    MenuAction::Custom {
+                        kind: "handler-prev".into(),
+                        payload: String::new(),
+                    },
+                ));
+            }
+            if (*page + 1) * PAGE < handlers.len() {
+                items.push(MenuItem::action(
+                    "handler-next",
+                    "More handlers",
+                    MenuAction::Custom {
+                        kind: "handler-next".into(),
+                        payload: String::new(),
+                    },
+                ));
+            }
+            items.push(MenuItem::action(
+                "describe-file",
+                "Describe file",
+                MenuAction::Custom {
+                    kind: "describe-file".into(),
+                    payload: String::new(),
+                },
+            ));
+            items.push(MenuItem::action(
+                "cancel-open-with",
+                "Cancel",
+                MenuAction::Custom {
+                    kind: "cancel-open".into(),
+                    payload: String::new(),
+                },
+            ));
+            MenuModel::new("open-with-dialog", "Open With", items)
+        }
+        DialogState::Diagnostic {
+            path,
+            reason,
+            description,
+        } => {
+            let mut items = vec![
+                MenuItem::status("open-error", safe_label(reason)),
+                MenuItem::status("file-description", safe_label(description)),
+                MenuItem::separator("sep-diagnostic"),
+            ];
+            if path.is_some() {
+                items.push(MenuItem::action(
+                    "retry-open-with",
+                    "Open With...",
+                    MenuAction::Custom {
+                        kind: "retry-open-with".into(),
+                        payload: String::new(),
+                    },
+                ));
+            }
+            items.push(MenuItem::action(
+                "cancel-open",
+                "Back to Run",
+                MenuAction::Custom {
+                    kind: "cancel-open".into(),
+                    payload: String::new(),
+                },
+            ));
+            MenuModel::new("file-diagnostic", "File diagnostic", items)
+        }
+    }
+}
+/// Returns true only when an explicit launch request was accepted.
+fn activate_action(
+    dialog: &mut DialogState,
+    recent: &[RecentEntry],
+    kind: &str,
+    payload: &str,
+) -> bool {
     match kind {
-        "execute" => {
-            let _ = execute_command(payload);
+        "execute" => match execute_command(payload) {
+            Ok(()) => true,
+            Err(e) => {
+                *dialog = diagnostic(None, format!("command failed: {e}"));
+                false
+            }
+        },
+        "open-recent" => {
+            let Some(entry) = payload.parse::<usize>().ok().and_then(|i| recent.get(i)) else {
+                *dialog = diagnostic(None, "recent file selection is no longer valid".into());
+                return false;
+            };
+            match file_open::open_default(&entry.path) {
+                OpenOutcome::Opened { .. } => true,
+                OpenOutcome::NeedsOpenWith { reason, handlers } => {
+                    *dialog = DialogState::OpenWith {
+                        path: entry.path.clone(),
+                        reason,
+                        handlers,
+                        page: 0,
+                    };
+                    false
+                }
+                OpenOutcome::NeedsFallback { reason } => {
+                    *dialog = diagnostic(Some(entry.path.clone()), reason);
+                    false
+                }
+            }
         }
-        "open-file" | "open-dir" => {
-            let _ = open_path(payload);
+        "choose-handler" => {
+            let DialogState::OpenWith { path, handlers, .. } = dialog else {
+                return false;
+            };
+            let Some(app) = payload.parse::<usize>().ok().and_then(|i| handlers.get(i)) else {
+                return false;
+            };
+            let path = path.clone();
+            let id = app.id.clone();
+            match file_open::open_with(&path, &id) {
+                Ok(_) => true,
+                Err(e) => {
+                    *dialog = diagnostic(Some(path), format!("Open With {id} failed: {e}"));
+                    false
+                }
+            }
         }
-        _ => {}
+        "handler-next" => {
+            if let DialogState::OpenWith { page, handlers, .. } = dialog {
+                if (*page + 1) * 7 < handlers.len() {
+                    *page += 1;
+                }
+            }
+            false
+        }
+        "handler-prev" => {
+            if let DialogState::OpenWith { page, .. } = dialog {
+                *page = page.saturating_sub(1);
+            }
+            false
+        }
+        "describe-file" => {
+            if let DialogState::OpenWith { path, reason, .. } = dialog {
+                *dialog = diagnostic(Some(path.clone()), reason.clone());
+            }
+            false
+        }
+        "retry-open-with" => {
+            if let DialogState::Diagnostic {
+                path: Some(path),
+                reason,
+                ..
+            } = dialog
+            {
+                let handlers = file_open::handlers_for_path(path);
+                if !handlers.is_empty() {
+                    *dialog = DialogState::OpenWith {
+                        path: path.clone(),
+                        reason: reason.clone(),
+                        handlers,
+                        page: 0,
+                    };
+                }
+            }
+            false
+        }
+        "cancel-open" => {
+            *dialog = DialogState::Run;
+            false
+        }
+        _ => false,
     }
 }
 
@@ -346,7 +564,8 @@ fn run_live(config: ShellConfig, args: &Args) -> Result<(), String> {
     };
 
     let mut query = String::new();
-    let mut model = build_run_model(prompt, &executables, &recent, &query);
+    let mut dialog = DialogState::Run;
+    let mut model = build_dialog_model(prompt, &executables, &recent, &query, &dialog);
     let mut state = MenuState::new(&model);
 
     let output = backend.outputs().into_iter().next();
@@ -458,8 +677,14 @@ fn run_live(config: ShellConfig, args: &Args) -> Result<(), String> {
                 }
                 WaylandEvent::Key { key, pressed: true } => match key {
                     Key::Escape => {
-                        close_surfaces(&mut backend, surface, dismiss_surface)?;
-                        return Ok(());
+                        if matches!(dialog, DialogState::Run) {
+                            close_surfaces(&mut backend, surface, dismiss_surface)?;
+                            return Ok(());
+                        }
+                        dialog = DialogState::Run;
+                        model = build_dialog_model(prompt, &executables, &recent, &query, &dialog);
+                        state = MenuState::new(&model);
+                        redraw = true;
                     }
                     Key::Enter => {
                         let action = if let Some(sel) = &state.selected_id {
@@ -468,28 +693,42 @@ fn run_live(config: ShellConfig, args: &Args) -> Result<(), String> {
                             } else if let Some(item) = model.item_by_id(sel) {
                                 if let Some(MenuAction::Custom { kind, payload }) = &item.action {
                                     Some((kind.clone(), payload.clone()))
-                                } else {
+                                } else if matches!(dialog, DialogState::Run) {
                                     Some(("execute".to_string(), query.clone()))
+                                } else {
+                                    None
                                 }
-                            } else {
+                            } else if matches!(dialog, DialogState::Run) {
                                 Some(("execute".to_string(), query.clone()))
+                            } else {
+                                None
                             }
-                        } else if !query.is_empty() {
+                        } else if !query.is_empty() && matches!(dialog, DialogState::Run) {
                             Some(("execute".to_string(), query.clone()))
                         } else {
                             None
                         };
                         if let Some((kind, payload)) = action {
-                            if !payload.is_empty() {
-                                close_surfaces(&mut backend, surface, dismiss_surface)?;
-                                dispatch_action(&kind, &payload);
-                                return Ok(());
+                            if kind != "execute" || !payload.is_empty() {
+                                if activate_action(&mut dialog, &recent, &kind, &payload) {
+                                    close_surfaces(&mut backend, surface, dismiss_surface)?;
+                                    return Ok(());
+                                }
+                                model = build_dialog_model(
+                                    prompt,
+                                    &executables,
+                                    &recent,
+                                    &query,
+                                    &dialog,
+                                );
+                                state = MenuState::new(&model);
+                                redraw = true;
                             }
                         }
                     }
-                    Key::Backspace => {
+                    Key::Backspace if matches!(dialog, DialogState::Run) => {
                         query.pop();
-                        model = build_run_model(prompt, &executables, &recent, &query);
+                        model = build_dialog_model(prompt, &executables, &recent, &query, &dialog);
                         state = MenuState::new(&model);
                         redraw = true;
                     }
@@ -501,14 +740,19 @@ fn run_live(config: ShellConfig, args: &Args) -> Result<(), String> {
                         state.handle(&model, SemanticInput::Down);
                         redraw = true;
                     }
-                    Key::Tab => {
+                    Key::Tab if matches!(dialog, DialogState::Run) => {
                         if let Some(sel) = &state.selected_id {
                             if let Some(item) = model.item_by_id(sel) {
                                 if let Some(MenuAction::Custom { kind, payload }) = &item.action {
                                     if kind == "execute" {
                                         query = payload.clone();
-                                        model =
-                                            build_run_model(prompt, &executables, &recent, &query);
+                                        model = build_dialog_model(
+                                            prompt,
+                                            &executables,
+                                            &recent,
+                                            &query,
+                                            &dialog,
+                                        );
                                         state = MenuState::new(&model);
                                         redraw = true;
                                     }
@@ -517,10 +761,12 @@ fn run_live(config: ShellConfig, args: &Args) -> Result<(), String> {
                         }
                     }
                     Key::Text(text)
-                        if !text.is_empty() && text.chars().all(|c| !c.is_control()) =>
+                        if matches!(dialog, DialogState::Run)
+                            && !text.is_empty()
+                            && text.chars().all(|c| !c.is_control()) =>
                     {
                         query.push_str(&text);
-                        model = build_run_model(prompt, &executables, &recent, &query);
+                        model = build_dialog_model(prompt, &executables, &recent, &query, &dialog);
                         state = MenuState::new(&model);
                         redraw = true;
                     }
@@ -536,9 +782,19 @@ fn run_live(config: ShellConfig, args: &Args) -> Result<(), String> {
                         if let Some(id) = find_hit_region(s, x, y) {
                             if let Some(item) = model.item_by_id(&id) {
                                 if let Some(MenuAction::Custom { kind, payload }) = &item.action {
-                                    close_surfaces(&mut backend, surface, dismiss_surface)?;
-                                    dispatch_action(kind, payload);
-                                    return Ok(());
+                                    if activate_action(&mut dialog, &recent, kind, payload) {
+                                        close_surfaces(&mut backend, surface, dismiss_surface)?;
+                                        return Ok(());
+                                    }
+                                    model = build_dialog_model(
+                                        prompt,
+                                        &executables,
+                                        &recent,
+                                        &query,
+                                        &dialog,
+                                    );
+                                    state = MenuState::new(&model);
+                                    redraw = true;
                                 }
                             }
                         }
@@ -549,9 +805,19 @@ fn run_live(config: ShellConfig, args: &Args) -> Result<(), String> {
                         if let Some(id) = find_hit_region(s, x, y) {
                             if let Some(item) = model.item_by_id(&id) {
                                 if let Some(MenuAction::Custom { kind, payload }) = &item.action {
-                                    close_surfaces(&mut backend, surface, dismiss_surface)?;
-                                    dispatch_action(kind, payload);
-                                    return Ok(());
+                                    if activate_action(&mut dialog, &recent, kind, payload) {
+                                        close_surfaces(&mut backend, surface, dismiss_surface)?;
+                                        return Ok(());
+                                    }
+                                    model = build_dialog_model(
+                                        prompt,
+                                        &executables,
+                                        &recent,
+                                        &query,
+                                        &dialog,
+                                    );
+                                    state = MenuState::new(&model);
+                                    redraw = true;
                                 }
                             }
                         }
@@ -707,4 +973,72 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn filtered_recent_rows_keep_original_path_index() {
+        let recent = vec![
+            RecentEntry {
+                display: "first.txt".into(),
+                path: "/tmp/first.txt".into(),
+                is_dir: false,
+            },
+            RecentEntry {
+                display: "target folder".into(),
+                path: "/tmp/target folder".into(),
+                is_dir: true,
+            },
+        ];
+        let menu = build_run_model("Run:", &[], &recent, "target");
+        let action = menu
+            .item_by_id("recent-1")
+            .unwrap()
+            .action
+            .as_ref()
+            .unwrap();
+        assert!(
+            matches!(action, MenuAction::Custom {kind,payload} if kind=="open-recent" && payload=="1")
+        );
+        assert_eq!(glyph_for_item_with_dirs("recent-1", &recent), Some('/'));
+    }
+
+    #[test]
+    fn chooser_is_paginated_keyboard_and_touch_action_model() {
+        let handlers = (0..9)
+            .map(|i| DesktopHandler {
+                id: format!("app{i}.desktop"),
+                name: format!("Application {i}"),
+                desktop_file: format!("/usr/share/applications/app{i}.desktop").into(),
+            })
+            .collect();
+        let mut dialog = DialogState::OpenWith {
+            path: "/tmp/a b".into(),
+            reason: "no default".into(),
+            handlers,
+            page: 0,
+        };
+        let model = build_dialog_model("Run:", &[], &[], "", &dialog);
+        assert!(model.item_by_id("handler-next").is_some());
+        assert!(model.item_by_id("handler-0").is_some());
+        assert!(!activate_action(&mut dialog, &[], "handler-next", ""));
+        let model = build_dialog_model("Run:", &[], &[], "", &dialog);
+        assert!(model.item_by_id("handler-7").is_some());
+        assert!(model.item_by_id("handler-prev").is_some());
+        assert!(!activate_action(&mut dialog, &[], "cancel-open", ""));
+        assert!(matches!(dialog, DialogState::Run));
+    }
+
+    #[test]
+    fn diagnostic_surfaces_command_error_and_cancel_works() {
+        let mut dialog = diagnostic(None, "helper could not start".into());
+        let model = build_dialog_model("Run:", &[], &[], "", &dialog);
+        assert!(model.item_by_id("open-error").is_some());
+        assert!(model.item_by_id("cancel-open").is_some());
+        assert!(!activate_action(&mut dialog, &[], "cancel-open", ""));
+        assert!(matches!(dialog, DialogState::Run));
+    }
 }
