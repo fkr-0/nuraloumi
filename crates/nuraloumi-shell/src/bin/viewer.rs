@@ -136,6 +136,22 @@ fn draw(
 fn close(backend: &mut WaylandBackend, id: SurfaceId) {
     let _ = backend.destroy_surface(id);
 }
+
+// Linux BTN_LEFT (0x110) only; other mouse buttons must never close the
+// viewer. Match both press and release to the same primary-button gesture.
+fn pointer_close(held: &mut bool, button: u32, pressed: bool, inside: bool) -> bool {
+    if button != 0x110 {
+        return false;
+    }
+    if pressed {
+        *held = inside;
+        false
+    } else {
+        let activate = *held && inside;
+        *held = false;
+        activate
+    }
+}
 fn run_live(path: &Path) -> Result<(), String> {
     let mut backend = WaylandBackend::connect().map_err(|e| e.to_string())?;
     if !backend.capabilities().layer_shell {
@@ -220,20 +236,14 @@ fn run_live(path: &Path) -> Result<(), String> {
                 PlatformEvent::PointerButton {
                     x,
                     y,
-                    pressed: down,
-                    ..
+                    pressed,
+                    button,
                 } => {
-                    if down {
-                        pointer_pressed =
-                            geometry.is_some_and(|(w, h, _)| viewer_scene::close_hit(x, y, w, h));
-                    } else {
-                        if pointer_pressed
-                            && geometry.is_some_and(|(w, h, _)| viewer_scene::close_hit(x, y, w, h))
-                        {
-                            close(&mut backend, surface);
-                            return Ok(());
-                        }
-                        pointer_pressed = false;
+                    let inside =
+                        geometry.is_some_and(|(w, h, _)| viewer_scene::close_hit(x, y, w, h));
+                    if pointer_close(&mut pointer_pressed, button, pressed, inside) {
+                        close(&mut backend, surface);
+                        return Ok(());
                     }
                 }
                 PlatformEvent::TouchDown { id, x, y } if touch_close_id.is_none() => {
@@ -334,6 +344,21 @@ mod tests {
         release_tx.send(()).unwrap();
         let finished = replies.recv_timeout(Duration::from_secs(3)).unwrap();
         assert_eq!(finished.name, "done.png");
+    }
+    #[test]
+    fn close_is_only_primary_button_release_inside() {
+        let mut held = false;
+        assert!(!pointer_close(&mut held, 0x111, true, true));
+        assert!(!pointer_close(&mut held, 0x111, false, true));
+        assert!(!held);
+        assert!(!pointer_close(&mut held, 0x110, true, true));
+        assert!(!pointer_close(&mut held, 0x110, false, false));
+        assert!(!held);
+        assert!(!pointer_close(&mut held, 0x110, true, false));
+        assert!(!pointer_close(&mut held, 0x110, false, true));
+        assert!(!pointer_close(&mut held, 0x110, true, true));
+        assert!(pointer_close(&mut held, 0x110, false, true));
+        assert!(!held);
     }
     #[test]
     fn exact_argv_and_leading_hyphen() {

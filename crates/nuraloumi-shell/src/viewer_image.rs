@@ -149,30 +149,38 @@ fn argb_oriented(
     };
     dimensions(width, height)?;
     let mut data = vec![0u8; pixels * 4];
-    for (index, source) in rgb.chunks_exact(channels).enumerate() {
-        let sx = index as u32 % source_width;
-        let sy = index as u32 / source_width;
-        let (dx, dy) = match orientation {
-            2 => (source_width - 1 - sx, sy),
-            3 => (source_width - 1 - sx, source_height - 1 - sy),
-            4 => (sx, source_height - 1 - sy),
-            5 => (sy, sx),
-            6 => (source_height - 1 - sy, sx),
-            7 => (source_height - 1 - sy, source_width - 1 - sx),
-            8 => (sy, source_width - 1 - sx),
-            _ => (sx, sy),
-        };
-        let dst = &mut data[(dy as usize * width as usize + dx as usize) * 4..][..4];
-        let (r, g, b, a) = match channels {
-            1 => (source[0], source[0], source[0], 255),
-            2 => (source[0], source[0], source[0], source[1]),
-            3 => (source[0], source[1], source[2], 255),
-            4 => (source[0], source[1], source[2], source[3]),
-            _ => unreachable!(),
-        };
-        let premul = |c: u8| ((u16::from(c) * u16::from(a) + 127) / 255) as u8;
-        // Linux ARMv7 and x86_64: Cairo ARgb32 bytes are BGRA (premultiplied).
-        dst.copy_from_slice(&[premul(b), premul(g), premul(r), a]);
+    let row_bytes = source_width as usize * channels;
+    let dest_row_bytes = width as usize * 4;
+    // Row/column iteration removes 32-bit integer division and modulo from
+    // every pixel: Tegra20 ARMv7 has no hardware integer-divide instruction.
+    // Validate the full length above, then slice each row and pixel exactly.
+    for (sy, row) in rgb.chunks_exact(row_bytes).enumerate() {
+        let sy = sy as u32;
+        for (sx, source) in row.chunks_exact(channels).enumerate() {
+            let sx = sx as u32;
+            let (dx, dy) = match orientation {
+                2 => (source_width - 1 - sx, sy),
+                3 => (source_width - 1 - sx, source_height - 1 - sy),
+                4 => (sx, source_height - 1 - sy),
+                5 => (sy, sx),
+                6 => (source_height - 1 - sy, sx),
+                7 => (source_height - 1 - sy, source_width - 1 - sx),
+                8 => (sy, source_width - 1 - sx),
+                _ => (sx, sy),
+            };
+            let offset = dy as usize * dest_row_bytes + dx as usize * 4;
+            let dst = &mut data[offset..offset + 4];
+            let (r, g, b, a) = match channels {
+                1 => (source[0], source[0], source[0], 255),
+                2 => (source[0], source[0], source[0], source[1]),
+                3 => (source[0], source[1], source[2], 255),
+                4 => (source[0], source[1], source[2], source[3]),
+                _ => unreachable!(),
+            };
+            let premul = |c: u8| ((u16::from(c) * u16::from(a) + 127) / 255) as u8;
+            // Cairo ARgb32 bytes are premultiplied BGRA on SL101 and x86_64.
+            dst.copy_from_slice(&[premul(b), premul(g), premul(r), a]);
+        }
     }
     Ok(Image {
         width,
@@ -387,6 +395,17 @@ mod tests {
         let oriented = decode(&jpeg).unwrap();
         assert_eq!((oriented.width, oriented.height), (3, 2));
         assert_eq!(oriented.argb.len(), 24);
+    }
+    #[test]
+    fn extreme_rectangular_orientation_stays_bounded() {
+        let source = vec![30u8; 4096 * 3];
+        for orientation in 1..=8 {
+            let image = argb_oriented(&source, 1, 4096, 3, "JPEG", orientation).unwrap();
+            assert_eq!(image.argb.len(), 4096 * 4);
+            assert_eq!(image.width * image.height, 4096);
+            assert_eq!(image.argb[2], 30);
+            assert_eq!(image.argb[3], 255);
+        }
     }
     #[test]
     fn rgba_premultiplication() {
