@@ -314,20 +314,25 @@ mod tests {
     use std::time::Duration;
     #[test]
     fn loading_scene_is_visible_before_slow_worker_finishes() {
-        let started = std::time::Instant::now();
-        let replies = spawn_loader(|| {
-            thread::sleep(Duration::from_millis(150));
+        // Control the worker with channels rather than CPU-speed-sensitive
+        // sleeps: the ARMv7/no-NEON test must also be deterministic.
+        let (started_tx, started_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        let replies = spawn_loader(move || {
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
             Scene {
                 name: "done.png".into(),
                 content: Content::Diagnostic("Ready".into()),
             }
         });
+        started_rx.recv_timeout(Duration::from_secs(3)).unwrap();
         let pending = pending_scene(Path::new("slow-file.jpg"));
         let (frame, _, _, _) = viewer_scene::render(&pending, 320, 240, 1).unwrap();
         assert!(!frame.is_empty());
         assert!(matches!(replies.try_recv(), Err(TryRecvError::Empty)));
-        assert!(started.elapsed() < Duration::from_millis(145));
-        let finished = replies.recv_timeout(Duration::from_secs(2)).unwrap();
+        release_tx.send(()).unwrap();
+        let finished = replies.recv_timeout(Duration::from_secs(3)).unwrap();
         assert_eq!(finished.name, "done.png");
     }
     #[test]
