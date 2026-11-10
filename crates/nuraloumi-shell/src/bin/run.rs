@@ -19,6 +19,9 @@ use std::thread;
 
 // Keep chooser actions visible on a 400px SL101 popup, including Cancel.
 const OPEN_WITH_PAGE_ROWS: usize = 2;
+const MAX_EXECUTABLE_SCAN_PER_DIR: usize = 2048;
+const MAX_EXECUTABLE_NAMES: usize = 4096;
+const MAX_RECENT_SCAN_PER_DIR: usize = 512;
 
 const HELP: &str = r#"nuraloumi-run — NuraLoumi command runner
 
@@ -78,12 +81,15 @@ fn collect_path_executables() -> Vec<String> {
         Err(_) => return Vec::new(),
     };
     let mut names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    for dir in path_var.split(':') {
+    'dirs: for dir in path_var.split(':') {
         let entries = match std::fs::read_dir(dir) {
             Ok(e) => e,
             Err(_) => continue,
         };
-        for entry in entries.flatten() {
+        for entry in entries.take(MAX_EXECUTABLE_SCAN_PER_DIR).flatten() {
+            if names.len() >= MAX_EXECUTABLE_NAMES {
+                break 'dirs;
+            }
             if let Ok(metadata) = entry.metadata() {
                 use std::os::unix::fs::PermissionsExt;
                 if metadata.is_file() && metadata.permissions().mode() & 0o111 != 0 {
@@ -129,7 +135,7 @@ fn collect_recent_files() -> Vec<RecentEntry> {
             Ok(r) => r,
             Err(_) => continue,
         };
-        for entry in read.flatten() {
+        for entry in read.take(MAX_RECENT_SCAN_PER_DIR).flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
             if name.starts_with('.') {
                 continue;
@@ -303,7 +309,11 @@ enum DialogState {
 fn safe_label(value: &str) -> String {
     value
         .chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
+        .map(|c| match c {
+            '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' => '�',
+            c if c.is_control() => ' ',
+            c => c,
+        })
         .take(160)
         .collect()
 }
@@ -1172,6 +1182,14 @@ mod tests {
             .expect("background worker must complete");
         assert!(!close);
         assert!(matches!(result, DialogState::Diagnostic { .. }));
+    }
+
+    #[test]
+    fn diagnostic_labels_strip_controls_and_bidi_spoofing() {
+        assert_eq!(safe_label("abc\u{202e}ok\n"), "abc�ok ");
+        assert_eq!(safe_label(&"a".repeat(200)).len(), 160);
+        assert!(MAX_RECENT_SCAN_PER_DIR <= 512);
+        assert!(MAX_EXECUTABLE_SCAN_PER_DIR <= MAX_EXECUTABLE_NAMES);
     }
 
     #[test]
