@@ -14,6 +14,11 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::thread;
+
+// Keep chooser actions visible on a 400px SL101 popup, including Cancel.
+const OPEN_WITH_PAGE_ROWS: usize = 2;
 
 const HELP: &str = r#"nuraloumi-run — NuraLoumi command runner
 
@@ -92,6 +97,7 @@ fn collect_path_executables() -> Vec<String> {
     names.into_iter().collect()
 }
 
+#[derive(Clone)]
 struct RecentEntry {
     display: String,
     path: PathBuf,
@@ -281,6 +287,7 @@ fn execute_command(command: &str) -> Result<(), String> {
 #[derive(Debug)]
 enum DialogState {
     Run,
+    Busy,
     OpenWith {
         path: PathBuf,
         reason: String,
@@ -320,6 +327,15 @@ fn build_dialog_model(
 ) -> MenuModel {
     match dialog {
         DialogState::Run => build_run_model(prompt, commands, recent, query),
+        DialogState::Busy => MenuModel::new(
+            "open-busy",
+            "Opening file",
+            vec![MenuItem::status(
+                "open-progress",
+                "Resolving MIME, handler or file description…",
+            )
+            .with_subtitle("Bounded background request; keyboard and touch remain responsive")],
+        ),
         DialogState::OpenWith {
             path,
             reason,
@@ -334,8 +350,12 @@ fn build_dialog_model(
                 .with_subtitle(safe_label(reason)),
                 MenuItem::separator("sep-open-with"),
             ];
-            const PAGE: usize = 7;
-            for (index, app) in handlers.iter().enumerate().skip(page * PAGE).take(PAGE) {
+            for (index, app) in handlers
+                .iter()
+                .enumerate()
+                .skip(page * OPEN_WITH_PAGE_ROWS)
+                .take(OPEN_WITH_PAGE_ROWS)
+            {
                 items.push(
                     MenuItem::action(
                         format!("handler-{index}"),
@@ -358,7 +378,7 @@ fn build_dialog_model(
                     },
                 ));
             }
-            if (*page + 1) * PAGE < handlers.len() {
+            if (*page + 1) * OPEN_WITH_PAGE_ROWS < handlers.len() {
                 items.push(MenuItem::action(
                     "handler-next",
                     "More handlers",
@@ -474,7 +494,7 @@ fn activate_action(
         }
         "handler-next" => {
             if let DialogState::OpenWith { page, handlers, .. } = dialog {
-                if (*page + 1) * 7 < handlers.len() {
+                if (*page + 1) * OPEN_WITH_PAGE_ROWS < handlers.len() {
                     *page += 1;
                 }
             }
@@ -517,6 +537,105 @@ fn activate_action(
         }
         _ => false,
     }
+}
+
+type OpenAction = (String, String);
+
+fn action_at(scene: Option<&Scene>, model: &MenuModel, x: f64, y: f64) -> Option<OpenAction> {
+    let id = find_hit_region(scene?, x, y)?;
+    let MenuAction::Custom { kind, payload } = model.item_by_id(&id)?.action.as_ref()? else {
+        return None;
+    };
+    Some((kind.clone(), payload.clone()))
+}
+
+// A press is never enough to launch a file. Pointer release must hit the
+// same semantic action; touch release must retain its original contact id.
+fn release_action(
+    pressed: &mut Option<OpenAction>,
+    release: Option<OpenAction>,
+) -> Option<OpenAction> {
+    if pressed.as_ref() == release.as_ref() {
+        pressed.take()
+    } else {
+        *pressed = None;
+        None
+    }
+}
+
+type FileJobResult = (DialogState, bool);
+fn dispatch_or_queue(
+    dialog: &mut DialogState,
+    recent: &[RecentEntry],
+    kind: &str,
+    payload: &str,
+    pending: &mut Option<Receiver<FileJobResult>>,
+) -> bool {
+    // Preserve user-entered commands as a distinct, explicit action.
+    if !matches!(
+        kind,
+        "open-recent" | "choose-handler" | "describe-file" | "retry-open-with"
+    ) {
+        return activate_action(dialog, recent, kind, payload);
+    }
+    if pending.is_some() {
+        return false;
+    }
+    let previous = std::mem::replace(dialog, DialogState::Busy);
+    let files = recent.to_vec();
+    let kind = kind.to_owned();
+    let payload = payload.to_owned();
+    let (sender, receiver) = mpsc::sync_channel(1);
+    match thread::Builder::new()
+        .name("nuraloumi-file-open".to_owned())
+        .spawn(move || {
+            let mut current = previous;
+            let close = activate_action(&mut current, &files, &kind, &payload);
+            let _ = sender.send((current, close));
+        }) {
+        Ok(_) => *pending = Some(receiver),
+        Err(error) => *dialog = diagnostic(None, format!("cannot start file opener: {error}")),
+    }
+    false
+}
+
+// Poll the compositor FD briefly only while an opener worker is active.
+// Idle still uses blocking Wayland dispatch and consumes no timer CPU.
+#[cfg(unix)]
+fn dispatch_while_opening(backend: &mut WaylandBackend) -> Result<(), String> {
+    use std::os::raw::{c_int, c_short};
+    #[repr(C)]
+    struct PollFd {
+        fd: c_int,
+        events: c_short,
+        revents: c_short,
+    }
+    unsafe extern "C" {
+        fn poll(fds: *mut PollFd, nfds: usize, timeout: c_int) -> c_int;
+    }
+    const POLLIN: c_short = 1;
+    backend.flush().map_err(|e| format!("Wayland flush: {e}"))?;
+    let mut fd = PollFd {
+        fd: backend.poll_fd(),
+        events: POLLIN,
+        revents: 0,
+    };
+    let result = unsafe { poll(&mut fd, 1, 40) };
+    if result < 0 {
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(format!("Wayland fd poll: {error}"));
+        }
+    } else if result > 0 && fd.revents != 0 {
+        backend
+            .blocking_dispatch()
+            .map_err(|e| format!("Wayland dispatch: {e}"))?;
+    } else {
+        backend
+            .dispatch_pending()
+            .map_err(|e| format!("Wayland dispatch pending: {e}"))?;
+    }
+    Ok(())
 }
 
 fn glyph_for_item_with_dirs(id: &str, recent: &[RecentEntry]) -> Option<char> {
@@ -628,11 +747,57 @@ fn run_live(config: ShellConfig, args: &Args) -> Result<(), String> {
     };
     let mut geometry: Option<(u32, u32, i32)> = None;
     let mut scene: Option<Scene> = None;
+    let mut pointer_press: Option<OpenAction> = None;
+    let mut touch_press: Option<(i32, OpenAction)> = None;
+    let mut pending: Option<Receiver<FileJobResult>> = None;
 
     loop {
-        backend
-            .blocking_dispatch()
-            .map_err(|e| format!("Wayland dispatch failed: {e}"))?;
+        if pending.is_some() {
+            dispatch_while_opening(&mut backend)?;
+        } else {
+            backend
+                .blocking_dispatch()
+                .map_err(|e| format!("Wayland dispatch failed: {e}"))?;
+        }
+
+        // Worker completion repaints even if Wayland sends no further input.
+        if let Some(result) = pending.as_ref().map(Receiver::try_recv) {
+            let finished = match result {
+                Ok(value) => Some(value),
+                Err(TryRecvError::Empty) => None,
+                Err(TryRecvError::Disconnected) => Some((
+                    diagnostic(None, "file opener worker terminated unexpectedly".into()),
+                    false,
+                )),
+            };
+            if let Some((next_dialog, close)) = finished {
+                pending = None;
+                if close {
+                    close_surfaces(&mut backend, surface, dismiss_surface)?;
+                    return Ok(());
+                }
+                dialog = next_dialog;
+                model = build_dialog_model(prompt, &executables, &recent, &query, &dialog);
+                state = MenuState::new(&model);
+                pointer_press = None;
+                touch_press = None;
+                if let Some((w, h, s)) = geometry {
+                    let resolver = |id: &str| glyph_for_item_with_dirs(id, &recent);
+                    scene = Some(render_and_present(
+                        &mut backend,
+                        surface,
+                        &renderer,
+                        tokens,
+                        &model,
+                        &state,
+                        w,
+                        h,
+                        s,
+                        Some(&resolver),
+                    )?);
+                }
+            }
+        }
 
         let events: Vec<_> = backend.drain_events().collect();
         for event in events {
@@ -665,6 +830,7 @@ fn run_live(config: ShellConfig, args: &Args) -> Result<(), String> {
             }
 
             let mut redraw = false;
+            let mut requested: Option<OpenAction> = None;
 
             match event.event {
                 WaylandEvent::Configure {
@@ -677,6 +843,9 @@ fn run_live(config: ShellConfig, args: &Args) -> Result<(), String> {
                 }
                 WaylandEvent::Key { key, pressed: true } => match key {
                     Key::Escape => {
+                        if pending.is_some() {
+                            continue;
+                        }
                         if matches!(dialog, DialogState::Run) {
                             close_surfaces(&mut backend, surface, dismiss_surface)?;
                             return Ok(());
@@ -710,7 +879,13 @@ fn run_live(config: ShellConfig, args: &Args) -> Result<(), String> {
                         };
                         if let Some((kind, payload)) = action {
                             if kind != "execute" || !payload.is_empty() {
-                                if activate_action(&mut dialog, &recent, &kind, &payload) {
+                                if dispatch_or_queue(
+                                    &mut dialog,
+                                    &recent,
+                                    &kind,
+                                    &payload,
+                                    &mut pending,
+                                ) {
                                     close_surfaces(&mut backend, surface, dismiss_surface)?;
                                     return Ok(());
                                 }
@@ -776,51 +951,36 @@ fn run_live(config: ShellConfig, args: &Args) -> Result<(), String> {
                     x,
                     y,
                     pressed: true,
-                    ..
+                    button: 0x110,
+                } => pointer_press = action_at(scene.as_ref(), &model, x, y),
+                WaylandEvent::PointerButton {
+                    x,
+                    y,
+                    pressed: false,
+                    button: 0x110,
                 } => {
-                    if let Some(ref s) = scene {
-                        if let Some(id) = find_hit_region(s, x, y) {
-                            if let Some(item) = model.item_by_id(&id) {
-                                if let Some(MenuAction::Custom { kind, payload }) = &item.action {
-                                    if activate_action(&mut dialog, &recent, kind, payload) {
-                                        close_surfaces(&mut backend, surface, dismiss_surface)?;
-                                        return Ok(());
-                                    }
-                                    model = build_dialog_model(
-                                        prompt,
-                                        &executables,
-                                        &recent,
-                                        &query,
-                                        &dialog,
-                                    );
-                                    state = MenuState::new(&model);
-                                    redraw = true;
-                                }
-                            }
-                        }
+                    requested =
+                        release_action(&mut pointer_press, action_at(scene.as_ref(), &model, x, y));
+                }
+                WaylandEvent::TouchDown { id, x, y } if touch_press.is_none() => {
+                    touch_press = action_at(scene.as_ref(), &model, x, y).map(|a| (id, a));
+                }
+                WaylandEvent::TouchMotion { id, x, y } => {
+                    if touch_press.as_ref().is_some_and(|(tid, action)| {
+                        *tid == id
+                            && action_at(scene.as_ref(), &model, x, y).as_ref() != Some(action)
+                    }) {
+                        touch_press = None;
                     }
                 }
-                WaylandEvent::TouchDown { x, y, .. } => {
-                    if let Some(ref s) = scene {
-                        if let Some(id) = find_hit_region(s, x, y) {
-                            if let Some(item) = model.item_by_id(&id) {
-                                if let Some(MenuAction::Custom { kind, payload }) = &item.action {
-                                    if activate_action(&mut dialog, &recent, kind, payload) {
-                                        close_surfaces(&mut backend, surface, dismiss_surface)?;
-                                        return Ok(());
-                                    }
-                                    model = build_dialog_model(
-                                        prompt,
-                                        &executables,
-                                        &recent,
-                                        &query,
-                                        &dialog,
-                                    );
-                                    state = MenuState::new(&model);
-                                    redraw = true;
-                                }
-                            }
-                        }
+                WaylandEvent::TouchUp { id } => {
+                    if touch_press.as_ref().is_some_and(|(tid, _)| *tid == id) {
+                        requested = touch_press.take().map(|(_, action)| action);
+                    }
+                }
+                WaylandEvent::TouchCancel { ids } => {
+                    if touch_press.as_ref().is_some_and(|(id, _)| ids.contains(id)) {
+                        touch_press = None;
                     }
                 }
                 WaylandEvent::Close => {
@@ -830,7 +990,20 @@ fn run_live(config: ShellConfig, args: &Args) -> Result<(), String> {
                 _ => {}
             }
 
+            if let Some((kind, payload)) = requested {
+                if kind != "execute" || !payload.is_empty() {
+                    if dispatch_or_queue(&mut dialog, &recent, &kind, &payload, &mut pending) {
+                        close_surfaces(&mut backend, surface, dismiss_surface)?;
+                        return Ok(());
+                    }
+                    model = build_dialog_model(prompt, &executables, &recent, &query, &dialog);
+                    state = MenuState::new(&model);
+                    redraw = true;
+                }
+            }
             if redraw {
+                pointer_press = None;
+                touch_press = None;
                 if let Some((w, h, s)) = geometry {
                     let resolver = |id: &str| glyph_for_item_with_dirs(id, &recent);
                     scene = Some(render_and_present(
@@ -980,6 +1153,96 @@ mod tests {
     use super::*;
 
     #[test]
+    fn opener_uses_bounded_background_reply_and_diagnostic_on_invalid_index() {
+        use std::time::Duration;
+        let mut dialog = DialogState::Run;
+        let mut pending = None;
+        assert!(!dispatch_or_queue(
+            &mut dialog,
+            &[],
+            "open-recent",
+            "999",
+            &mut pending,
+        ));
+        assert!(matches!(dialog, DialogState::Busy));
+        let (result, close) = pending
+            .take()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(2))
+            .expect("background worker must complete");
+        assert!(!close);
+        assert!(matches!(result, DialogState::Diagnostic { .. }));
+    }
+
+    #[test]
+    fn pointer_release_must_match_pressed_action() {
+        let action = ("open-recent".to_owned(), "1".to_owned());
+        let other = ("open-recent".to_owned(), "2".to_owned());
+        let mut held = Some(action.clone());
+        assert_eq!(release_action(&mut held, Some(other)), None);
+        assert!(held.is_none());
+        held = Some(action.clone());
+        assert_eq!(release_action(&mut held, None), None);
+        held = Some(action.clone());
+        assert_eq!(
+            release_action(&mut held, Some(action.clone())),
+            Some(action)
+        );
+        assert!(held.is_none());
+    }
+
+    #[test]
+    fn chooser_cancel_and_page_controls_remain_hittable_on_sl101() {
+        let handlers = (0..9)
+            .map(|index| DesktopHandler {
+                id: format!("app{index}.desktop"),
+                name: format!("Application {index}"),
+                desktop_file: format!("/usr/share/applications/app{index}.desktop").into(),
+            })
+            .collect();
+        let dialog = DialogState::OpenWith {
+            path: "/tmp/test.jpg".into(),
+            reason: "no MIME default".into(),
+            handlers,
+            page: 1,
+        };
+        let model = build_dialog_model("Run:", &[], &[], "", &dialog);
+        let state = MenuState::new(&model);
+        let viewport = Viewport::new(480.0, 400.0, 1.0);
+        let (scene, _) = render_menu_with_glyphs(
+            &CairoRenderer::default(),
+            &model,
+            &state,
+            viewport,
+            &DARK_THEME,
+            RenderOptions::default(),
+            None,
+            None,
+        )
+        .unwrap();
+        for id in [
+            "handler-2",
+            "handler-3",
+            "handler-prev",
+            "handler-next",
+            "describe-file",
+            "cancel-open-with",
+        ] {
+            let region = scene
+                .hits
+                .iter()
+                .find(|hit| hit.item_id == id)
+                .unwrap_or_else(|| panic!("missing touch action {id}"));
+            assert!(region.rect.height >= 48.0, "too small: {id}");
+            assert!(
+                region.rect.y >= 0.0 && region.rect.bottom() <= 400.0,
+                "offscreen action: {id} {:?}",
+                region.rect
+            );
+        }
+    }
+
+    #[test]
     fn filtered_recent_rows_keep_original_path_index() {
         let recent = vec![
             RecentEntry {
@@ -1026,7 +1289,7 @@ mod tests {
         assert!(model.item_by_id("handler-0").is_some());
         assert!(!activate_action(&mut dialog, &[], "handler-next", ""));
         let model = build_dialog_model("Run:", &[], &[], "", &dialog);
-        assert!(model.item_by_id("handler-7").is_some());
+        assert!(model.item_by_id("handler-2").is_some());
         assert!(model.item_by_id("handler-prev").is_some());
         assert!(!activate_action(&mut dialog, &[], "cancel-open", ""));
         assert!(matches!(dialog, DialogState::Run));
