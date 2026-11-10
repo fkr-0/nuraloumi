@@ -1272,11 +1272,24 @@ fn action_fn(kind: &str, payload: impl Into<String>) -> MenuAction {
 // Launch only when requested by a user. Four concurrent children maximum,
 // argv passed unmodified and detached reaper prevents zombies.
 fn launch_argv(program: &str, args: &[&std::ffi::OsStr]) -> Result<(), String> {
-    LIVE_CHILDREN
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-            (count < MAX_CHILDREN).then_some(count + 1)
-        })
-        .map_err(|_| "too many viewer/terminal processes already open")?;
+    // Bounded atomic slot reservation: compatible with both the target
+    // Rust 1.94 toolchain and newer Rust where fetch_update is deprecated.
+    // A failed weak CAS retries with the observed concurrent count.
+    let mut count = LIVE_CHILDREN.load(Ordering::Acquire);
+    loop {
+        if count >= MAX_CHILDREN {
+            return Err("too many viewer/terminal processes already open".into());
+        }
+        match LIVE_CHILDREN.compare_exchange_weak(
+            count,
+            count + 1,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => break,
+            Err(observed) => count = observed,
+        }
+    }
     let child = Command::new(program)
         .args(args)
         .stdin(Stdio::null())

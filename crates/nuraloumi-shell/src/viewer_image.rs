@@ -337,7 +337,9 @@ mod tests {
         assert_eq!(image.argb.len(), 16);
         assert!(image
             .argb
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .any(|px| px[2] > px[1].saturating_add(30)));
     }
     #[test]
@@ -361,7 +363,13 @@ mod tests {
                 size,
                 "orientation={orientation}"
             );
-            let actual: Vec<u8> = image.argb.chunks_exact(4).map(|pixel| pixel[2]).collect();
+            let actual: Vec<u8> = image
+                .argb
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|pixel| pixel[2])
+                .collect();
             assert_eq!(&actual, &expected, "orientation={orientation}");
         }
     }

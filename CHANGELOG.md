@@ -14,6 +14,8 @@ All notable user-visible changes to NuraLoumi are recorded here.
   allocator-dependent false successes.
 - Fixed the Debian CI command-line continuation so packaging receives its
   verified stage, output directory and Git SHA as separate arguments.
+- Viewer/terminal child-slot reservation now uses a bounded atomic CAS loop,
+  compatible with both older Rust and Rust 1.99 strict Clippy.
 
 ### Build and distribution
 

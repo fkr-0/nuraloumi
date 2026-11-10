@@ -282,7 +282,9 @@ fn run(options: Options) -> Result<(), String> {
         let scene = load_scene(&options.path);
         let (frame, _, width, height) = viewer_scene::render(&scene, 800, 480, 1)?;
         let nonblank = frame
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .any(|p| p[0] != 0 || p[1] != 0 || p[2] != 0);
         if !nonblank {
             return Err("empty fixture scene".into());
