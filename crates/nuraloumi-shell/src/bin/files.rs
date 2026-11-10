@@ -1222,6 +1222,23 @@ fn dispatch_while_opening(backend: &mut WaylandBackend) -> Result<(), String> {
     }
     Ok(())
 }
+fn begin_touch(
+    mode: &Mode,
+    touch: &mut Option<(i32, MenuAction)>,
+    swipe: &mut Option<(i32, f64, Option<isize>)>,
+    id: i32,
+    y: f64,
+    action: Option<MenuAction>,
+) {
+    if matches!(mode, Mode::Busy { .. }) || touch.is_some() || swipe.is_some() {
+        return;
+    }
+    if matches!(mode, Mode::Normal | Mode::OpenWith { .. }) {
+        *swipe = Some((id, y, None));
+    }
+    *touch = action.map(|action| (id, action));
+}
+
 fn touch_release(press: &mut Option<(i32, MenuAction)>, id: i32) -> Option<MenuAction> {
     if press.as_ref().is_some_and(|(tid, _)| *tid == id) {
         press.take().map(|(_, action)| action)
@@ -1322,14 +1339,15 @@ fn run(opts: Options) -> Result<(), String> {
                     KeyAction::NoChange => {}
                 },
                 PlatformEvent::TouchDown { id: tid, x, y } => {
-                    if touch_swipe.is_none() {
-                        // A one-finger vertical swipe pages; release-inside
-                        // remains the only way to activate an item.
-                        if matches!(ui.mode, Mode::Normal | Mode::OpenWith { .. }) {
-                            touch_swipe = Some((tid, y, None));
-                            touch = hit(&scene, &menu, x, y).map(|a| (tid, a));
-                        }
-                    }
+                    // Modal confirmations and diagnostics accept touch without a swipe.
+                    begin_touch(
+                        &ui.mode,
+                        &mut touch,
+                        &mut touch_swipe,
+                        tid,
+                        y,
+                        hit(&scene, &menu, x, y),
+                    );
                 }
                 PlatformEvent::TouchMotion { id: tid, x, y } => {
                     if let Some((id, origin, direction)) = &mut touch_swipe {
@@ -1357,6 +1375,10 @@ fn run(opts: Options) -> Result<(), String> {
                         } else {
                             requested = touch_release(&mut touch, tid);
                         }
+                    } else {
+                        // Dialog actions do not swipe, but always accept a
+                        // matching contact release after their press.
+                        requested = touch_release(&mut touch, tid);
                     }
                 }
                 PlatformEvent::TouchCancel { .. } => {
@@ -1566,6 +1588,69 @@ mod tests {
         assert_eq!(swipe_page(f64::NAN, 5.0), None);
         assert_eq!(swipe_page(5.0, f64::INFINITY), None);
     }
+    #[test]
+    fn touch_modal_buttons_accept_matching_release_without_swipes() {
+        let root = temp();
+        fs::write(root.join("test.txt"), "x").unwrap();
+        let browser = Browser::new(&root, Capabilities::default()).unwrap();
+        let expected = browser.entries[0].clone();
+        let modes = [
+            Mode::DeleteConfirm {
+                index: 0,
+                expected: expected.clone(),
+            },
+            Mode::RenameConfirm {
+                index: 0,
+                expected: expected.clone(),
+                name: "renamed".into(),
+            },
+            Mode::Fallback {
+                index: 0,
+                expected: expected.clone(),
+                reason: "no default".into(),
+                detail: "ASCII text".into(),
+            },
+        ];
+        let button = action("confirm", "");
+        for mode in modes {
+            let mut touch = None;
+            let mut swipe = None;
+            begin_touch(
+                &mode,
+                &mut touch,
+                &mut swipe,
+                4,
+                200.0,
+                Some(button.clone()),
+            );
+            assert!(swipe.is_none(), "modal must not start paging swipe");
+            // A second finger must not steal the pending confirmation.
+            begin_touch(
+                &mode,
+                &mut touch,
+                &mut swipe,
+                5,
+                201.0,
+                Some(action("cancel", "")),
+            );
+            assert_eq!(touch_release(&mut touch, 5), None);
+            assert_eq!(touch_release(&mut touch, 4), Some(button.clone()));
+            assert!(touch.is_none());
+        }
+        let mut touch = None;
+        let mut swipe = None;
+        begin_touch(
+            &Mode::Busy { index: 0, expected },
+            &mut touch,
+            &mut swipe,
+            7,
+            20.0,
+            Some(button),
+        );
+        assert!(touch.is_none() && swipe.is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn pointer_release_requires_same_region() {
         let a = action("select", "0");
