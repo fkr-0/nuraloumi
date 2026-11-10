@@ -2,34 +2,64 @@
 
 All notable user-visible changes to NuraLoumi are recorded here.
 
-## [Unreleased] - 2026-11-09
+## [Unreleased]
+
+## [0.0.4-dev.2] - 2026-11-10
+
+Development prerelease; **not** a production-qualified SL101 release.
 
 ### Added
 
-- A standalone Sway workspace switcher (`nuraloumi-sway-workspace-switcher`)
-  showing numbered workspace cards, cached desktop previews, and a blue border
-  around the most recently selected workspace. Sway Super+1–9 bindings switch
-  the compositor immediately; Super-key release dismisses the overlay.
-  Previews of inactive workspaces are displayed only after those workspaces
-  have been seen on screen; unavailable captures have an explicit placeholder.
+- Native, rooted Wayland file manager (`nuraloumi-files`) with exhaustive
+  off-event-loop directory scans, 512-entry cursor batches, touch/keyboard
+  paging, file-open actions, interactive Open With, explicit error/diagnostic
+  states, and optional confirmed rename/delete. Directory results are bounded
+  per batch rather than by truncating the directory scan.
+- Shared XDG file opener with MIME associations, discoverable eligible desktop
+  applications, exact-argv GIO launch requests, stable recent-file selection,
+  and non-UTF-8-safe path handling. A helper launch request is not represented
+  as proof that the application rendered a window.
+- `nuraloumi-viewer` renders bounded PNG/JPEG images with Cairo/wl_shm and
+  provides a readable `file -- PATH` diagnostic for unsupported inputs.
+- A transient Sway workspace switcher with numbered previews, a blue selected
+  border, immediate Super+1–9 switching, and dismissal on Super release.
+  Never-captured inactive workspaces display a placeholder rather than a
+  fabricated preview.
 
 ### Fixed
 
-- Renderer indicator identifies Grate on Sway/sl101-sway with date- or label-suffixed
-  `/opt/grate-mesa25-musl-*/lib/libgallium-25.0.7.so` installations, the
-  glibc clean-prefix layout, and legacy Grate libraries. Detection requires the
-  actual mapped library pathname and the expected GLES2/Grate environment.
-- Probe failure and unknown compositor state are shown as unavailable, not a
-  ready renderer. The renderer switch UI now refers to the compositor rather
-  than labwc only. The privileged renderer-switch helper and its arguments
-  are unchanged.
+- Recent-file selection no longer silently discards failed launch requests;
+  unavailable MIME defaults offer a real handler chooser or a diagnostic.
+- File-manager confirmation/fallback dialogs accept touch release-inside
+  instead of ignoring touch; Run/Open With also requires matching pointer
+  release or retained touch contact rather than acting on initial press.
+- File-manager keyboard navigation reaches chooser, fallback, and terminal
+  actions; the terminal diagnostic uses `foot --hold` to keep output visible.
+  Non-UTF-8 path arguments are preserved without panicking.
+- Open With pagination keeps navigation and Cancel hit targets inside the
+  SL101-height Cairo popup. Slow MIME/GIO/file-description work executes off
+  the Run dialog's Wayland event thread.
+- File opener helper capture is bounded without waiting indefinitely for
+  inherited stdout/stderr pipe EOF.
+- Renderer indicator recognizes pinned Grate Gallium library layouts on Sway
+  and does not claim a renderer is ready for unknown or failed probes.
+  Renderer-switch arguments and authorization are unchanged.
 
-### Verification
+### Compatibility and qualification
 
-- Added a fixture from the coordinator's 2026-11-09 Sway session and regression
-  tests for recognized layouts, false positives, missing/oversized/unreadable
-  procfs inputs, and compositor PID reuse. Device deployment and validation
-  remain coordinator-owned.
+- All runtime surfaces retain the software Cairo/wl_shm fallback. EGL/GLES,
+  NEON, and hardware video acceleration are **not** startup requirements.
+- Rename/delete capabilities are disabled by default; user confirmation does
+  not bypass rooted path or inode validation. Linux mutations use root-pinned
+  descriptor-relative operations and a private staging/identity check with
+  fail-closed recovery. Concurrent modification by an adversary with the same
+  user permissions is not proven race-free; this is hardening, not a security
+  guarantee against a malicious same-UID process.
+- Host tests and CI checks are release gates, not proof of SL101 hardware
+  qualification. ARMv7 build artifacts are separately audited by the GitHub
+  CI workflows; device input, memory/latency, and compositor checks remain
+  separate deployment prerequisites.
+- No SL101 deployment or suspension is part of this release.
 
 ## [0.0.4-dev.1] - 2026-11-03
 
