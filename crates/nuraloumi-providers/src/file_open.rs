@@ -55,6 +55,51 @@ pub trait OpenCommandRunner {
 }
 #[derive(Default, Clone, Copy)]
 pub struct SystemOpenCommandRunner;
+// Consume both child pipes directly with nonblocking reads. A GUI helper can
+// spawn descendants that inherit stdout/stderr: joining EOF-bound reader
+// threads after the launcher exits otherwise hangs forever.
+#[cfg(unix)]
+fn nonblocking<R: std::os::fd::AsRawFd>(stream: &R) -> Result<(), String> {
+    use std::os::raw::c_int;
+    unsafe extern "C" {
+        fn fcntl(fd: c_int, cmd: c_int, arg: c_int) -> c_int;
+    }
+    const F_GETFL: c_int = 3;
+    const F_SETFL: c_int = 4;
+    const O_NONBLOCK: c_int = 0o4000;
+    let fd = stream.as_raw_fd();
+    let current = unsafe { fcntl(fd, F_GETFL, 0) };
+    if current < 0 || unsafe { fcntl(fd, F_SETFL, current | O_NONBLOCK) } < 0 {
+        return Err(format!(
+            "cannot bound helper pipe: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+#[cfg(not(unix))]
+fn nonblocking<R>(_stream: &R) -> Result<(), String> {
+    Err("bounded pipe capture requires Unix".into())
+}
+
+fn drain_pipe(reader: &mut impl Read, bytes: &mut Vec<u8>) -> Result<(), String> {
+    loop {
+        let mut chunk = [0u8; 1024];
+        match reader.read(&mut chunk) {
+            Ok(0) => return Ok(()),
+            Ok(n) => {
+                if bytes.len().saturating_add(n) > MAX_CAPTURE {
+                    return Err("backend output exceeded cap".into());
+                }
+                bytes.extend_from_slice(&chunk[..n]);
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => return Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(err) => return Err(format!("backend pipe read: {err}")),
+        }
+    }
+}
+
 impl OpenCommandRunner for SystemOpenCommandRunner {
     fn run(
         &mut self,
@@ -62,8 +107,7 @@ impl OpenCommandRunner for SystemOpenCommandRunner {
         args: &[OsString],
         capture: bool,
     ) -> Result<CommandResult, String> {
-        // A native file manager stays alive. Detect immediate errors, reap it
-        // asynchronously; do not block the compositor event loop.
+        // The native file manager is a long-lived GUI, not a short-lived helper.
         if program == "nuraloumi-files" {
             let mut child = Command::new(program)
                 .args(args)
@@ -72,15 +116,13 @@ impl OpenCommandRunner for SystemOpenCommandRunner {
                 .stderr(Stdio::null())
                 .spawn()
                 .map_err(|e| format!("{program}: {e}"))?;
-            if let Some(status) = child.try_wait().map_err(|e| format!("{e}"))? {
+            if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
                 return Ok(CommandResult {
                     status: status.code().unwrap_or(-1),
                     stdout: String::new(),
                     stderr: String::new(),
                 });
             }
-            // A GUI is allowed to live indefinitely; only its launcher is
-            // reaped off-thread. Do not kill a successful file-manager session.
             thread::spawn(move || {
                 let _ = child.wait();
             });
@@ -90,6 +132,7 @@ impl OpenCommandRunner for SystemOpenCommandRunner {
                 stderr: String::new(),
             });
         }
+
         let mut child = Command::new(program)
             .args(args)
             .stdin(Stdio::null())
@@ -105,27 +148,47 @@ impl OpenCommandRunner for SystemOpenCommandRunner {
             })
             .spawn()
             .map_err(|e| format!("{program}: {e}"))?;
-        let stdout = child.stdout.take().map(|p| {
-            thread::spawn(move || {
-                let mut b = Vec::new();
-                p.take((MAX_CAPTURE + 1) as u64)
-                    .read_to_end(&mut b)
-                    .map(|_| b)
-            })
-        });
-        let stderr = child.stderr.take().map(|p| {
-            thread::spawn(move || {
-                let mut b = Vec::new();
-                p.take((MAX_CAPTURE + 1) as u64)
-                    .read_to_end(&mut b)
-                    .map(|_| b)
-            })
-        });
-        let start = Instant::now();
+        let mut out = child.stdout.take();
+        let mut err = child.stderr.take();
+        if capture {
+            let prep = out
+                .as_ref()
+                .ok_or_else(|| "missing stdout".to_owned())
+                .and_then(nonblocking)
+                .and_then(|_| {
+                    err.as_ref()
+                        .ok_or_else(|| "missing stderr".to_owned())
+                        .and_then(nonblocking)
+                });
+            if let Err(e) = prep {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(e);
+            }
+        }
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let started = Instant::now();
         let status = loop {
+            if let Err(e) = (|| {
+                if let Some(pipe) = out.as_mut() {
+                    drain_pipe(pipe, &mut stdout)?;
+                }
+                if let Some(pipe) = err.as_mut() {
+                    drain_pipe(pipe, &mut stderr)?;
+                }
+                if stdout.len() + stderr.len() > MAX_CAPTURE {
+                    return Err("combined helper output exceeded cap".into());
+                }
+                Ok::<(), String>(())
+            })() {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(e);
+            }
             match child.try_wait() {
-                Ok(Some(s)) => break s,
-                Ok(None) if start.elapsed() < LIMIT => thread::sleep(Duration::from_millis(10)),
+                Ok(Some(status)) => break status,
+                Ok(None) if started.elapsed() < LIMIT => thread::sleep(Duration::from_millis(10)),
                 Ok(None) => {
                     let _ = child.kill();
                     let _ = child.wait();
@@ -138,26 +201,21 @@ impl OpenCommandRunner for SystemOpenCommandRunner {
                 }
             }
         };
-        let collect =
-            |t: Option<thread::JoinHandle<std::io::Result<Vec<u8>>>>| -> Result<String, String> {
-                match t {
-                    None => Ok(String::new()),
-                    Some(h) => {
-                        let data = h
-                            .join()
-                            .map_err(|_| "capture panic".to_string())?
-                            .map_err(|e| format!("capture: {e}"))?;
-                        if data.len() > MAX_CAPTURE {
-                            return Err("backend output too large".into());
-                        }
-                        Ok(String::from_utf8_lossy(&data).into_owned())
-                    }
-                }
-            };
+        // Drain any final buffered output once, without waiting for EOF from
+        // unrelated descendants that inherited the pipe descriptors.
+        if let Some(pipe) = out.as_mut() {
+            drain_pipe(pipe, &mut stdout)?;
+        }
+        if let Some(pipe) = err.as_mut() {
+            drain_pipe(pipe, &mut stderr)?;
+        }
+        if stdout.len() + stderr.len() > MAX_CAPTURE {
+            return Err("combined helper output exceeded cap".into());
+        }
         Ok(CommandResult {
             status: status.code().unwrap_or(-1),
-            stdout: collect(stdout)?,
-            stderr: collect(stderr)?,
+            stdout: String::from_utf8_lossy(&stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&stderr).into_owned(),
         })
     }
 }
