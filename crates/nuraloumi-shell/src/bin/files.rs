@@ -37,7 +37,106 @@ struct Options {
     capabilities: Capabilities,
     open_with: Option<String>,
 }
-fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Option<Options>, String> {
+
+// Directory enumeration, navigation and mutating operations belong to a
+// separate worker. At most one navigation request can be in flight, and
+// replies replace the UI model atomically after completion.
+#[derive(Clone)]
+enum NavKind {
+    Initial,
+    Refresh,
+    Enter {
+        index: usize,
+        expected: Entry,
+    },
+    Parent,
+    NextBatch,
+    PreviousBatch,
+    Rename {
+        index: usize,
+        expected: Entry,
+        name: String,
+    },
+    Delete {
+        index: usize,
+        expected: Entry,
+    },
+}
+impl NavKind {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Initial | Self::Refresh => "Scanning directory…",
+            Self::Enter { .. } | Self::Parent => "Loading directory…",
+            Self::NextBatch | Self::PreviousBatch => "Loading more entries…",
+            Self::Rename { .. } => "Renaming entry…",
+            Self::Delete { .. } => "Deleting entry…",
+        }
+    }
+}
+struct NavJob {
+    browser: Browser,
+    kind: NavKind,
+}
+struct NavReply {
+    kind: NavKind,
+    result: Result<Browser, String>,
+}
+struct NavWorker {
+    requests: SyncSender<NavJob>,
+    replies: Receiver<NavReply>,
+}
+impl NavWorker {
+    fn new() -> Self {
+        let (requests, incoming) = mpsc::sync_channel::<NavJob>(1);
+        let (outgoing, replies) = mpsc::sync_channel(1);
+        thread::spawn(move || {
+            while let Ok(job) = incoming.recv() {
+                if outgoing.send(perform_nav(job)).is_err() {
+                    break;
+                }
+            }
+        });
+        Self { requests, replies }
+    }
+}
+fn perform_nav(mut job: NavJob) -> NavReply {
+    let outcome = match &job.kind {
+        NavKind::Initial | NavKind::Refresh => job.browser.refresh(),
+        NavKind::Enter { index, expected } => {
+            if job.browser.entries.get(*index) != Some(expected) {
+                Err("directory selection changed; refresh required".into())
+            } else {
+                job.browser.enter(*index).map(|_| ())
+            }
+        }
+        NavKind::Parent => job.browser.parent().map(|_| ()),
+        NavKind::NextBatch => job.browser.next_batch().map(|_| ()),
+        NavKind::PreviousBatch => job.browser.previous_batch().map(|_| ()),
+        NavKind::Rename {
+            index,
+            expected,
+            name,
+        } => {
+            if job.browser.entries.get(*index) != Some(expected) {
+                Err("rename selection changed; confirmation invalidated".into())
+            } else {
+                job.browser.rename(*index, name, true)
+            }
+        }
+        NavKind::Delete { index, expected } => {
+            if job.browser.entries.get(*index) != Some(expected) {
+                Err("delete selection changed; confirmation invalidated".into())
+            } else {
+                job.browser.delete(*index, &expected.name, true)
+            }
+        }
+    };
+    NavReply {
+        kind: job.kind,
+        result: outcome.map(|_| job.browser),
+    }
+}
+fn parse<I: IntoIterator<Item = std::ffi::OsString>>(args: I) -> Result<Option<Options>, String> {
     let mut out = Options {
         live: false,
         config: None,
@@ -47,24 +146,42 @@ fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Option<Options>, Str
         capabilities: Capabilities::default(),
         open_with: None,
     };
+    // Paths are OS strings: interpreting filenames as UTF-8 would panic on
+    // legitimate Linux paths before the safe XDG opener ever sees them.
     let mut iter = args.into_iter();
     let mut root_seen = false;
+    let mut positional_only = false;
     while let Some(arg) = iter.next() {
-        match arg.as_str() {
-            "-h" | "--help" => {
+        match arg.to_str() {
+            Some("--") if !positional_only => positional_only = true,
+            Some("-h" | "--help") if !positional_only => {
                 println!("{HELP}");
                 return Ok(None);
             }
-            "--live" => out.live = true,
-            "--config" => out.config = Some(iter.next().ok_or("--config needs PATH")?.into()),
-            "--allow-rename" => out.capabilities.rename = true,
-            "--allow-delete" => out.capabilities.delete = true,
-            "--open-with" => out.open_with = Some(iter.next().ok_or("--open-with needs ID")?),
-            other if !other.starts_with('-') && !root_seen => {
-                out.root = PathBuf::from(other);
+            Some("--live") if !positional_only => out.live = true,
+            Some("--config") if !positional_only => {
+                out.config = Some(PathBuf::from(iter.next().ok_or("--config needs PATH")?));
+            }
+            Some("--allow-rename") if !positional_only => out.capabilities.rename = true,
+            Some("--allow-delete") if !positional_only => out.capabilities.delete = true,
+            Some("--open-with") if !positional_only => {
+                out.open_with = Some(
+                    iter.next()
+                        .ok_or("--open-with needs ID")?
+                        .into_string()
+                        .map_err(|_| "desktop ID must be valid UTF-8")?,
+                );
+            }
+            _ if !root_seen && (positional_only || !arg.to_string_lossy().starts_with('-')) => {
+                out.root = PathBuf::from(arg);
                 root_seen = true;
             }
-            _ => return Err(format!("unknown or repeated argument {arg}")),
+            _ => {
+                return Err(format!(
+                    "unknown or repeated argument {}",
+                    arg.to_string_lossy()
+                ))
+            }
         }
     }
     if out
@@ -80,6 +197,7 @@ fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Option<Options>, Str
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Mode {
     Normal,
+    Actions,
     RenameInput {
         index: usize,
         expected: Entry,
@@ -110,6 +228,9 @@ enum Mode {
     Busy {
         index: usize,
         expected: Entry,
+    },
+    Scanning {
+        label: String,
     },
 }
 
@@ -233,6 +354,8 @@ struct Ui {
     pinned_app: Option<String>,
     ops: Option<Box<dyn FileOps>>,
     worker: Option<OpenWorker>,
+    nav_worker: Option<NavWorker>,
+    modal_focus: usize,
 }
 fn action(kind: &str, payload: impl Into<String>) -> MenuAction {
     MenuAction::Custom {
@@ -242,17 +365,26 @@ fn action(kind: &str, payload: impl Into<String>) -> MenuAction {
 }
 impl Ui {
     fn new(options: &Options) -> Result<Self, String> {
-        let mut ui = Self::with_ops(options, Box::new(SystemFiles))?;
+        if !options.live {
+            return Self::with_ops(options, Box::new(SystemFiles));
+        }
+        let browser = Browser::new_unscanned(&options.root, options.capabilities)?;
+        let mut ui = Self::with_browser(options, Box::new(SystemFiles), browser);
         ui.worker = Some(OpenWorker::new(
             ui.ops.take().ok_or("missing file backend")?,
         ));
+        ui.nav_worker = Some(NavWorker::new());
+        ui.navigate(NavKind::Initial)?;
         Ok(ui)
     }
     // Fixture mode is deliberately synchronous/deterministic; live mode uses
     // the same FileOps trait on a bounded dedicated worker.
     fn with_ops(options: &Options, ops: Box<dyn FileOps>) -> Result<Self, String> {
         let browser = Browser::new(&options.root, options.capabilities)?;
-        Ok(Self {
+        Ok(Self::with_browser(options, ops, browser))
+    }
+    fn with_browser(options: &Options, ops: Box<dyn FileOps>, browser: Browser) -> Self {
+        Self {
             selected: (!browser.entries.is_empty()).then_some(0),
             browser,
             page: 0,
@@ -260,7 +392,9 @@ impl Ui {
             pinned_app: options.open_with.clone(),
             ops: Some(ops),
             worker: None,
-        })
+            nav_worker: None,
+            modal_focus: 0,
+        }
     }
     fn selected_entry(&self) -> Option<&Entry> {
         self.selected.and_then(|i| self.browser.entries.get(i))
@@ -286,12 +420,13 @@ impl Ui {
     }
     fn page_label(&self) -> String {
         format!(
-            "Page {}/{} | {} visible{}",
+            "Batch {} · Page {}/{} | {} visible{}",
+            self.browser.batch_number(),
             self.page + 1,
             Self::page_count(self.browser.entries.len()),
             self.browser.entries.len(),
             if self.browser.has_more {
-                " (partial directory)"
+                " (more batches)"
             } else {
                 ""
             }
@@ -311,7 +446,7 @@ impl Ui {
                     action("parent", ""),
                 ));
                 items.push(MenuItem::status("page-info", self.page_label()));
-                if self.page > 0 {
+                if self.page > 0 || self.browser.has_previous_batch() {
                     items.push(MenuItem::action(
                         "prev",
                         "◀ Previous page",
@@ -353,7 +488,8 @@ impl Ui {
                         "Empty directory / no safe visible files",
                     ));
                 }
-                if (self.page + 1) * PAGE_ROWS < self.browser.entries.len() {
+                if (self.page + 1) * PAGE_ROWS < self.browser.entries.len() || self.browser.has_more
+                {
                     items.push(MenuItem::action(
                         "next",
                         "Next page ▶",
@@ -381,24 +517,36 @@ impl Ui {
                     "O / Open With…",
                     action("open-with", ""),
                 ));
+                items.push(MenuItem::action(
+                    "manage",
+                    "Actions / Refresh / Manage…",
+                    action("manage", ""),
+                ));
+            }
+            Mode::Actions => {
+                let selected = self
+                    .selected_entry()
+                    .map(|e| e.name.as_str())
+                    .unwrap_or("none");
+                items.push(MenuItem::status(
+                    "actions-for",
+                    format!("Actions for {selected}"),
+                ));
                 if self.browser.capabilities.rename {
-                    items.push(MenuItem::action(
-                        "rename",
-                        "R / Rename…",
-                        action("rename", ""),
-                    ));
+                    items.push(MenuItem::action("rename", "Rename…", action("rename", "")));
                 }
                 if self.browser.capabilities.delete {
-                    items.push(MenuItem::action(
-                        "delete",
-                        "D / Delete…",
-                        action("delete", ""),
-                    ));
+                    items.push(MenuItem::action("delete", "Delete…", action("delete", "")));
                 }
                 items.push(MenuItem::action(
                     "refresh",
-                    "U / Refresh",
+                    "Refresh directory",
                     action("refresh", ""),
+                ));
+                items.push(MenuItem::action(
+                    "cancel",
+                    "Back to files",
+                    action("cancel", ""),
                 ));
             }
             Mode::RenameInput { expected, name, .. } => {
@@ -504,6 +652,12 @@ impl Ui {
                         .with_subtitle("Waiting for bounded opener / application discovery"),
                 );
             }
+            Mode::Scanning { label } => {
+                items.push(
+                    MenuItem::status("scanning", label.clone())
+                        .with_subtitle("Directory work is running off the Wayland thread"),
+                );
+            }
             Mode::Fallback {
                 expected,
                 reason,
@@ -542,14 +696,14 @@ impl Ui {
         let mut state = MenuState::new(menu);
         let id = match &self.mode {
             Mode::Normal => self.selected.map(|index| format!("entry-{index}")),
-            Mode::OpenWith {
-                selected, handlers, ..
-            } if !handlers.is_empty() => Some(format!("app-{selected}")),
             Mode::RenameInput { .. } => Some("rename-next".into()),
-            Mode::RenameConfirm { .. } | Mode::DeleteConfirm { .. } => Some("confirm".into()),
-            Mode::Fallback { .. } => Some("viewer".into()),
-            Mode::Busy { .. } => None,
-            _ => None,
+            Mode::Busy { .. } | Mode::Scanning { .. } => None,
+            _ => menu
+                .items
+                .iter()
+                .filter(|item| item.action.is_some())
+                .nth(self.modal_focus)
+                .map(|item| item.id.clone()),
         };
         if let Some(id) = id {
             if menu
@@ -562,8 +716,8 @@ impl Ui {
         state
     }
     fn change_selection(&mut self, delta: isize) {
-        match &mut self.mode {
-            Mode::Normal if !self.browser.entries.is_empty() => {
+        if matches!(self.mode, Mode::Normal) {
+            if !self.browser.entries.is_empty() {
                 let old = self.selected.unwrap_or(0);
                 let index = if delta < 0 {
                     old.saturating_sub(delta.unsigned_abs())
@@ -574,23 +728,54 @@ impl Ui {
                 self.selected = Some(index);
                 self.page = index / PAGE_ROWS;
             }
-            Mode::OpenWith {
-                selected, handlers, ..
-            } if !handlers.is_empty() => {
-                let old = *selected;
-                *selected = if delta < 0 {
-                    old.saturating_sub(delta.unsigned_abs())
-                } else {
-                    old.saturating_add(delta as usize).min(handlers.len() - 1)
-                };
-            }
-            _ => {}
+            return;
         }
+        let actions = self.modal_actions();
+        if !actions.is_empty() {
+            self.modal_focus = if delta < 0 {
+                self.modal_focus.saturating_sub(delta.unsigned_abs())
+            } else {
+                self.modal_focus
+                    .saturating_add(delta as usize)
+                    .min(actions.len() - 1)
+            };
+            if let Some(MenuAction::Custom { kind, payload }) = actions.get(self.modal_focus) {
+                if kind == "choose" {
+                    if let (Ok(index), Mode::OpenWith { selected, .. }) =
+                        (payload.parse::<usize>(), &mut self.mode)
+                    {
+                        *selected = index;
+                    }
+                }
+            }
+        }
+    }
+    fn modal_actions(&self) -> Vec<MenuAction> {
+        self.menu()
+            .items
+            .into_iter()
+            .filter_map(|item| item.action)
+            .collect()
+    }
+    fn focused_modal_action(&self) -> Option<MenuAction> {
+        self.modal_actions().get(self.modal_focus).cloned()
     }
     fn change_page(&mut self, delta: isize) {
         match &mut self.mode {
             Mode::Normal => {
                 let max_page = Self::page_count(self.browser.entries.len()).saturating_sub(1);
+                if delta > 0 && self.page == max_page && self.browser.has_more {
+                    if let Err(error) = self.navigate(NavKind::NextBatch) {
+                        self.browser.message = format!("Cannot load next batch: {error}");
+                    }
+                    return;
+                }
+                if delta < 0 && self.page == 0 && self.browser.has_previous_batch() {
+                    if let Err(error) = self.navigate(NavKind::PreviousBatch) {
+                        self.browser.message = format!("Cannot load previous batch: {error}");
+                    }
+                    return;
+                }
                 let next = if delta < 0 {
                     self.page.saturating_sub(delta.unsigned_abs())
                 } else {
@@ -611,28 +796,60 @@ impl Ui {
                     page.saturating_add(delta as usize).min(max_page)
                 };
                 *selected = (next * PAGE_ROWS).min(handlers.len() - 1);
+                self.modal_focus = 0;
             }
             _ => {}
         }
     }
     fn refresh(&mut self) -> Result<(), String> {
-        let previous = self.selected_entry().cloned();
-        self.browser.refresh()?;
-        self.selected = previous
-            .as_ref()
-            .and_then(|e| {
-                self.browser
-                    .entries
-                    .iter()
-                    .position(|candidate| candidate == e)
-            })
-            .or_else(|| (!self.browser.entries.is_empty()).then_some(0));
-        self.page = self.selected.unwrap_or(0) / PAGE_ROWS;
-        self.mode = Mode::Normal;
-        Ok(())
+        self.navigate(NavKind::Refresh)
     }
     fn busy(&self) -> bool {
-        matches!(self.mode, Mode::Busy { .. })
+        matches!(self.mode, Mode::Busy { .. } | Mode::Scanning { .. })
+    }
+    fn navigate(&mut self, kind: NavKind) -> Result<(), String> {
+        let job = NavJob {
+            browser: self.browser.try_clone()?,
+            kind: kind.clone(),
+        };
+        if let Some(worker) = &self.nav_worker {
+            worker
+                .requests
+                .try_send(job)
+                .map_err(|e| format!("directory worker busy: {e}"))?;
+            self.mode = Mode::Scanning {
+                label: kind.label().into(),
+            };
+            Ok(())
+        } else {
+            self.apply_nav_reply(perform_nav(job))
+        }
+    }
+    fn apply_nav_reply(&mut self, reply: NavReply) -> Result<(), String> {
+        let next = match reply.result {
+            Ok(browser) => browser,
+            Err(error) => {
+                self.mode = Mode::Normal;
+                return Err(error);
+            }
+        };
+        let previously_selected = self.selected_entry().cloned();
+        self.browser = next;
+        self.selected = match reply.kind {
+            NavKind::Refresh | NavKind::Rename { .. } | NavKind::Delete { .. } => {
+                previously_selected
+                    .and_then(|expected| self.browser.entries.iter().position(|e| *e == expected))
+                    .or_else(|| (!self.browser.entries.is_empty()).then_some(0))
+            }
+            NavKind::PreviousBatch => {
+                (!self.browser.entries.is_empty()).then_some(self.browser.entries.len() - 1)
+            }
+            _ => (!self.browser.entries.is_empty()).then_some(0),
+        };
+        self.page = self.selected.unwrap_or(0) / PAGE_ROWS;
+        self.mode = Mode::Normal;
+        self.modal_focus = 0;
+        Ok(())
     }
     fn submit(&mut self, job: Job) -> Result<(), String> {
         let index = job.index;
@@ -664,6 +881,7 @@ impl Ui {
             return Err("file changed while opening; action discarded".into());
         }
         self.mode = Mode::Normal;
+        self.modal_focus = 0;
         match kind {
             ReplyKind::Invalid(reason) => Err(reason),
             ReplyKind::Default(OpenOutcome::Opened { handler }) => {
@@ -714,15 +932,31 @@ impl Ui {
     }
     fn poll_worker(&mut self) -> bool {
         use mpsc::TryRecvError;
+        if let Some(worker) = &self.nav_worker {
+            match worker.replies.try_recv() {
+                Ok(reply) if matches!(self.mode, Mode::Scanning { .. }) => {
+                    if let Err(error) = self.apply_nav_reply(reply) {
+                        self.browser.message = format!("Directory action refused: {error}");
+                    }
+                    return true;
+                }
+                Err(TryRecvError::Disconnected) if matches!(self.mode, Mode::Scanning { .. }) => {
+                    self.mode = Mode::Normal;
+                    self.browser.message = "Directory worker terminated unexpectedly".into();
+                    return true;
+                }
+                _ => {}
+            }
+        }
         let result = self.worker.as_ref().map(|worker| worker.replies.try_recv());
         match result {
-            Some(Ok(reply)) if self.busy() => {
+            Some(Ok(reply)) if matches!(self.mode, Mode::Busy { .. }) => {
                 if let Err(error) = self.apply_reply(reply) {
                     self.browser.message = format!("Action refused: {error}");
                 }
                 true
             }
-            Some(Err(TryRecvError::Disconnected)) if self.busy() => {
+            Some(Err(TryRecvError::Disconnected)) if matches!(self.mode, Mode::Busy { .. }) => {
                 self.mode = Mode::Normal;
                 self.browser.message = "Opener worker terminated unexpectedly".into();
                 true
@@ -734,10 +968,11 @@ impl Ui {
         let Some(index) = self.selected else {
             return Ok(());
         };
-        if self.browser.enter(index)? {
-            self.selected = (!self.browser.entries.is_empty()).then_some(0);
-            self.page = 0;
-            return Ok(());
+        if self.browser.entries.get(index).is_some_and(|e| e.directory) {
+            return self.navigate(NavKind::Enter {
+                index,
+                expected: self.browser.entries[index].clone(),
+            });
         }
         let (index, expected) = self.selected_snapshot()?;
         let path = self.checked_file(index, &expected)?;
@@ -838,6 +1073,7 @@ impl Ui {
             launch_argv(
                 "foot",
                 &[
+                    std::ffi::OsStr::new("--hold"),
                     std::ffi::OsStr::new("-e"),
                     std::ffi::OsStr::new("file"),
                     std::ffi::OsStr::new("--"),
@@ -853,6 +1089,7 @@ impl Ui {
             self.browser.message = format!("Generic viewer requested: {}", expected.name);
         }
         self.mode = Mode::Normal;
+        self.modal_focus = 0;
         Ok(())
     }
     fn begin_rename(&mut self) -> Result<(), String> {
@@ -865,6 +1102,7 @@ impl Ui {
             expected,
             name: String::new(),
         };
+        self.modal_focus = 0;
         Ok(())
     }
     fn begin_delete(&mut self) -> Result<(), String> {
@@ -873,6 +1111,7 @@ impl Ui {
         }
         let (index, expected) = self.selected_snapshot()?;
         self.mode = Mode::DeleteConfirm { index, expected };
+        self.modal_focus = 0;
         Ok(())
     }
     fn confirm_name(&mut self) -> Result<(), String> {
@@ -890,6 +1129,7 @@ impl Ui {
                 expected: expected.clone(),
                 name: name.clone(),
             };
+            self.modal_focus = 0;
         }
         Ok(())
     }
@@ -903,31 +1143,34 @@ impl Ui {
                 if self.browser.entries.get(index) != Some(&expected) {
                     return Err("rename selection changed: confirmation invalidated".into());
                 }
-                self.browser.rename(index, &name, true)?;
+                self.navigate(NavKind::Rename {
+                    index,
+                    expected,
+                    name,
+                })
             }
             Mode::DeleteConfirm { index, expected } => {
                 if self.browser.entries.get(index) != Some(&expected) {
                     return Err("delete selection changed: confirmation invalidated".into());
                 }
-                self.browser.delete(index, &expected.name, true)?;
+                self.navigate(NavKind::Delete { index, expected })
             }
-            _ => return Ok(()),
+            _ => Ok(()),
         }
-        self.mode = Mode::Normal;
-        self.selected = (!self.browser.entries.is_empty()).then_some(
-            self.selected
-                .unwrap_or(0)
-                .min(self.browser.entries.len().saturating_sub(1)),
-        );
-        self.page = self.selected.unwrap_or(0) / PAGE_ROWS;
-        Ok(())
     }
     fn activate(&mut self, requested: MenuAction) -> Result<(), String> {
         let MenuAction::Custom { kind, payload } = requested else {
             return Ok(());
         };
         match kind.as_str() {
-            "cancel" => self.mode = Mode::Normal,
+            "cancel" => {
+                self.mode = Mode::Normal;
+                self.modal_focus = 0;
+            }
+            "manage" if self.mode == Mode::Normal => {
+                self.mode = Mode::Actions;
+                self.modal_focus = 0;
+            }
             "select" if self.mode == Mode::Normal => {
                 let idx = payload
                     .parse::<usize>()
@@ -948,9 +1191,9 @@ impl Ui {
             "viewer" => self.launch_fallback(false)?,
             "terminal" => self.launch_fallback(true)?,
             "open-with" => self.show_open_with()?,
-            "rename" if self.mode == Mode::Normal => self.begin_rename()?,
-            "delete" if self.mode == Mode::Normal => self.begin_delete()?,
-            "refresh" if self.mode == Mode::Normal => self.refresh()?,
+            "rename" if matches!(self.mode, Mode::Normal | Mode::Actions) => self.begin_rename()?,
+            "delete" if matches!(self.mode, Mode::Normal | Mode::Actions) => self.begin_delete()?,
+            "refresh" if matches!(self.mode, Mode::Normal | Mode::Actions) => self.refresh()?,
             "rename-next" => self.confirm_name()?,
             "confirm" => self.confirm()?,
             _ => {}
@@ -958,11 +1201,7 @@ impl Ui {
         Ok(())
     }
     fn parent(&mut self) -> Result<(), String> {
-        if self.browser.parent()? {
-            self.selected = (!self.browser.entries.is_empty()).then_some(0);
-            self.page = 0;
-        }
-        Ok(())
+        self.navigate(NavKind::Parent)
     }
     fn text(&mut self, value: &str) {
         if let Mode::RenameInput { name, .. } = &mut self.mode {
@@ -998,14 +1237,12 @@ impl Ui {
             KeyIntent::Activate => {
                 action = match &self.mode {
                     Mode::Normal => Some(action_fn("open", "")),
-                    Mode::OpenWith {
-                        selected, handlers, ..
-                    } if !handlers.is_empty() => Some(action_fn("choose", selected.to_string())),
                     Mode::RenameInput { .. } => Some(action_fn("rename-next", "")),
-                    Mode::RenameConfirm { .. } | Mode::DeleteConfirm { .. } => {
-                        Some(action_fn("confirm", ""))
-                    }
-                    Mode::Fallback { .. } => Some(action_fn("viewer", "")),
+                    Mode::OpenWith { .. }
+                    | Mode::Fallback { .. }
+                    | Mode::RenameConfirm { .. }
+                    | Mode::DeleteConfirm { .. }
+                    | Mode::Actions => self.focused_modal_action(),
                     _ => None,
                 };
             }
@@ -1076,7 +1313,7 @@ enum KeyIntent {
     Erase,
 }
 fn key_intent(key: &Key, mode: &Mode) -> KeyIntent {
-    if matches!(mode, Mode::Busy { .. }) {
+    if matches!(mode, Mode::Busy { .. } | Mode::Scanning { .. }) {
         return KeyIntent::None;
     }
     if let Mode::RenameInput { .. } = mode {
@@ -1230,7 +1467,10 @@ fn begin_touch(
     y: f64,
     action: Option<MenuAction>,
 ) {
-    if matches!(mode, Mode::Busy { .. }) || touch.is_some() || swipe.is_some() {
+    if matches!(mode, Mode::Busy { .. } | Mode::Scanning { .. })
+        || touch.is_some()
+        || swipe.is_some()
+    {
         return;
     }
     if matches!(mode, Mode::Normal | Mode::OpenWith { .. }) {
@@ -1430,7 +1670,7 @@ fn run(opts: Options) -> Result<(), String> {
     }
 }
 fn main() -> ExitCode {
-    match parse(env::args().skip(1)).and_then(|v| v.map(run).transpose()) {
+    match parse(env::args_os().skip(1)).and_then(|v| v.map(run).transpose()) {
         Ok(_) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("nuraloumi-files: {e}");
@@ -1490,6 +1730,26 @@ mod tests {
         }
     }
     #[test]
+    #[cfg(unix)]
+    fn cli_preserves_non_utf8_paths_and_does_not_interpret_leading_dash() {
+        use std::os::unix::ffi::OsStringExt;
+        let root = std::ffi::OsString::from_vec(vec![b'/', b't', b'm', b'p', b'/', 0xff]);
+        let args = vec![std::ffi::OsString::from("--live"), root.clone()];
+        let parsed = parse(args).unwrap().unwrap();
+        assert_eq!(parsed.root, PathBuf::from(root.clone()));
+        assert!(parsed.live);
+        let dash = parse(vec![
+            std::ffi::OsString::from("--"),
+            std::ffi::OsString::from("-strange"),
+        ])
+        .unwrap()
+        .unwrap();
+        assert_eq!(dash.root, PathBuf::from("-strange"));
+        let desktop = std::ffi::OsString::from_vec(vec![0xff, b'.', b'd']);
+        assert!(parse(vec![std::ffi::OsString::from("--open-with"), desktop]).is_err());
+    }
+
+    #[test]
     fn capabilities_default_safe() {
         assert!(
             !parse(vec!["--live".into()])
@@ -1532,6 +1792,201 @@ mod tests {
         assert_eq!(key_intent(&Key::Left, &Mode::Normal), KeyIntent::Back);
         assert_eq!(ui.on_key(Key::Text("]".into())), KeyAction::Redraw);
         assert_eq!(ui.page, 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn keyboard_can_reach_no_handler_fallback_and_terminal() {
+        let root = temp();
+        fs::write(root.join("orphan.zzz"), "unknown").unwrap();
+        let mut ui = Ui::with_ops(
+            &opts(root.clone()),
+            fake(
+                OpenOutcome::NeedsOpenWith {
+                    reason: "no default".into(),
+                    handlers: vec![],
+                },
+                vec![],
+            ),
+        )
+        .unwrap();
+        ui.enter_selected().unwrap();
+        assert!(matches!(ui.mode, Mode::OpenWith { .. }));
+        assert_eq!(ui.focused_modal_action(), Some(action("fallback", "")));
+        assert_eq!(ui.on_key(Key::Enter), KeyAction::Redraw);
+        assert!(matches!(ui.mode, Mode::Fallback { .. }));
+        assert_eq!(ui.state(&ui.menu()).selected_id.as_deref(), Some("viewer"));
+        ui.on_key(Key::Down);
+        assert_eq!(
+            ui.state(&ui.menu()).selected_id.as_deref(),
+            Some("terminal")
+        );
+        assert_eq!(ui.focused_modal_action(), Some(action("terminal", "")));
+        ui.on_key(Key::Down);
+        assert_eq!(ui.state(&ui.menu()).selected_id.as_deref(), Some("chooser"));
+        ui.on_key(Key::Escape);
+        assert_eq!(ui.mode, Mode::Normal);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn keyboard_chooser_cycles_applications_and_extra_actions() {
+        let root = temp();
+        fs::write(root.join("image.png"), "png").unwrap();
+        let apps = (0..7)
+            .map(|index| handler(&format!("app{index}.desktop")))
+            .collect::<Vec<_>>();
+        let mut ui = Ui::with_ops(
+            &opts(root.clone()),
+            fake(
+                OpenOutcome::NeedsOpenWith {
+                    reason: "select app".into(),
+                    handlers: apps.clone(),
+                },
+                apps,
+            ),
+        )
+        .unwrap();
+        ui.enter_selected().unwrap();
+        for _ in 0..4 {
+            ui.on_key(Key::Down);
+        }
+        assert_eq!(
+            ui.state(&ui.menu()).selected_id.as_deref(),
+            Some("app-next")
+        );
+        ui.on_key(Key::Enter);
+        assert_eq!(ui.state(&ui.menu()).selected_id.as_deref(), Some("app-4"));
+        ui.on_key(Key::Down);
+        assert_eq!(ui.state(&ui.menu()).selected_id.as_deref(), Some("app-5"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn worker_directory_navigation_and_complete_batches() {
+        use std::time::Duration;
+        let root = temp();
+        for idx in 0..MAX_DIRECTORY_TEST_FILES {
+            fs::write(root.join(format!("file-{idx:04}")), "x").unwrap();
+        }
+        let mut options = opts(root.clone());
+        options.live = true;
+        let mut ui = Ui::new(&options).unwrap();
+        assert!(matches!(ui.mode, Mode::Scanning { .. }));
+        assert!(ui.browser.entries.is_empty());
+        let first = ui
+            .nav_worker
+            .as_ref()
+            .unwrap()
+            .replies
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        ui.apply_nav_reply(first).unwrap();
+        assert_eq!(ui.browser.entries.len(), file_manager::MAX_VISIBLE_ENTRIES);
+        ui.page = Ui::page_count(ui.browser.entries.len()) - 1;
+        ui.selected = Some(ui.page * PAGE_ROWS);
+        ui.change_page(1);
+        assert!(ui.busy());
+        let next = ui
+            .nav_worker
+            .as_ref()
+            .unwrap()
+            .replies
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        ui.apply_nav_reply(next).unwrap();
+        assert_eq!(ui.browser.batch_number(), 2);
+        assert_eq!(ui.browser.entries[0].name, "file-0512");
+        assert_eq!(ui.browser.entries.last().unwrap().name, "file-0522");
+        ui.change_page(-1);
+        let previous = ui
+            .nav_worker
+            .as_ref()
+            .unwrap()
+            .replies
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        ui.apply_nav_reply(previous).unwrap();
+        assert_eq!(ui.browser.batch_number(), 1);
+        assert_eq!(ui.page, Ui::page_count(ui.browser.entries.len()) - 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn worker_performs_confirmed_delete_outside_ui_loop() {
+        use std::time::Duration;
+        let root = temp();
+        fs::write(root.join("delete-me"), "x").unwrap();
+        let mut options = opts(root.clone());
+        options.capabilities.delete = true;
+        let mut ui = Ui::with_ops(
+            &options,
+            fake(OpenOutcome::NeedsFallback { reason: "x".into() }, vec![]),
+        )
+        .unwrap();
+        ui.nav_worker = Some(NavWorker::new());
+        ui.begin_delete().unwrap();
+        ui.confirm().unwrap();
+        assert!(matches!(ui.mode, Mode::Scanning { .. }));
+        let reply = ui
+            .nav_worker
+            .as_ref()
+            .unwrap()
+            .replies
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        ui.apply_nav_reply(reply).unwrap();
+        assert!(!root.join("delete-me").exists());
+        assert_eq!(ui.mode, Mode::Normal);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    const MAX_DIRECTORY_TEST_FILES: usize = file_manager::MAX_VISIBLE_ENTRIES + 11;
+
+    #[test]
+    fn actions_remain_visible_with_write_capabilities_on_middle_pages() {
+        let root = temp();
+        for i in 0..24 {
+            fs::write(root.join(format!("file-{i:02}")), "x").unwrap();
+        }
+        let mut options = opts(root.clone());
+        options.capabilities.rename = true;
+        options.capabilities.delete = true;
+        let mut ui = Ui::with_ops(
+            &options,
+            fake(OpenOutcome::NeedsFallback { reason: "x".into() }, vec![]),
+        )
+        .unwrap();
+        ui.change_page(2);
+        let menu = ui.menu();
+        let state = ui.state(&menu);
+        let viewport = Viewport::new(480.0, 640.0, 1.0);
+        let (scene, _) = render_menu_follow_selection(
+            &CairoRenderer::default(),
+            &menu,
+            &state,
+            viewport,
+            &DARK_THEME,
+            RenderOptions::default(),
+            None,
+        )
+        .unwrap();
+        for label in ["prev", "next", "open-with", "manage"] {
+            let area = scene
+                .hits
+                .iter()
+                .find(|area| area.item_id == label)
+                .unwrap();
+            assert!(
+                area.rect.y >= 0.0 && area.rect.bottom() <= 640.0,
+                "{label} is clipped: {:?}",
+                area.rect
+            );
+        }
+        ui.activate(action("manage", "")).unwrap();
+        assert_eq!(ui.state(&ui.menu()).selected_id.as_deref(), Some("rename"));
+        ui.on_key(Key::Down);
+        assert_eq!(ui.state(&ui.menu()).selected_id.as_deref(), Some("delete"));
         fs::remove_dir_all(root).unwrap();
     }
     #[test]

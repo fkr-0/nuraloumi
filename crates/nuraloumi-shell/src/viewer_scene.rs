@@ -213,7 +213,7 @@ mod tests {
         let image = Image {
             width: 1,
             height: 4096,
-            argb: vec![0, 0, 255, 255].repeat(4096),
+            argb: [0, 0, 255, 255].repeat(4096),
             format: "PNG",
         };
         let scene = Scene {
