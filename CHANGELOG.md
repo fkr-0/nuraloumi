@@ -41,6 +41,18 @@ Development prerelease; **not** a production-qualified SL101 release.
   the Run dialog's Wayland event thread.
 - File opener helper capture is bounded without waiting indefinitely for
   inherited stdout/stderr pipe EOF.
+- The standalone viewer creates its Wayland surface before image decoding or
+  `file(1)` identification. A worker keeps the loading surface responsive;
+  the diagnostic helper uses a two-second deadline with nonblocking pipes,
+  bounded output, and process-group cleanup even when descendants retain pipes.
+- Viewer JPEG EXIF orientation values 1–8 (rotations and reflections) render
+  correctly; extreme image aspect ratios stay inside the Cairo-clipped image
+  viewport. Only a matching primary-button release activates Back/X.
+- The ARGB conversion traverses checked source rows/columns without per-pixel
+  integer division/modulo, reducing software overhead on Tegra20 ARMv7.
+  Host regression tests cover image decoding, EXIF, pathological dimensions,
+  child-held pipes, slow loading, and input semantics. See `docs/VIEWER.md` and
+  `docs/qualification/NURALOUMI-VIEWER-20261110.md`.
 - Renderer indicator recognizes pinned Grate Gallium library layouts on Sway
   and does not claim a renderer is ready for unknown or failed probes.
   Renderer-switch arguments and authorization are unchanged.
