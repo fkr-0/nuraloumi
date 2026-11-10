@@ -299,7 +299,12 @@ fn perform_job(ops: &mut dyn FileOps, job: Job) -> Reply {
                 return Err("selected entry is no longer a regular file".into());
             }
             #[cfg(unix)]
-            if meta.dev() != expected.device || meta.ino() != expected.inode {
+            if meta.dev() != expected.device
+                || meta.ino() != expected.inode
+                || meta.ctime() != expected.ctime
+                || meta.ctime_nsec() != expected.ctime_nsec
+                || meta.len() != expected.len
+            {
                 return Err("selected file was replaced; please refresh".into());
             }
             Ok(())
@@ -2174,6 +2179,10 @@ mod tests {
         fs::write(&path, "original").unwrap();
         let browser = Browser::new(&root, Capabilities::default()).unwrap();
         let expected = browser.entries[0].clone();
+        // Keep the old inode pinned: the filesystem must not recycle its
+        // number while we simulate replacement. Testing unlink + recreate
+        // without a pin is scheduler/filesystem-dependent (ABA reuse).
+        let old_pin = std::fs::File::open(&path).unwrap();
         fs::remove_file(&path).unwrap();
         fs::write(&path, "changed").unwrap();
         let reply = perform_job(
@@ -2192,6 +2201,7 @@ mod tests {
             },
         );
         assert!(matches!(reply.kind, ReplyKind::Invalid(_)));
+        drop(old_pin);
         fs::remove_dir_all(root).unwrap();
     }
 

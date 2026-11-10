@@ -4,6 +4,17 @@ All notable user-visible changes to NuraLoumi are recorded here.
 
 ## [Unreleased]
 
+### CI repair
+
+- The ARMv7 musl file-manager mutation path invokes the Linux
+  `renameat2(RENAME_NOREPLACE)` syscall directly, avoiding a missing musl
+  libc wrapper without weakening no-clobber semantics.
+- Async file-open selection additionally compares inode change time and
+  size; the replacement regression now pins the removed inode to avoid
+  allocator-dependent false successes.
+- Fixed the Debian CI command-line continuation so packaging receives its
+  verified stage, output directory and Git SHA as separate arguments.
+
 ### Build and distribution
 
 - Native CI packaging now assembles Debian 13 ARMHF `.deb` and Alpine 3.22

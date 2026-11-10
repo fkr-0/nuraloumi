@@ -226,7 +226,6 @@ mod tests {
     #[test]
     fn pipe_holding_descendant_cannot_extend_helper_deadline() {
         use std::fs;
-        use std::os::unix::fs::PermissionsExt;
         use std::time::{SystemTime, UNIX_EPOCH};
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -236,15 +235,18 @@ mod tests {
             "nuraloumi-viewer-helper-{}-{nonce}",
             std::process::id()
         ));
-        // A fixed, test-only fixture: the direct helper exits immediately,
-        // while its descendant keeps stdout and stderr open.
+        // Invoke this freshly written fixture through a stable interpreter,
+        // not as a newly-created executable. Some runner filesystems can
+        // return ETXTBSY between write and exec, masking the pipe-timeout
+        // behavior the test is meant to verify.
+        // The direct helper exits immediately; its descendant keeps both
+        // stdout/stderr pipes open after the interpreter exits.
         fs::write(&script, b"#!/bin/sh\nsleep 5 &\nexit 0\n").unwrap();
-        fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
         let start = Instant::now();
         let text = describe_with_program_timeout(
-            Path::new("/test-file"),
+            &script,
             "not renderable",
-            script.to_str().unwrap(),
+            "/bin/sh",
             Duration::from_millis(150),
         );
         fs::remove_file(&script).unwrap();

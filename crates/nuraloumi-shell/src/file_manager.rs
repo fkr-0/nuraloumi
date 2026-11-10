@@ -22,6 +22,13 @@ pub struct Entry {
     pub device: u64,
     #[cfg(unix)]
     pub inode: u64,
+    // A Linux/filesystem allocator may reuse st_ino immediately after
+    // unlink. Include the metadata change timestamp when a scan-selected
+    // entry is passed to an asynchronous file-opening worker.
+    #[cfg(unix)]
+    pub ctime: i64,
+    #[cfg(unix)]
+    pub ctime_nsec: i64,
 }
 
 // Linux has no unlinkat() variant that atomically compares a pathname with an
@@ -395,7 +402,11 @@ impl Browser {
             return Err("entry kind changed since scan; refresh required".into());
         }
         #[cfg(unix)]
-        if entry.device != meta.dev() || entry.inode != meta.ino() {
+        if entry.device != meta.dev()
+            || entry.inode != meta.ino()
+            || entry.ctime != meta.ctime()
+            || entry.ctime_nsec != meta.ctime_nsec()
+        {
             return Err("entry identity changed since scan; refresh required".into());
         }
         Ok((path, meta))
@@ -485,6 +496,8 @@ impl Browser {
             || entry.directory != actual.is_dir()
             || entry.device != actual.dev()
             || entry.inode != actual.ino()
+            || entry.ctime != actual.ctime()
+            || entry.ctime_nsec != actual.ctime_nsec()
         {
             return Err("entry replaced before rooted mutation".into());
         }
@@ -531,6 +544,10 @@ impl Browser {
                 device: meta.dev(),
                 #[cfg(unix)]
                 inode: meta.ino(),
+                #[cfg(unix)]
+                ctime: meta.ctime(),
+                #[cfg(unix)]
+                ctime_nsec: meta.ctime_nsec(),
             };
             let key = entry.order_key();
             if self
@@ -710,23 +727,17 @@ fn rename_between_at(
     new: &str,
 ) -> io::Result<()> {
     use std::ffi::CString;
-    use std::os::raw::{c_char, c_int, c_uint};
-    unsafe extern "C" {
-        fn renameat2(
-            olddirfd: c_int,
-            oldpath: *const c_char,
-            newdirfd: c_int,
-            newpath: *const c_char,
-            flags: c_uint,
-        ) -> c_int;
-    }
+    // Some ARMv7 musl ABIs do not export a renameat2() libc wrapper.
+    // The Linux kernel interface is available via syscall(2) instead.
+    // Never fall back to renameat(): it could overwrite a destination.
     let old = CString::new(old)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL in old path"))?;
     let new = CString::new(new)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL in new path"))?;
-    const RENAME_NOREPLACE: c_uint = 1;
+    const RENAME_NOREPLACE: libc::c_uint = 1;
     let rc = unsafe {
-        renameat2(
+        libc::syscall(
+            libc::SYS_renameat2,
             old_dir.as_raw_fd(),
             old.as_ptr(),
             new_dir.as_raw_fd(),

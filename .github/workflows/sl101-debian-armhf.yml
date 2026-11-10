@@ -170,7 +170,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sh scripts/build-ci-debian-deb.sh +            target/gha-artifact/nuraloumi-ci target/gha-artifact/native-deb "$GITHUB_SHA"
+          sh scripts/build-ci-debian-deb.sh \
+            target/gha-artifact/nuraloumi-ci target/gha-artifact/native-deb "$GITHUB_SHA"
           find target/gha-artifact/native-deb -name 'nuraloumi_*_armhf.deb' -type f -size +0c | grep -q .
           test -s target/gha-artifact/native-deb/nuraloumi_*_armhf.deb.sha256
 

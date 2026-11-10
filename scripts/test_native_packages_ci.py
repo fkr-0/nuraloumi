@@ -53,6 +53,11 @@ class NativePackageCiContract(unittest.TestCase):
         self.assertNotIn("+                /work", MUSL)
 
     def test_deb_has_armhf_control_and_no_maintainer_scripts(self):
+        self.assertIn(
+            'sh scripts/build-ci-debian-deb.sh \\\n            target/gha-artifact/nuraloumi-ci',
+            DEB,
+        )
+        self.assertNotIn("build-ci-debian-deb.sh +", DEB)
         for token in (
             "Architecture: armhf", "dpkg-deb --root-owner-group --build",
             "cmp \"$executable\"", "CI-MANIFEST.txt",
