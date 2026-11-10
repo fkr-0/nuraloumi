@@ -1,16 +1,14 @@
 //! Rooted, bounded quick-browser operations. No command strings or renderer effects.
-use nuraloumi_providers::applications::ApplicationProvider;
-use nuraloumi_providers::command::{
-    CommandLimits, CommandRunner, CommandSpec, FixtureCommandRunner,
-};
-use nuraloumi_providers::Provider;
 use std::fs;
 use std::io;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
-pub const MAX_VISIBLE_ENTRIES: usize = 128;
-pub const MAX_DIRECTORY_SCAN: usize = 512;
+// Scan/retain limits are independent: even oversized folders remain navigable.
+// A truncated folder is displayed with a warning, not rejected wholesale.
+pub const MAX_VISIBLE_ENTRIES: usize = 512;
+pub const MAX_DIRECTORY_SCAN: usize = 4096;
 pub const MAX_FILENAME_BYTES: usize = 255;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,6 +16,10 @@ pub struct Entry {
     pub name: String,
     pub directory: bool,
     pub len: u64,
+    #[cfg(unix)]
+    pub device: u64,
+    #[cfg(unix)]
+    pub inode: u64,
 }
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Capabilities {
@@ -28,6 +30,8 @@ pub struct Browser {
     pub root: PathBuf,
     pub current: PathBuf,
     pub entries: Vec<Entry>,
+    pub has_more: bool,
+    pub scanned: usize,
     pub message: String,
     pub capabilities: Capabilities,
 }
@@ -36,7 +40,6 @@ pub fn valid_name(name: &str) -> bool {
         && name != "."
         && name != ".."
         && name.len() <= MAX_FILENAME_BYTES
-        && !name.starts_with('-')
         && !name.contains(['/', '\\', '\0', '\r', '\n'])
         && !name.chars().any(char::is_control)
 }
@@ -59,6 +62,8 @@ impl Browser {
             current: root.clone(),
             root,
             entries: Vec::new(),
+            has_more: false,
+            scanned: 0,
             message: "Read-only by default; R rename / D delete / O open-with".into(),
             capabilities,
         };
@@ -88,6 +93,14 @@ impl Browser {
         if meta.file_type().is_symlink() || (!meta.is_file() && !meta.is_dir()) {
             return Err("symlinks and special files cannot be acted upon".into());
         }
+        let entry = &self.entries[index];
+        if entry.directory != meta.is_dir() {
+            return Err("entry kind changed since scan; refresh required".into());
+        }
+        #[cfg(unix)]
+        if entry.device != meta.dev() || entry.inode != meta.ino() {
+            return Err("entry identity changed since scan; refresh required".into());
+        }
         Ok((path, meta))
     }
     pub fn refresh(&mut self) -> Result<(), String> {
@@ -95,10 +108,14 @@ impl Browser {
         let entries = fs::read_dir(&self.current).map_err(|e| err("list directory", e))?;
         let mut result = Vec::new();
         let mut rejected = 0usize;
-        for (scanned, e) in entries.enumerate() {
+        let mut scanned = 0usize;
+        let mut truncated_scan = false;
+        for e in entries {
             if scanned >= MAX_DIRECTORY_SCAN {
-                return Err("directory enumeration budget exceeded".into());
+                truncated_scan = true;
+                break;
             }
+            scanned += 1;
             let entry = e.map_err(|e| err("read entry", e))?;
             let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
                 rejected += 1;
@@ -108,18 +125,26 @@ impl Browser {
                 rejected += 1;
                 continue;
             }
-            let meta = fs::symlink_metadata(entry.path()).map_err(|e| err("stat entry", e))?;
+            let meta = match fs::symlink_metadata(entry.path()) {
+                Ok(meta) => meta,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    rejected += 1;
+                    continue;
+                }
+                Err(e) => return Err(err("stat entry", e)),
+            };
             if meta.file_type().is_symlink() || (!meta.is_dir() && !meta.is_file()) {
                 rejected += 1;
                 continue;
-            }
-            if result.len() >= MAX_VISIBLE_ENTRIES {
-                return Err("directory entry cap exceeded".into());
             }
             result.push(Entry {
                 name,
                 directory: meta.is_dir(),
                 len: meta.len(),
+                #[cfg(unix)]
+                device: meta.dev(),
+                #[cfg(unix)]
+                inode: meta.ino(),
             });
         }
         result.sort_by(|a, b| {
@@ -127,14 +152,39 @@ impl Browser {
                 a.name
                     .to_ascii_lowercase()
                     .cmp(&b.name.to_ascii_lowercase())
+                    .then_with(|| a.name.cmp(&b.name))
             })
         });
+        let has_more = truncated_scan || result.len() > MAX_VISIBLE_ENTRIES;
+        result.truncate(MAX_VISIBLE_ENTRIES);
+        self.scanned = scanned;
+        self.has_more = has_more;
         self.entries = result;
-        if rejected > 0 {
-            self.message = format!("Skipped {rejected} hidden, unsafe or non-UTF8 entries");
-        }
+        self.message = if has_more {
+            format!("Partial listing: {} shown, {scanned} scanned (limit {MAX_DIRECTORY_SCAN}); narrow directory", self.entries.len())
+        } else if rejected > 0 {
+            format!(
+                "{} visible; skipped {rejected} hidden/unsafe entries",
+                self.entries.len()
+            )
+        } else {
+            format!(
+                "{} entries | Enter open | O chooser | Esc back",
+                self.entries.len()
+            )
+        };
         Ok(())
     }
+    /// Validate against the last scan and current inode before passing a file
+    /// to an external opener. Never follow a symlink or hand out a directory.
+    pub fn regular_file(&self, index: usize) -> Result<PathBuf, String> {
+        let (path, metadata) = self.path_for(index)?;
+        if !metadata.is_file() {
+            return Err("selected entry is not a regular file".into());
+        }
+        Ok(path)
+    }
+
     pub fn enter(&mut self, index: usize) -> Result<bool, String> {
         let (path, meta) = self.path_for(index)?;
         if !meta.is_dir() {
@@ -144,8 +194,11 @@ impl Browser {
         if !next.starts_with(&self.root) {
             return Err("directory escapes configured root".into());
         }
-        self.current = next;
-        self.refresh()?;
+        let previous = std::mem::replace(&mut self.current, next);
+        if let Err(error) = self.refresh() {
+            self.current = previous;
+            return Err(error);
+        }
         Ok(true)
     }
     pub fn parent(&mut self) -> Result<bool, String> {
@@ -153,8 +206,12 @@ impl Browser {
         if self.current == self.root {
             return Ok(false);
         }
-        self.current = self.current.parent().ok_or("missing parent")?.to_path_buf();
-        self.refresh()?;
+        let next = self.current.parent().ok_or("missing parent")?.to_path_buf();
+        let previous = std::mem::replace(&mut self.current, next);
+        if let Err(error) = self.refresh() {
+            self.current = previous;
+            return Err(error);
+        }
         Ok(true)
     }
     pub fn rename(&mut self, index: usize, new_name: &str, confirmed: bool) -> Result<(), String> {
@@ -177,7 +234,7 @@ impl Browser {
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => return Err(err("inspect rename target", e)),
         }
-        fs::rename(&old, &dest).map_err(|e| err("rename", e))?;
+        rename_without_replacing(&old, &dest).map_err(|e| err("rename", e))?;
         self.refresh()?;
         self.message = format!("Renamed to {new_name}");
         Ok(())
@@ -211,64 +268,56 @@ impl Browser {
         self.message = format!("Deleted {expected_name}");
         Ok(())
     }
-    /// Only discovered, validated .desktop entries may receive a file URI.
-    /// Uses Gio's desktop command semantics, NEVER a shell or .desktop Exec expansion.
-    pub fn open_with<R: CommandRunner>(
-        &self,
-        index: usize,
-        desktop_id: &str,
-        application_roots: Vec<PathBuf>,
-        runner: &mut R,
-    ) -> Result<(), String> {
-        if !valid_desktop_id(desktop_id) {
-            return Err("invalid desktop entry ID".into());
-        }
-        let (file, meta) = self.path_for(index)?;
-        if !meta.is_file() {
-            return Err("open-with accepts regular files only".into());
-        }
-        let mut provider =
-            ApplicationProvider::new(FixtureCommandRunner::default(), application_roots);
-        let snapshot = provider.snapshot().map_err(|e| e.to_string())?;
-        let entry = snapshot
-            .applications
-            .iter()
-            .find(|e| e.id == desktop_id && e.launchable)
-            .ok_or("desktop app ID not discovered or not launchable")?;
-        let app = entry
-            .desktop_file
-            .to_str()
-            .ok_or("non-UTF8 desktop app path")?;
-        let file = file.to_str().ok_or("non-UTF8 file path")?;
-        let spec = CommandSpec::new("gio").args(["launch", app, file]);
-        let output = runner
-            .run(&spec, CommandLimits::new(Duration::from_secs(3), 1024))
-            .map_err(|e| e.to_string())?;
-        if output.status != 0 {
-            return Err(format!("gio launch exited {}", output.status));
-        }
+}
+// Atomic NOREPLACE prevents an attacker or concurrent process from creating
+// a target between the user confirmation and the rename system call.
+#[cfg(target_os = "linux")]
+fn rename_without_replacing(old: &Path, new: &Path) -> io::Result<()> {
+    use std::ffi::CString;
+    use std::os::raw::{c_char, c_int, c_uint};
+    use std::os::unix::ffi::OsStrExt;
+    unsafe extern "C" {
+        fn renameat2(
+            olddirfd: c_int,
+            oldpath: *const c_char,
+            newdirfd: c_int,
+            newpath: *const c_char,
+            flags: c_uint,
+        ) -> c_int;
+    }
+    let old = CString::new(old.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL in old path"))?;
+    let new = CString::new(new.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL in new path"))?;
+    const AT_FDCWD: c_int = -100;
+    const RENAME_NOREPLACE: c_uint = 1;
+    let rc = unsafe {
+        renameat2(
+            AT_FDCWD,
+            old.as_ptr(),
+            AT_FDCWD,
+            new.as_ptr(),
+            RENAME_NOREPLACE,
+        )
+    };
+    if rc == 0 {
         Ok(())
+    } else {
+        Err(io::Error::last_os_error())
     }
 }
-pub fn application_roots() -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-    if let Some(value) = std::env::var_os("XDG_DATA_HOME") {
-        dirs.push(PathBuf::from(value).join("applications"));
-    } else if let Some(value) = std::env::var_os("HOME") {
-        dirs.push(PathBuf::from(value).join(".local/share/applications"));
-    }
-    let global =
-        std::env::var("XDG_DATA_DIRS").unwrap_or_else(|_| "/usr/local/share:/usr/share".into());
-    for dir in global.split(':').filter(|s| !s.is_empty()) {
-        dirs.push(PathBuf::from(dir).join("applications"));
-    }
-    dirs
+
+#[cfg(not(target_os = "linux"))]
+fn rename_without_replacing(_old: &Path, _new: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "atomic no-replace rename unsupported",
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nuraloumi_providers::command::{CommandOutput, FixtureCommandRunner};
     use std::time::{SystemTime, UNIX_EPOCH};
     fn temp() -> PathBuf {
         let stamp = SystemTime::now()
@@ -358,42 +407,38 @@ mod tests {
         for i in 0..(MAX_DIRECTORY_SCAN + 1) {
             fs::write(root.join(format!(".hidden-{i}")), b"x").unwrap();
         }
-        assert!(Browser::new(&root, Capabilities::default()).is_err());
+        let browser = Browser::new(&root, Capabilities::default()).unwrap();
+        assert!(browser.entries.is_empty());
+        assert!(browser.has_more);
+        assert_eq!(browser.scanned, MAX_DIRECTORY_SCAN);
+        assert!(browser.message.contains("Partial listing"));
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
-    fn desktop_selection_and_exact_gio_argv() {
+    fn oversized_visible_directory_is_truncated_but_usable() {
         let root = temp();
-        let appdir = temp();
-        let file = root.join("note.txt");
-        fs::write(&file, b"hello").unwrap();
-        let desktop = appdir.join("view.desktop");
-        fs::write(
-            &desktop,
-            "[Desktop Entry]\nType=Application\nName=View\nExec=view %f\n",
-        )
-        .unwrap();
+        for i in 0..MAX_VISIBLE_ENTRIES + 12 {
+            fs::write(root.join(format!("file-{i:04}")), b"a").unwrap();
+        }
         let b = Browser::new(&root, Capabilities::default()).unwrap();
-        let mut runner = FixtureCommandRunner::default();
-        runner.insert(
-            CommandSpec::new("gio").args([
-                "launch",
-                desktop.to_str().unwrap(),
-                file.to_str().unwrap(),
-            ]),
-            CommandOutput {
-                status: 0,
-                stdout: String::new(),
-                stderr: String::new(),
-            },
+        assert_eq!(b.entries.len(), MAX_VISIBLE_ENTRIES);
+        assert!(b.has_more);
+        assert_eq!(b.entries[0].name, "file-0000");
+        assert_eq!(
+            b.entries.last().unwrap().name,
+            format!("file-{:04}", MAX_VISIBLE_ENTRIES - 1)
         );
-        assert!(!valid_desktop_id("../view.desktop"));
-        b.open_with(0, "view.desktop", vec![appdir.clone()], &mut runner)
-            .unwrap();
-        assert!(b
-            .open_with(0, "none.desktop", vec![appdir.clone()], &mut runner)
-            .is_err());
         fs::remove_dir_all(root).unwrap();
-        fs::remove_dir_all(appdir).unwrap();
+    }
+    #[test]
+    fn safe_unusual_filename_and_changed_inode_are_checked() {
+        let root = temp();
+        fs::write(root.join("-; tricky name.txt"), b"one").unwrap();
+        let b = Browser::new(&root, Capabilities::default()).unwrap();
+        assert_eq!(b.entries[0].name, "-; tricky name.txt");
+        assert!(b.regular_file(0).unwrap().ends_with("-; tricky name.txt"));
+        fs::remove_file(root.join("-; tricky name.txt")).unwrap();
+        assert!(b.regular_file(0).is_err());
+        fs::remove_dir_all(root).unwrap();
     }
 }
