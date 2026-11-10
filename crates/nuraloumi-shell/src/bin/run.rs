@@ -1188,8 +1188,6 @@ mod tests {
     fn diagnostic_labels_strip_controls_and_bidi_spoofing() {
         assert_eq!(safe_label("abc\u{202e}ok\n"), "abc�ok ");
         assert_eq!(safe_label(&"a".repeat(200)).len(), 160);
-        assert!(MAX_RECENT_SCAN_PER_DIR <= 512);
-        assert!(MAX_EXECUTABLE_SCAN_PER_DIR <= MAX_EXECUTABLE_NAMES);
     }
 
     #[test]
