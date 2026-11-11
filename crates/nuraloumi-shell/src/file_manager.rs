@@ -58,9 +58,11 @@ impl MutationStage {
             fn mkdirat(dirfd: c_int, pathname: *const c_char, mode: c_uint) -> c_int;
             fn openat(dirfd: c_int, pathname: *const c_char, flags: c_int) -> c_int;
         }
-        const O_DIRECTORY: c_int = 0o200000;
-        const O_NOFOLLOW: c_int = 0o400000;
-        const O_CLOEXEC: c_int = 0o2000000;
+        // Linux O_DIRECTORY/O_NOFOLLOW bits differ between ARM and x86.
+        // Never hardcode the host architecture's octal values.
+        const O_DIRECTORY: c_int = libc::O_DIRECTORY;
+        const O_NOFOLLOW: c_int = libc::O_NOFOLLOW;
+        const O_CLOEXEC: c_int = libc::O_CLOEXEC;
         let mut entropy = fs::File::open("/dev/urandom")?;
         for _ in 0..4 {
             let mut random = [0_u8; 16];
@@ -134,9 +136,9 @@ fn staged_entry_metadata(stage: &fs::File) -> io::Result<fs::Metadata> {
     unsafe extern "C" {
         fn openat(dirfd: c_int, pathname: *const c_char, flags: c_int) -> c_int;
     }
-    const O_PATH: c_int = 0o10000000;
-    const O_NOFOLLOW: c_int = 0o400000;
-    const O_CLOEXEC: c_int = 0o2000000;
+    const O_PATH: c_int = libc::O_PATH;
+    const O_NOFOLLOW: c_int = libc::O_NOFOLLOW;
+    const O_CLOEXEC: c_int = libc::O_CLOEXEC;
     let name = CString::new("entry").map_err(io::Error::other)?;
     let fd = unsafe {
         openat(
@@ -315,7 +317,7 @@ impl Browser {
             // and pinning the original root directory.
             fs::OpenOptions::new()
                 .read(true)
-                .custom_flags(0o200000 | 0o400000 | 0o2000000)
+                .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
                 .open(&root)
                 .map_err(|e| err("pin browser root", e))?
         };
@@ -424,9 +426,9 @@ impl Browser {
         unsafe extern "C" {
             fn openat(dirfd: c_int, pathname: *const c_char, flags: c_int) -> c_int;
         }
-        const O_DIRECTORY: c_int = 0o200000;
-        const O_NOFOLLOW: c_int = 0o400000;
-        const O_CLOEXEC: c_int = 0o2000000;
+        const O_DIRECTORY: c_int = libc::O_DIRECTORY;
+        const O_NOFOLLOW: c_int = libc::O_NOFOLLOW;
+        const O_CLOEXEC: c_int = libc::O_CLOEXEC;
         let relative = self
             .current
             .strip_prefix(&self.root)
@@ -462,9 +464,9 @@ impl Browser {
         unsafe extern "C" {
             fn openat(dirfd: c_int, pathname: *const c_char, flags: c_int) -> c_int;
         }
-        const O_PATH: c_int = 0o10000000;
-        const O_NOFOLLOW: c_int = 0o400000;
-        const O_CLOEXEC: c_int = 0o2000000;
+        const O_PATH: c_int = libc::O_PATH;
+        const O_NOFOLLOW: c_int = libc::O_NOFOLLOW;
+        const O_CLOEXEC: c_int = libc::O_CLOEXEC;
         let parent = self.anchored_parent()?;
         let visible_parent =
             fs::symlink_metadata(&self.current).map_err(|e| err("check current dir", e))?;

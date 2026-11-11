@@ -4,6 +4,24 @@ All notable user-visible changes to NuraLoumi are recorded here.
 
 ## [Unreleased]
 
+### ARMv7 on-device file-manager smoke fix (2026-11-11)
+
+- Fixed an immediate `nuraloumi-files --live` startup failure on the ASUS
+  SL101 (`pin browser root: Invalid argument (os error 22)`). Linux's
+  `O_DIRECTORY` and `O_NOFOLLOW` flag values differ on ARM versus x86; the
+  root pin and all secure `openat` mutation operations now use
+  architecture-correct `libc::O_*` constants rather than hard-coded octal
+  values. Directory/root symlink protections remain enabled.
+- Verified the patched standalone ARMv7/musl executable on physical .106:
+  ELF EABI5, hard-float VFPv3-D16, no missing runtime libraries,
+  startup in the existing Sway/Wayland session, and 61 seconds of
+  uninterrupted operation without logged errors (host-only source change;
+  the pinned 0.0.4-dev.2 CI release on-device is **not** modified).
+- Companion smoke: the existing image viewer, NetSurf GTK3 browser and
+  software-rendered Wayland Cog/WPE browser each remained alive for 61 seconds.
+  Cog loaded `about:blank` successfully; no interaction/pixel qualification
+  is implied.
+
 ### CI repair
 
 - The ARMv7 musl file-manager mutation path invokes the Linux
