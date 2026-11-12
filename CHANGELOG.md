@@ -4,6 +4,35 @@ All notable user-visible changes to NuraLoumi are recorded here.
 
 ## [Unreleased]
 
+## [0.0.4-dev.3] - 2026-11-12
+
+Development prerelease only; physical SL101 audio/video **not qualified**.
+
+### Added
+
+- `nuraloumi-player` Cairo/Wayland touch + keyboard media UI with an integrated
+  bounded file browser, ordered persistent playlist and add/remove/reorder,
+  play/pause/stop/previous/next, ±10 s seek, volume and mute controls.
+- `nuraloumi-playerd` native stateful GStreamer playbin audio service, not
+  remote playerctl control or a shell pipeline; owner-only bounded Unix JSON
+  IPC, 0600 socket, timeouts, error/EOS handling and atomic 0600 playlist
+  persistence. Existing `nuraloumi-music` remote control is unchanged.
+- CI package manifest and Debian/Alpine native package inclusion of both
+  new binaries plus a MIME-aware `nuraloumi-player.desktop` handler.
+
+### Hardware qualification pending
+
+- Host-only GStreamer fakesink WAV test reaches EOS and 16 new player unit
+  tests pass; a fakesink does not establish physically audible sound.
+- All video remains explicitly `UNSUPPORTED_GPU`: upstream .106 Grate/GstGL
+  crashes before GLMemory negotiation at `dri2_setup_screen` SIGSEGV 0x4000.
+  No fake video frames, CPU video rendering or KMS shortcut is provided.
+- Native ARMv7 artifacts, CI provenance, on-device ALSA/Pulse/PipeWire output,
+  pixels/FPS, MPRIS export and panel pinning still require qualification or
+  implementation. No deployment or production promotion is implied.
+
+See `docs/qualification/NURALOUMI-PLAYER-E2E.md` for evidence and gates.
+
 ### CI repair
 
 - The ARMv7 musl file-manager mutation path invokes the Linux
