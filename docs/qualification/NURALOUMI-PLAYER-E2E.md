@@ -1,0 +1,151 @@
+# NuraLoumi native media player: prerelease qualification (2026-11-12)
+
+## Provenance and scope
+
+Development prerelease `0.0.4-dev.3`. The new `nuraloumi-player`
+Cairo/wl_shm client and `nuraloumi-playerd` native GStreamer service are
+separate from the pre-existing `nuraloumi-music` MPRIS *remote* controller.
+
+The player service is implemented in
+`crates/nuraloumi-shell/src/player_engine.rs`; UI and file browser in
+`crates/nuraloumi-shell/src/bin/player.rs`; socket service in `playerd.rs`.
+They are packaged with the XDG MIME handler
+`packaging/applications/nuraloumi-player.desktop`. The file manager and
+XDG Open With chooser can discover this handler once the CI package has been
+installed. Existing panel integration and an external MPRIS *export* service
+are **not yet implemented** and should not be claimed.
+
+The engine dynamically loads GStreamer 1.x and invokes the playbin C API
+directly. This is a stateful native playback implementation, **not**
+`gst-launch` or another player's MPRIS interface. Normal playbin audio
+output uses its negotiated audio sink; the actual sink/device must be
+observed on the physical target before claiming audio E2E. There is no
+explicit sink-selection UI or physical audio-output proof yet.
+
+The explicit playbin flag is AUDIO=2 (video=1 is never enabled).
+`gpu_status` reads **UNSUPPORTED_GPU**. It cannot paint video frames,
+claim GPU play, or fall back to software video. A supported video file may
+have its audio stream played, but there is **no qualified video surface**.
+The shell's controls remain drawable without a valid EGL display.
+
+## Bounded control plane
+
+- Owner-only Unix domain socket at `$XDG_RUNTIME_DIR/nuraloumi-player.sock`;
+  mode 0600, single newline-delimited JSON command per connection,
+  at most 4096 request bytes, 300 ms I/O deadlines, non-blocking accept
+  and bounded GStreamer event bus draining.
+- Commands: `status`, `add`, `remove`, `move`, `select`,
+  `play`, `pause`, `toggle`, `stop`, `next`, `previous`,
+  `seek`, `volume`, `mute` with typed parameters.
+- Playlist: at most 256 tracks, absolute canonical existing UTF-8 files
+  when adding, no shell interpolation, file URI percent encoding, atomic
+  per-user JSON state under XDG state home (0600).
+- UI keyboard: arrows/Enter, Space play/pause, O open, +/- volume,
+  Q/Escape close or return. Pointer/touch and playlist paging supported.
+- No process, DRM ownership, KMS session, kernel module, Mesa or compositor
+  modification is performed by the player.
+
+### Host-only reproducible checks
+
+```sh
+cargo fmt --all -- --check
+cargo test --workspace --offline
+cargo clippy --workspace --all-targets --offline -- -D warnings
+python3 -m unittest scripts/test_package_integrity.py scripts/test_native_packages_ci.py scripts/test_musl_ci.py scripts/test_debian_armhf_ci.py -v
+
+# Debug-only synthetic GStreamer EOS test: NOT sound-output evidence.
+mkdir -p target/player-smoke-runtime target/player-smoke-state
+ffmpeg -hide_banner -loglevel error -f lavfi -i sine=frequency=440:duration=2 -c:a pcm_s16le -y target/player-smoke.wav
+NURALOUMI_PLAYER_TEST_FAKESINK=1 XDG_RUNTIME_DIR="$PWD/target/player-smoke-runtime" XDG_STATE_HOME="$PWD/target/player-smoke-state" target/debug/nuraloumi-player --open "$PWD/target/player-smoke.wav" --status
+# Status should transition Playing -> Stopped after EOS (with no audio output).
+```
+
+**Host observation:** the generated 2-second WAV was accepted by real
+GStreamer playbin with debug fakesink, initially `Playing`, and after 3 s
+`Stopped`, with no bus error. This proves no physical audio, hardware GPU
+frames, ARMv7 compatibility, or Sway touch success.
+
+### Independent physical .106 audio-path preflight — 2026-11-12
+
+A separate coordinator test on the actual Alpine/musl SL101 .106 verified
+the **system audio route**, not this prerelease player binary.
+The device reported 100% battery with AC attached, kernel
+7.0.1-postmarketos-grate-dmavde1, unchanged Sway PID 1436, and
+PipeWire 1.6.9 (PulseAudio compatibility protocol).
+SSH requires the existing desktop SSH agent; remote interactive shells
+must set XDG_RUNTIME_DIR=/run/sl101-desktop-user and
+PULSE_SERVER=unix:/run/sl101-desktop-user/pulse/native rather than using
+the login SSH runtime. Its default hardware sink is
+alsa_output.platform-sound.pro-output-0 (WM8903 via card0).
+GStreamer 1.28.7 plugins include pulsesink, alsasink, pipewiresink,
+avdec_aac, audioconvert, audioresample, volume and level.
+
+Actual media: /home/user/tds3e1-main.mp4, 854x480 H.264 + 44.1 kHz
+stereo AAC, 17.25 seconds. The **audio-only graph**
+filesrc/qtdemux/audio queue/aacparse/avdec_aac/audioconvert/
+audioresample/volume(0.07)/pulsesink reached PLAYING,
+registered an active PipeWire sink input on the WM8903 sink,
+reached a natural GStreamer EOS and exited **0**.
+This is a real hardware ALSA/PipeWire sink-path test but **not** a
+human ear confirmation, NOT a test of the new player binary's
+GStreamer FFI and not a proof of pause/seek/playlist reliability.
+Evidence is in the coordinator's SL101 project ignored work tree:
+work/sl101-nura-media-20261112/aac-pulse-hardware.log and
+work/sl101-nura-media-20261112/aac-pulse-eos-hardware.log.
+
+Independent source review of the new player found no obvious
+shell injection, unsafe GPU fallback or source-file conflict with the
+current panel workers. Host merged-main tests passed
+cargo fmt --check, cargo test --workspace --offline, strict
+cargo clippy --workspace --all-targets --offline -- -D warnings
+and 22 packaging Python tests. This is **conditional experimental
+audio-only readiness**, not physical player E2E or independent
+release/signing approval. The CI main-only trust rule and the ephemeral
+Alpine development APK signature are intentionally unchanged.
+
+## GPU fault and acceptance blocker
+
+Upstream `sl101_linux/docs/sl101-gpu-video-hardware-20261112.md`
+reports from physical Alpine .106 (kernel
+`7.0.1-postmarketos-grate-dmavde1`): GStreamer VDE H.264 -> DMA-BUF
+-> GLMemory -> glimagesink **SIGSEGV 0x4000** at
+`dri2_setup_screen`; 64x64 synthetic GL fixture reproduced failure even
+without VDE. `eglinfo` and mpv GLES2 contexts did work, but mpv render
+failed at `gl_FragCoord` and `TEX TEMP[2]` shader limitations; VLC
+could not create a Wayland EGL vout parent. None produced accepted video pixels.
+This code does not repair the EGL/VDE path, so GPU video remains blocked.
+
+Only a separate verified VDE -> GLES2 renderer with DMA-BUF import or
+explicitly labeled CPU-upload/GPU-colorspace-conversion, supported Grate
+shader compilation, hardware maps, pixel oracle and WayVNC capture,
+measured FPS and A/V sync can clear `UNSUPPORTED_GPU`.
+CPU colorspace conversion or wl_shm video is not an acceptable substitute.
+
+## CI / deployment rules
+
+Both `.github/workflows/sl101-musl-armv7.yml` and
+`.github/workflows/sl101-debian-armhf.yml` discover **all** Cargo binary
+targets; the new player binaries and desktop file must be present in
+the exact SHA-pinned CI staging manifest, native packages and ELF audit.
+The Alpine ARMv7 musl dynamic GStreamer libraries/plugins are runtime
+dependencies **not** automatically included by static Cargo ELF link audit.
+Validate the real runtime against the device's exact musl GStreamer plugins.
+An ephemeral-CI APK signing key is not device trust enrollment.
+
+No deployment is authorized from host-built binaries. Before staging an
+exact-commit CI package on .106: check GitHub Actions, provenance hashes,
+artifact ABI, hostname, kernel/DTB, SD/eMMC CID, AC/battery, active Sway and
+rollback backup; do not alter boot, kernel, Mesa, browser or desktop.
+Keep .100 untouched while power and GPU prerequisites remain unmet.
+Real audio acceptance requires MP3/AAC/OGG/Opus where supported, sink name
+and device inspection, pause/seek/volume/EOS/long-liveness plus human ear
+confirmation if needed. Real GPU video acceptance is independent.
+No production activation on any failed gate.
+
+## Rollback
+
+Do not replace the installed shell. For a staged inactive package, remove
+only the exact staging directory after recording the checksums; leave the
+current NuraLoumi binaries and Sway intact. For running development
+services, close the menu and stop only the user-owned
+`nuraloumi-playerd` after saving its playlist; never kill the compositor.
