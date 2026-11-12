@@ -18,6 +18,10 @@ All notable user-visible changes to NuraLoumi are recorded here.
   cover invalid playlist transitions and multiple touch identifiers.
 - The XDG desktop handler advertises audio MIME types only, avoiding an
   unqualified claim to be the default application for video content.
+- The player daemon and client enforce total monotonic per-message read
+  deadlines (300/600 ms) so slow-trickle sockets cannot indefinitely block
+  playback control. Socket cleanup preserves a replacement daemon socket by
+  comparing inode and device identity; stale-socket unlink revalidates identity.
 - These fixes remain an **unreleased source review**. They do not establish
   CI main-branch provenance, on-device player operation or GPU video support.
 
