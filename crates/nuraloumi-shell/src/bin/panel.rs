@@ -335,6 +335,18 @@ fn update_panel_touch_press(pressed: &mut Option<String>, current: Option<&str>)
     }
 }
 
+fn begin_panel_touch(presses: &mut BTreeMap<i32, Option<String>>, id: i32, target: Option<String>) {
+    if presses.is_empty() {
+        presses.insert(id, target);
+    } else {
+        // A multi-finger gesture is not a succession of independent clicks.
+        for pressed in presses.values_mut() {
+            *pressed = None;
+        }
+        presses.insert(id, None);
+    }
+}
+
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
@@ -875,6 +887,24 @@ fn run_live(
                         },
                     );
                 }
+                WaylandEvent::TouchDown { id, x, y }
+                    if active_menu
+                        .as_ref()
+                        .is_some_and(|menu| event.surface == menu.dismiss_surface) =>
+                {
+                    // Backdrop destruction may prevent a matching TouchUp.
+                    // Treat it as a completed tap before it can be retargeted
+                    // into an emulated pointer click on the exposed panel.
+                    synthetic_pointer.down(
+                        *id,
+                        TouchPosition {
+                            surface: event.surface,
+                            x: *x,
+                            y: *y,
+                        },
+                    );
+                    synthetic_pointer.up(*id, std::time::Instant::now());
+                }
                 WaylandEvent::TouchMotion { id, x, y } => {
                     synthetic_pointer.motion(
                         *id,
@@ -889,8 +919,13 @@ fn run_live(
                     synthetic_pointer.up(*id, std::time::Instant::now());
                 }
                 WaylandEvent::TouchCancel { ids } => synthetic_pointer.cancel(ids),
-                WaylandEvent::PointerButton { x, y, pressed, .. }
-                    if synthetic_pointer.suppress_pointer(
+                WaylandEvent::PointerButton {
+                    x,
+                    y,
+                    pressed,
+                    button,
+                } if *button == 0x110
+                    && synthetic_pointer.suppress_pointer(
                         TouchPosition {
                             surface: event.surface,
                             x: *x,
@@ -960,7 +995,7 @@ fn run_live(
                             .as_ref()
                             .and_then(|scene| scene.hit_test(x, y))
                             .map(str::to_owned);
-                        panel_touch_press.insert(id, hit);
+                        begin_panel_touch(&mut panel_touch_press, id, hit);
                     }
                     WaylandEvent::TouchMotion { id, x, y } => {
                         if let Some(pressed) = panel_touch_press.get_mut(&id) {
@@ -3362,6 +3397,33 @@ mod tests {
             Some("window-a"),
             Some("window-b")
         ));
+
+        let mut fingers = BTreeMap::new();
+        begin_panel_touch(&mut fingers, 1, Some("apps".to_owned()));
+        begin_panel_touch(&mut fingers, 2, Some("apps".to_owned()));
+        assert!(fingers.values().all(Option::is_none));
+    }
+
+    #[test]
+    fn backdrop_touch_survives_surface_destruction_without_reopening_menu() {
+        use std::time::{Duration, Instant};
+        let now = Instant::now();
+        let mut guard = SyntheticPointerFilter::default();
+        let backdrop = TouchPosition {
+            surface: Some(SurfaceId(2)),
+            x: 40.0,
+            y: 40.0,
+        };
+        let panel = TouchPosition {
+            surface: Some(SurfaceId(1)),
+            x: 40.0,
+            y: 8.0,
+        };
+        guard.down(11, backdrop);
+        guard.up(11, now);
+        assert!(guard.suppress_pointer(panel, true, now + Duration::from_millis(20)));
+        assert!(guard.suppress_pointer(panel, false, now + Duration::from_millis(21)));
+        assert!(!guard.suppress_pointer(panel, true, now + Duration::from_millis(200)));
     }
 
     #[test]
