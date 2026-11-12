@@ -1,10 +1,10 @@
 use nuraloumi_core::{DARK_THEME, LIGHT_THEME};
 use nuraloumi_providers::{
-    ActionProvider, ActionResult, ApplicationProvider, ApplicationSnapshot, AudioAction,
-    AudioProvider, BacklightAction, BacklightProvider, BluetoothAction, BluetoothProvider, Health,
-    MediaAction, MediaProvider, NetworkAction, NetworkProvider, NotificationAction,
-    NotificationProvider, ProbeSnapshot, ProcessProvider, ProcessSnapshot, Provider, SessionAction,
-    SessionProvider, SnapshotMeta, SystemCommandRunner,
+    session::OwnedDesktopSession, ActionProvider, ActionResult, ApplicationProvider,
+    ApplicationSnapshot, AudioAction, AudioProvider, BacklightAction, BacklightProvider,
+    BluetoothAction, BluetoothProvider, Health, MediaAction, MediaProvider, NetworkAction,
+    NetworkProvider, NotificationAction, NotificationProvider, ProbeSnapshot, ProcessProvider,
+    ProcessSnapshot, Provider, SessionAction, SessionProvider, SnapshotMeta, SystemCommandRunner,
 };
 use nuraloumi_render_cairo::{
     CairoRenderer, Color, HitRegion as RenderHitRegion, PaintNode, Point, Rect, RenderOptions,
@@ -489,7 +489,7 @@ fn wait_for_panel_events(backend: &mut WaylandBackend, ipc: &IpcRuntime) -> Resu
     loop {
         // SAFETY: two initialized C-compatible pollfd values are valid for
         // the duration of this synchronous call; neither FD is closed here.
-        let result = unsafe { poll(fds.as_mut_ptr(), fds.len(), -1) };
+        let result = unsafe { poll(fds.as_mut_ptr(), fds.len(), 1000) };
         if result >= 0 {
             break;
         }
@@ -721,6 +721,8 @@ fn run_live(
         std::thread::JoinHandle<Result<ThumbnailHelperReport, String>>,
     > = None;
     let mut thumbnail_probe_started = false;
+    let mut last_status_probe = std::time::Instant::now();
+    let mut periodic_status_probe: Option<std::thread::JoinHandle<ProbeSnapshot>> = None;
 
     if let Some(family) = initial_family {
         active_menu = Some(open_live_menu(
@@ -1575,6 +1577,43 @@ fn run_live(
             }
             panel_scene = None;
             eprintln!("nuraloumi-panel-provider-refresh: initial live snapshot ready");
+        }
+
+        // Periodic snapshots are asynchronous: neither the 2-second clock helper
+        // nor the battery/network probes may stall Wayland input handling.
+        if policy.execute_provider_actions
+            && live_provider_probe.is_none()
+            && periodic_status_probe.is_none()
+            && last_status_probe.elapsed() >= std::time::Duration::from_secs(30)
+        {
+            last_status_probe = std::time::Instant::now();
+            periodic_status_probe = Some(std::thread::spawn(ProbeSnapshot::live));
+        }
+        if periodic_status_probe
+            .as_ref()
+            .is_some_and(|probe| probe.is_finished())
+        {
+            let probe = periodic_status_probe
+                .take()
+                .expect("finished periodic probe exists")
+                .join()
+                .map_err(|_| "periodic provider probe panicked".to_owned())?;
+            refresh_probe_snapshot(&mut snapshot, &probe, policy.enable_renderer_switch);
+            if let Some(menu) = active_menu.as_mut() {
+                menu.shell.refresh_family(menu.family, &snapshot)?;
+                if let Some(geometry) = menu.geometry {
+                    menu.scene = Some(render_menu_and_present(
+                        &mut backend,
+                        menu.surface,
+                        &renderer,
+                        &menu.shell,
+                        &snapshot,
+                        &config,
+                        (geometry, None),
+                    )?);
+                }
+            }
+            panel_scene = None;
         }
 
         if thumbnail_probe
@@ -3281,6 +3320,18 @@ fn execute_live_action(
                 .execute(SessionAction::PowerOff)
                 .map_err(|error| error.to_string())?
         }
+        MenuAction::Activate { id } if id == "system.end_desktop" => {
+            let mut provider = SessionProvider::new(SystemCommandRunner)
+                .with_destructive_actions(enable_power_actions);
+            if enable_power_actions {
+                let owned =
+                    OwnedDesktopSession::from_environment().map_err(|error| error.to_string())?;
+                provider = provider.with_desktop_session(owned);
+            }
+            provider
+                .execute(SessionAction::EndDesktop)
+                .map_err(|error| error.to_string())?
+        }
         _ => return Ok(None),
     };
     Ok(Some(result))
@@ -3698,6 +3749,21 @@ mod tests {
         .expect("poweroff should map to a session action");
         assert!(!result.executed);
         assert!(result.dry_run);
+    }
+
+    #[test]
+    fn logout_is_dry_run_without_power_permission() {
+        let result = execute_live_action(
+            &MenuAction::Activate {
+                id: "system.end_desktop".into(),
+            },
+            false,
+            false,
+        )
+        .expect("logout dry run should not inspect local sessions")
+        .expect("logout must be wired to SessionProvider");
+        assert!(result.dry_run);
+        assert!(!result.executed);
     }
 
     #[test]

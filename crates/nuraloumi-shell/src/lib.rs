@@ -2302,7 +2302,12 @@ pub fn build_power_menu(snapshot: &FixtureSnapshot) -> MenuModel {
                 "Safety",
                 "Power actions require confirmation; provider defaults remain dry-run",
             ),
-            confirm_action("power.suspend", "Suspend", "system.suspend"),
+            confirm_action(
+                "power.end_desktop",
+                "Log out to console (VT1)…",
+                "system.end_desktop",
+            ),
+            confirm_action("power.suspend", "Sleep (qualified only)…", "system.suspend"),
             confirm_action("power.restart", "Restart…", "system.restart"),
             confirm_action("power.poweroff", "Power off…", "system.poweroff"),
         ],
