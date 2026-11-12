@@ -4,6 +4,56 @@ All notable user-visible changes to NuraLoumi are recorded here.
 
 ## [Unreleased]
 
+### Media player release-review hardening (2026-11-12)
+
+- Failed track selection, playlist removal or next-track transitions now roll
+  back the in-memory playlist before saving, preventing a failed playback
+  attempt from silently persisting an unintended queue or selected track.
+  Failed GStreamer state transitions no longer leave a stale Playing label.
+- GStreamer dynamic library handles are released on failed initialization or
+  symbol resolution; initialization errors are freed and reported, and a
+  missing GLib error message does not become an invalid C string pointer.
+- Media UI touch input now cancels multi-finger gestures, honors matching
+  touch releases, and handles compositor touch cancellation. Regression tests
+  cover invalid playlist transitions and multiple touch identifiers.
+- The XDG desktop handler advertises audio MIME types only, avoiding an
+  unqualified claim to be the default application for video content.
+- The player daemon and client enforce total monotonic per-message read
+  deadlines (300/600 ms) so slow-trickle sockets cannot indefinitely block
+  playback control. Socket cleanup preserves a replacement daemon socket by
+  comparing inode and device identity; stale-socket unlink revalidates identity.
+- These fixes remain an **unreleased source review**. They do not establish
+  CI main-branch provenance, on-device player operation or GPU video support.
+
+## [0.0.4-dev.3] - 2026-11-12
+
+Development prerelease only; physical SL101 audio/video **not qualified**.
+
+### Added
+
+- `nuraloumi-player` Cairo/Wayland touch + keyboard media UI with an integrated
+  bounded file browser, ordered persistent playlist and add/remove/reorder,
+  play/pause/stop/previous/next, ±10 s seek, volume and mute controls.
+- `nuraloumi-playerd` native stateful GStreamer playbin audio service, not
+  remote playerctl control or a shell pipeline; owner-only bounded Unix JSON
+  IPC, 0600 socket, timeouts, error/EOS handling and atomic 0600 playlist
+  persistence. Existing `nuraloumi-music` remote control is unchanged.
+- CI package manifest and Debian/Alpine native package inclusion of both
+  new binaries plus a MIME-aware `nuraloumi-player.desktop` handler.
+
+### Hardware qualification pending
+
+- Host-only GStreamer fakesink WAV test reaches EOS and 16 new player unit
+  tests pass; a fakesink does not establish physically audible sound.
+- All video remains explicitly `UNSUPPORTED_GPU`: upstream .106 Grate/GstGL
+  crashes before GLMemory negotiation at `dri2_setup_screen` SIGSEGV 0x4000.
+  No fake video frames, CPU video rendering or KMS shortcut is provided.
+- Native ARMv7 artifacts, CI provenance, on-device ALSA/Pulse/PipeWire output,
+  pixels/FPS, MPRIS export and panel pinning still require qualification or
+  implementation. No deployment or production promotion is implied.
+
+See `docs/qualification/NURALOUMI-PLAYER-E2E.md` for evidence and gates.
+
 ### CI repair
 
 - The ARMv7 musl file-manager mutation path invokes the Linux

@@ -17,7 +17,7 @@ source="nuraloumi-stage.tar.gz"
 builddir="$srcdir/bundle"
 
 package() {
-    install -d "$pkgdir/usr/bin" "$pkgdir/usr/share/nuraloumi" "$pkgdir/usr/share/nuraloumi/qualification" \
+    install -d "$pkgdir/usr/bin" "$pkgdir/usr/share/applications" "$pkgdir/usr/share/nuraloumi" "$pkgdir/usr/share/nuraloumi/qualification" \
         "$pkgdir/usr/share/licenses/nuraloumi"
     local binary count=0
     for binary in "$builddir"/bin/nuraloumi-*; do
@@ -26,6 +26,7 @@ package() {
         count=$((count+1))
     done
     [ "$count" -ge 4 ] || return 1
+    install -m644 "$builddir/share/applications/nuraloumi-player.desktop" "$pkgdir/usr/share/applications/nuraloumi-player.desktop"
     install -m644 "$builddir/config/nuraloumi.toml.example" "$pkgdir/usr/share/nuraloumi/nuraloumi.toml.example"
     install -m644 "$builddir/share/nuraloumi/qualification/README.md" "$pkgdir/usr/share/nuraloumi/qualification/README.md"
     install -m644 "$builddir/MANIFEST.txt" "$pkgdir/usr/share/nuraloumi/CI-MANIFEST.txt"
