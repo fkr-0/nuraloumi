@@ -1,12 +1,12 @@
 [Desktop Entry]
 Type=Application
 Name=NuraLoumi Media Player
-GenericName=Audio and Video Player
-Comment=Native audio player with explicit hardware-video qualification
+GenericName=Audio Player
+Comment=Native audio playback (GPU video not supported)
 Exec=nuraloumi-player %f
 TryExec=nuraloumi-player
 Icon=multimedia-player
 Terminal=false
-Categories=AudioVideo;Audio;Video;Player;
-MimeType=audio/mpeg;audio/mp4;audio/aac;audio/ogg;audio/opus;audio/flac;audio/x-wav;video/mp4;video/x-matroska;video/webm;video/quicktime;video/x-msvideo;
+Categories=AudioVideo;Audio;Player;
+MimeType=audio/mpeg;audio/mp4;audio/aac;audio/ogg;audio/opus;audio/flac;audio/x-wav;
 StartupNotify=false

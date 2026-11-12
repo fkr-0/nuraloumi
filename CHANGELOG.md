@@ -4,6 +4,23 @@ All notable user-visible changes to NuraLoumi are recorded here.
 
 ## [Unreleased]
 
+### Media player release-review hardening (2026-11-12)
+
+- Failed track selection, playlist removal or next-track transitions now roll
+  back the in-memory playlist before saving, preventing a failed playback
+  attempt from silently persisting an unintended queue or selected track.
+  Failed GStreamer state transitions no longer leave a stale Playing label.
+- GStreamer dynamic library handles are released on failed initialization or
+  symbol resolution; initialization errors are freed and reported, and a
+  missing GLib error message does not become an invalid C string pointer.
+- Media UI touch input now cancels multi-finger gestures, honors matching
+  touch releases, and handles compositor touch cancellation. Regression tests
+  cover invalid playlist transitions and multiple touch identifiers.
+- The XDG desktop handler advertises audio MIME types only, avoiding an
+  unqualified claim to be the default application for video content.
+- These fixes remain an **unreleased source review**. They do not establish
+  CI main-branch provenance, on-device player operation or GPU video support.
+
 ## [0.0.4-dev.3] - 2026-11-12
 
 Development prerelease only; physical SL101 audio/video **not qualified**.
