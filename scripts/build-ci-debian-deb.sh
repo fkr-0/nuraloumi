@@ -22,7 +22,7 @@ out=$(cd "$out" && pwd)
 tmp=$(mktemp -d "$out/.deb-stage.XXXXXXXX")
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 pkg="$tmp/pkg"
-install -d "$pkg/DEBIAN" "$pkg/usr/bin" "$pkg/usr/share/nuraloumi" "$pkg/usr/share/doc/nuraloumi"
+install -d "$pkg/DEBIAN" "$pkg/usr/bin" "$pkg/usr/share/applications" "$pkg/usr/share/nuraloumi" "$pkg/usr/share/doc/nuraloumi"
 count=0
 for executable in "$stage"/bin/nuraloumi-*; do
   test -f "$executable" && test -x "$executable"
@@ -30,6 +30,7 @@ for executable in "$stage"/bin/nuraloumi-*; do
   count=$((count+1))
 done
 test "$count" -ge 4
+install -m 0644 "$stage/share/applications/nuraloumi-player.desktop" "$pkg/usr/share/applications/nuraloumi-player.desktop"
 install -m 0644 "$stage/config/nuraloumi.toml.example" "$pkg/usr/share/nuraloumi/nuraloumi.toml.example"
 install -d "$pkg/usr/share/nuraloumi/qualification"
 install -m 0644 "$stage/share/nuraloumi/qualification/README.md" "$pkg/usr/share/nuraloumi/qualification/README.md"
