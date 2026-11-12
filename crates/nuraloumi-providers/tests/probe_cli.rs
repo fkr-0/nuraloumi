@@ -72,7 +72,7 @@ fn destructive_enablement_alone_keeps_suspend_dry_run() {
 }
 
 #[test]
-fn explicit_unsafe_suspend_uses_exact_loginctl_fixture() {
+fn explicit_unsafe_suspend_alone_cannot_override_freeze_qualification() {
     let fixture = temporary_fixture("suspend-explicit");
     fs::write(fixture.join("commands/001.argv"), "loginctl\nsuspend\n")
         .expect("write exact loginctl fixture");
@@ -95,7 +95,7 @@ fn explicit_unsafe_suspend_uses_exact_loginctl_fixture() {
     assert!(output.status.success(), "{:?}", output);
     assert_eq!(
         String::from_utf8(output.stdout).expect("probe stdout UTF-8"),
-        "{\"executed\":true,\"dry_run\":false,\"message\":\"session action submitted\"}\n"
+        "{\"executed\":false,\"dry_run\":true,\"message\":\"sleep requires independently qualified freeze-only logind capability\"}\n"
     );
 }
 

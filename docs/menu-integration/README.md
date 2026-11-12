@@ -70,12 +70,23 @@ Reboot and poweroff require:
 
     nuraloumi-menu --live --family power --enable-power-actions
 
-Suspend is deliberately stricter. It remains a provider dry-run unless a second
-explicit opt-in is supplied:
+Suspend is deliberately stricter: `--enable-unsafe-suspend` is an explicit
+intent flag, **not** qualification. Even when both power flags are supplied,
+Suspend remains a dry-run until a *separately qualified* freeze-only logind
+policy is available. The current live shell does not grant that capability:
 
-    nuraloumi-menu --live --family power       --enable-power-actions --enable-unsafe-suspend
+    nuraloumi-menu --live --family power --enable-power-actions --enable-unsafe-suspend
+    # still dry-run; does not enter mem/deep
 
-The SessionProvider submits enabled actions through `loginctl`, not
+End desktop → VT1 uses a separate, confirmed `system.end_desktop` action.
+It requires a local active Wayland logind session, matching owner/VT,
+an owned Sway IPC socket, and an explicit live power capability. It sends
+`exit` only to that verified Sway socket, then requests `chvt 1`; it never
+terminates other logind sessions, SSH processes or unrelated compositor PIDs.
+If ownership or the current VT cannot be proven, the action fails closed.
+A fixture runner can test exact argv without performing either action.
+
+The SessionProvider submits enabled power actions through `loginctl`, not
 `systemctl` or direct writes to `/sys/power/state`. This works with
 systemd-logind and elogind and, critically, leaves sleep inhibitors in the
 control path. NuraLoumi never invokes `rtcwake` or passes

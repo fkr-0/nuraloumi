@@ -1,4 +1,5 @@
 use nuraloumi_core::{DARK_THEME, LIGHT_THEME};
+use nuraloumi_providers::session::OwnedDesktopSession;
 use nuraloumi_providers::{
     ActionProvider, ActionResult, ApplicationProvider, AudioAction, AudioProvider, BacklightAction,
     BacklightProvider, BluetoothAction, BluetoothProvider, Health, MediaAction, MediaProvider,
@@ -1332,6 +1333,18 @@ fn execute_live_action(
             SessionProvider::new(SystemCommandRunner)
                 .with_destructive_actions(enable_power_actions)
                 .execute(SessionAction::PowerOff)
+                .map_err(|error| error.to_string())?
+        }
+        MenuAction::Activate { id } if id == "system.end_desktop" => {
+            let mut provider = SessionProvider::new(SystemCommandRunner)
+                .with_destructive_actions(enable_power_actions);
+            if enable_power_actions {
+                let owned =
+                    OwnedDesktopSession::from_environment().map_err(|error| error.to_string())?;
+                provider = provider.with_desktop_session(owned);
+            }
+            provider
+                .execute(SessionAction::EndDesktop)
                 .map_err(|error| error.to_string())?
         }
         _ => return Ok(None),
