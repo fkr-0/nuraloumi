@@ -67,6 +67,24 @@ class DebianArmhfCiTests(unittest.TestCase):
         ):
             self.assertIn(part, self.ci)
 
+    def test_disassembly_gate_is_enforced_for_sized_neon_and_upper_d(self):
+        import re
+
+        self.assertIn('sh scripts/inspect-armv7-elf.sh "$bin" | tee -a "$audit"', self.ci)
+        line = next(line for line in self.ci.splitlines()
+                    if 'llvm-objdump -d "$bin" | grep -Ei' in line)
+        pattern = line.split("grep -Ei '", 1)[1].split("'", 1)[0]
+        pattern = pattern.replace("[[:space:]]", r"\s")
+        for instruction in ("vld1.32 {d0}, [r0]", "vst2.8 {d0, d1}, [r0]",
+                            "vdup.8 d0, r0", "vqadd.s16 d0, d0, d1"):
+            self.assertIsNotNone(re.search(pattern, "  " + instruction + " ", re.I),
+                                 instruction)
+        self.assertIsNone(re.search(pattern, "  vldr d15, [pc, #4] ", re.I))
+        inspector = (ROOT / "scripts/inspect-armv7-elf.sh").read_text()
+        self.assertIn("UPPER_VFP_RE=", inspector)
+        self.assertIn("(sdiv|udiv)", inspector)
+        self.assertIn("possible-NEON-opcode-or-q-register", inspector)
+
     def test_no_device_or_service_access(self):
         for forbidden in (
             "ssh ", "scp ", "192.168.", "systemctl ", "reboot", "sudo ",

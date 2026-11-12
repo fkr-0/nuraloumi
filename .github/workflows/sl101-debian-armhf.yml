@@ -19,6 +19,7 @@ on:
       - scripts/test_native_packages_ci.py
       - packaging/debian/**
       - scripts/test_debian_armhf_ci.py
+      - scripts/inspect-armv7-elf.sh
 
 permissions:
   contents: read
@@ -62,7 +63,7 @@ jobs:
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
             ca-certificates curl git python3 pkgconf file make gcc g++ \
-            gcc-arm-linux-gnueabihf binutils-arm-linux-gnueabihf \
+            gcc-arm-linux-gnueabihf binutils-arm-linux-gnueabihf llvm \
             libc6-dev-armhf-cross \
             libcairo2-dev:armhf libwayland-dev:armhf libxkbcommon-dev:armhf
           cat > /tmp/sl101-armhf-linker <<'LINKER'
@@ -142,6 +143,15 @@ jobs:
             readelf -A "$bin" | grep -Eq 'Tag_FP_arch: VFPv3-D16'
             if readelf -A "$bin" | grep -Eiq 'Advanced_SIMD|NEON'; then
               echo "FAIL: NEON attributes in $bin" >&2
+              exit 1
+            fi
+            # Check decoded ARM/Thumb instructions, not just ELF attributes.
+            # The shared helper guards D16-D31, NEON and sdiv/udiv.
+            sh scripts/inspect-armv7-elf.sh "$bin" | tee -a "$audit"
+            # Also reject sized vector opcodes (e.g. vld1.32) explicitly.
+            # Do not use grep -q with pipefail: early close can mask a match.
+            if llvm-objdump -d "$bin" | grep -Ei '[[:space:]](vld[1-4]|vst[1-4]|vdup|vext|vtbl|vtbx|vzip|vuzp|vtrn|vrev|vswp|vq[a-z0-9.]+)(\.[a-z0-9.]+)?[[:space:]]' >/dev/null; then
+              echo "FAIL: NEON opcode in $bin" >&2
               exit 1
             fi
             readelf -l "$bin" | grep -Fq '/lib/ld-linux-armhf.so.3'
