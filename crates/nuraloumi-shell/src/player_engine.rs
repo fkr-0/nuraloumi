@@ -309,7 +309,12 @@ impl Player {
         }
         let volume = self.playlist.volume;
         let muted = self.playlist.muted;
-        self.gst()?.open(&path, volume, muted)?;
+        if let Err(error) = self.gst()?.open(&path, volume, muted) {
+            // open() may already have set the prior pipeline to NULL; do not
+            // report Playing if a new URI or state transition was rejected.
+            self.stop();
+            return Err(error);
+        }
         self.position_ms = 0;
         self.duration_ms = 0;
         self.status = "Playing".into();
@@ -317,8 +322,13 @@ impl Player {
     }
     pub fn command(&mut self, command: Command) -> Reply {
         let is_mutating = !matches!(command, Command::Status);
+        // The playback backend can reject a selected file after the playlist
+        // has changed. A failed command must not persist a partly-applied
+        // track addition, removal, reordering or selection.
+        let previous_playlist = self.playlist.clone();
         let result = self.apply(command);
         if let Err(e) = &result {
+            self.playlist = previous_playlist;
             self.last_error = Some(e.clone());
             if self.status != "Playing" && self.status != "Paused" {
                 self.status = "Error".into();
@@ -496,6 +506,14 @@ type FnUnref = unsafe extern "C" fn(*mut c_void);
 type FnSet = unsafe extern "C" fn(*mut c_void, *const c_char, ...);
 type FnParseError = unsafe extern "C" fn(*mut c_void, *mut *mut GError, *mut *mut c_char);
 type FnFree = unsafe extern "C" fn(*mut c_void);
+struct DlHandles(Vec<*mut c_void>);
+impl Drop for DlHandles {
+    fn drop(&mut self) {
+        for &handle in self.0.iter().rev() {
+            unsafe { libc::dlclose(handle) };
+        }
+    }
+}
 #[repr(C)]
 struct GError {
     domain: u32,
@@ -521,7 +539,7 @@ struct GstMessageHeader {
     kind: u32,
 }
 struct GstFns {
-    handles: Vec<*mut c_void>,
+    handles: DlHandles,
     factory: FnFactory,
     bus: FnBus,
     set_state: FnSetState,
@@ -539,7 +557,9 @@ struct GstFns {
 impl GstFns {
     fn open() -> Result<Self, String> {
         unsafe {
-            let mut handles = Vec::new();
+            // RAII also closes successfully loaded DSOs when symbol lookup or
+            // gst_init_check fails, instead of leaking on repeated attempts.
+            let mut handles = DlHandles(Vec::new());
             for name in [
                 "libglib-2.0.so.0",
                 "libgobject-2.0.so.0",
@@ -548,20 +568,32 @@ impl GstFns {
                 let n = CString::new(name).map_err(|e| e.to_string())?;
                 let ptr = libc::dlopen(n.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL);
                 if ptr.is_null() {
-                    for h in handles {
-                        libc::dlclose(h);
-                    }
                     return Err(format!("missing runtime library {name}"));
                 }
-                handles.push(ptr);
+                handles.0.push(ptr);
             }
-            let gst = handles[2];
-            let obj = handles[1];
-            let glib = handles[0];
+            let gst = handles.0[2];
+            let obj = handles.0[1];
+            let glib = handles.0[0];
             let init: FnInit = symbol(gst, "gst_init_check")?;
             let mut error: *mut c_void = ptr::null_mut();
             if init(ptr::null_mut(), ptr::null_mut(), &mut error) == 0 {
-                return Err("GStreamer initialization failed".into());
+                let message = if error.is_null() {
+                    "GStreamer initialization failed".into()
+                } else {
+                    let err = error.cast::<GError>();
+                    let message = if (*err).message.is_null() {
+                        "GStreamer initialization failed".into()
+                    } else {
+                        CStr::from_ptr((*err).message)
+                            .to_string_lossy()
+                            .into_owned()
+                    };
+                    let free: FnFree = symbol(glib, "g_error_free")?;
+                    free(error);
+                    message
+                };
+                return Err(message);
             }
             Ok(Self {
                 factory: symbol(gst, "gst_element_factory_make")?,
@@ -589,15 +621,6 @@ unsafe fn symbol<T: Copy>(handle: *mut c_void, name: &str) -> Result<T, String> 
         return Err(format!("GStreamer runtime symbol missing: {name}"));
     }
     Ok(std::mem::transmute_copy(&addr))
-}
-impl Drop for GstFns {
-    fn drop(&mut self) {
-        for &h in self.handles.iter().rev() {
-            unsafe {
-                libc::dlclose(h);
-            }
-        }
-    }
 }
 enum GstPoll {
     Continue { position_ms: u64, duration_ms: u64 },
@@ -733,7 +756,7 @@ impl GstAudio {
                 unsafe {
                     (self.api.parse_error)(m, &mut gerr, &mut debug);
                 }
-                let message = if gerr.is_null() {
+                let message = if gerr.is_null() || unsafe { (*gerr).message.is_null() } {
                     "unknown GStreamer error".to_string()
                 } else {
                     unsafe {
@@ -852,6 +875,27 @@ mod tests {
         let saved = load_playlist(&path).unwrap();
         assert_eq!(saved.volume, 0.6);
         assert!(saved.muted);
+        let _ = fs::remove_file(path);
+    }
+    #[test]
+    fn failed_track_selection_restores_previous_playlist() {
+        let path = temp_file("failed-track-state.json");
+        let original = Playlist {
+            tracks: vec![
+                format!("/nonexistent-nuraloumi-{}-a.mp3", std::process::id()),
+                format!("/nonexistent-nuraloumi-{}-b.mp3", std::process::id()),
+            ],
+            current: Some(0),
+            ..Playlist::default()
+        };
+        save_playlist(&path, &original).unwrap();
+        let mut player = Player::open(path.clone()).unwrap();
+        assert!(!player.command(Command::Next).ok);
+        assert_eq!(player.playlist, original);
+        assert_eq!(load_playlist(&path).unwrap(), original);
+        assert!(!player.command(Command::Remove { index: 0 }).ok);
+        assert_eq!(player.playlist, original);
+        assert_eq!(load_playlist(&path).unwrap(), original);
         let _ = fs::remove_file(path);
     }
     #[test]

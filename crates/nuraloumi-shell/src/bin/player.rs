@@ -17,6 +17,7 @@ use nuraloumi_wayland::{
 };
 use player_engine::{Command, Playlist, Reply, Snapshot};
 use std::{
+    collections::HashSet,
     env, fs,
     io::{BufRead, BufReader, Read, Write},
     os::unix::net::UnixStream,
@@ -145,6 +146,47 @@ fn basename(path: &str) -> String {
 }
 fn time_string(ms: u64) -> String {
     format!("{}:{:02}", ms / 60_000, (ms / 1000) % 60)
+}
+// Activate a touch target only after its *own* release, with every other
+// contact lifted. A second finger cancels the gesture rather than changing
+// the selected target (or activating a row when an unrelated finger lifts).
+#[derive(Default)]
+struct TouchActivation {
+    contacts: HashSet<i32>,
+    primary: Option<(i32, Option<String>, f64, f64)>,
+}
+impl TouchActivation {
+    fn down(&mut self, id: i32, at: Option<String>, x: f64, y: f64) {
+        self.contacts.insert(id);
+        if self.contacts.len() == 1 {
+            self.primary = Some((id, at, x, y));
+        } else {
+            self.primary = None;
+        }
+    }
+    fn motion(&mut self, id: i32, x: f64, y: f64) {
+        if let Some((active, _, current_x, current_y)) = &mut self.primary {
+            if *active == id {
+                *current_x = x;
+                *current_y = y;
+            }
+        }
+    }
+    fn up(&mut self, id: i32) -> Option<(String, f64, f64)> {
+        if !self.contacts.remove(&id) || !self.contacts.is_empty() {
+            self.primary = None;
+            return None;
+        }
+        self.primary
+            .take()
+            .and_then(|(down_id, at, x, y)| (down_id == id).then_some((at?, x, y)))
+    }
+    fn cancel(&mut self, ids: &[i32]) {
+        for id in ids {
+            self.contacts.remove(id);
+        }
+        self.primary = None;
+    }
 }
 #[derive(Clone)]
 enum Page {
@@ -647,7 +689,7 @@ fn run(config: ShellConfig, mut snap: Snapshot, fixture_mode: bool) -> Result<()
     let mut state = MenuState::new(&menu);
     let mut scene: Option<Scene> = None;
     let mut pointer_down: Option<String> = None;
-    let mut touch: Option<(i32, Option<String>, f64, f64)> = None;
+    let mut touch = TouchActivation::default();
     let mut dirty = true;
     let mut ticks = 0u64;
     loop {
@@ -785,26 +827,22 @@ fn run(config: ShellConfig, mut snap: Snapshot, fixture_mode: bool) -> Result<()
                         .as_ref()
                         .and_then(|s| s.hit_test(x, y))
                         .map(str::to_owned);
-                    touch = Some((id, at, x, y));
+                    touch.down(id, at, x, y);
                 }
                 WaylandEvent::TouchMotion { id, x, y } => {
-                    if let Some((active, _, current_x, current_y)) = &mut touch {
-                        if *active == id {
-                            *current_x = x;
-                            *current_y = y;
-                        }
-                    }
+                    touch.motion(id, x, y);
                 }
                 WaylandEvent::TouchUp { id } => {
-                    if let Some((down_id, selected, x, y)) = touch.take() {
+                    if let Some((selected, x, y)) = touch.up(id) {
                         let released = scene.as_ref().and_then(|s| s.hit_test(x, y));
-                        if down_id == id && selected.is_some() && selected.as_deref() == released {
+                        if Some(selected.as_str()) == released {
                             requested = released
                                 .and_then(|key| menu.item_by_id(key))
                                 .and_then(|item| item.action.clone());
                         }
                     }
                 }
+                WaylandEvent::TouchCancel { ids } => touch.cancel(&ids),
                 _ => {}
             }
             if let Some(action) = requested {
@@ -926,5 +964,21 @@ mod tests {
         assert!(m.item_by_id("open").is_some());
         assert!(m.item_by_id("gpu").is_some());
         assert!(m.item_by_id("stop").is_some());
+    }
+    #[test]
+    fn touch_activation_requires_matching_single_contact_release() {
+        let mut touch = TouchActivation::default();
+        touch.down(1, Some("play".into()), 10.0, 11.0);
+        touch.motion(1, 12.0, 13.0);
+        assert_eq!(touch.up(1), Some(("play".into(), 12.0, 13.0)));
+        touch.down(1, Some("play".into()), 10.0, 11.0);
+        touch.down(2, Some("stop".into()), 20.0, 21.0);
+        assert_eq!(touch.up(1), None);
+        assert_eq!(touch.up(2), None);
+        touch.down(3, Some("stop".into()), 20.0, 21.0);
+        touch.cancel(&[3]);
+        assert_eq!(touch.up(3), None);
+        touch.down(4, Some("mute".into()), 1.0, 2.0);
+        assert_eq!(touch.up(4), Some(("mute".into(), 1.0, 2.0)));
     }
 }
