@@ -19,11 +19,11 @@ use player_engine::{Command, Playlist, Reply, Snapshot};
 use std::{
     collections::HashSet,
     env, fs,
-    io::{BufRead, BufReader, Read, Write},
+    io::{Read, Write},
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
     process::{Command as ProcCommand, ExitCode, Stdio},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 #[derive(Default)]
@@ -60,6 +60,37 @@ fn sockpath() -> Result<PathBuf, String> {
     }
     Ok(path)
 }
+// A read timeout is per syscall, not a total deadline. Bound the whole
+// response so a slow or malfunctioning daemon cannot freeze the menu.
+fn read_response(mut connection: &UnixStream) -> Result<Reply, String> {
+    const MAX_RESPONSE: usize = 256 * 1024;
+    let deadline = Instant::now() + Duration::from_millis(600);
+    let mut response = Vec::new();
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err("playback response deadline exceeded".into());
+        }
+        connection
+            .set_read_timeout(Some(remaining))
+            .map_err(|e| e.to_string())?;
+        let mut chunk = [0u8; 1024];
+        let count = connection.read(&mut chunk).map_err(|e| e.to_string())?;
+        if count == 0 {
+            return Err("unterminated playback response".into());
+        }
+        let delimiter = chunk[..count].iter().position(|byte| *byte == b'\n');
+        let consumed = delimiter.map_or(count, |index| index + 1);
+        if response.len() + consumed > MAX_RESPONSE {
+            return Err("oversized playback response".into());
+        }
+        response.extend_from_slice(&chunk[..consumed]);
+        if delimiter.is_some() {
+            return serde_json::from_slice(&response)
+                .map_err(|e| format!("invalid playback response: {e}"));
+        }
+    }
+}
 fn send(cmd: &Command, spawn_daemon: bool) -> Result<Reply, String> {
     let path = sockpath()?;
     let mut connection = UnixStream::connect(&path);
@@ -83,9 +114,6 @@ fn send(cmd: &Command, spawn_daemon: bool) -> Result<Reply, String> {
     }
     let mut connection = connection.map_err(|e| format!("playback service unavailable: {e}"))?;
     connection
-        .set_read_timeout(Some(Duration::from_millis(600)))
-        .map_err(|e| e.to_string())?;
-    connection
         .set_write_timeout(Some(Duration::from_millis(600)))
         .map_err(|e| e.to_string())?;
     let mut request = serde_json::to_vec(cmd).map_err(|e| e.to_string())?;
@@ -94,12 +122,7 @@ fn send(cmd: &Command, spawn_daemon: bool) -> Result<Reply, String> {
     }
     request.push(b'\n');
     connection.write_all(&request).map_err(|e| e.to_string())?;
-    let mut response = Vec::new();
-    BufReader::new(connection)
-        .take(256 * 1024)
-        .read_until(b'\n', &mut response)
-        .map_err(|e| e.to_string())?;
-    serde_json::from_slice(&response).map_err(|e| format!("invalid playback response: {e}"))
+    read_response(&connection)
 }
 fn offline(error: Option<String>) -> Snapshot {
     Snapshot {
@@ -980,5 +1003,20 @@ mod tests {
         assert_eq!(touch.up(3), None);
         touch.down(4, Some("mute".into()), 1.0, 2.0);
         assert_eq!(touch.up(4), Some(("mute".into(), 1.0, 2.0)));
+    }
+    #[test]
+    fn slow_response_does_not_extend_client_deadline() {
+        let (mut writer, reader) = UnixStream::pair().unwrap();
+        let sender = std::thread::spawn(move || {
+            let _ = writer.write_all(b"{");
+            std::thread::sleep(Duration::from_millis(350));
+            let _ = writer.write_all(b"\"");
+            std::thread::sleep(Duration::from_millis(350));
+            let _ = writer.write_all(b"ok");
+        });
+        let start = Instant::now();
+        assert!(read_response(&reader).is_err());
+        assert!(start.elapsed() < Duration::from_secs(2));
+        sender.join().unwrap();
     }
 }
