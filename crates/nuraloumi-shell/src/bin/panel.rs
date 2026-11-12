@@ -244,6 +244,97 @@ struct PanelSearchView {
     focused: bool,
 }
 
+// Wayland's pointer protocol does not expose whether a click was synthesized
+// from a touchscreen. Correlate position, surface and a short time window
+// instead of globally disabling the physical mouse after a touch.
+#[derive(Clone, Copy, Debug)]
+struct TouchPosition {
+    surface: Option<SurfaceId>,
+    x: f64,
+    y: f64,
+}
+
+impl TouchPosition {
+    fn near(self, other: Self) -> bool {
+        self.surface == other.surface
+            && (self.x - other.x).powi(2) + (self.y - other.y).powi(2) <= 28.0_f64.powi(2)
+    }
+}
+
+#[derive(Default)]
+struct SyntheticPointerFilter {
+    touches: BTreeMap<i32, TouchPosition>,
+    last_release: Option<(std::time::Instant, TouchPosition)>,
+    suppressed_press: Option<TouchPosition>,
+}
+
+impl SyntheticPointerFilter {
+    fn down(&mut self, id: i32, position: TouchPosition) {
+        self.touches.insert(id, position);
+    }
+
+    fn motion(&mut self, id: i32, position: TouchPosition) {
+        if let Some(previous) = self.touches.get_mut(&id) {
+            *previous = position;
+        }
+    }
+
+    fn up(&mut self, id: i32, now: std::time::Instant) {
+        if let Some(position) = self.touches.remove(&id) {
+            self.last_release = Some((now, position));
+        }
+    }
+
+    fn cancel(&mut self, ids: &[i32]) {
+        for id in ids {
+            self.touches.remove(id);
+        }
+    }
+
+    fn suppress_pointer(
+        &mut self,
+        position: TouchPosition,
+        pressed: bool,
+        now: std::time::Instant,
+    ) -> bool {
+        const DUPLICATE_WINDOW: std::time::Duration = std::time::Duration::from_millis(180);
+        const CROSS_SURFACE_WINDOW: std::time::Duration = std::time::Duration::from_millis(80);
+
+        if !pressed {
+            return self
+                .suppressed_press
+                .take()
+                .is_some_and(|down| down.near(position));
+        }
+
+        // An input sequence can be retargeted to a just-created menu/backdrop
+        // after the touch released on the panel. Limit that special case to
+        // 80 ms; a real pointer elsewhere on the panel is never blocked.
+        let recent = self.last_release.is_some_and(|(at, touch)| {
+            let elapsed = now.saturating_duration_since(at);
+            elapsed <= DUPLICATE_WINDOW
+                && (touch.near(position)
+                    || (touch.surface != position.surface && elapsed <= CROSS_SURFACE_WINDOW))
+        });
+        let concurrent = self.touches.values().any(|touch| touch.near(position));
+        let synthetic = recent || concurrent;
+        self.suppressed_press = synthetic.then_some(position);
+        synthetic
+    }
+}
+
+fn should_dismiss_for_focus_change(previous: Option<&str>, current: Option<&str>) -> bool {
+    // The menu itself may steal keyboard focus, clearing the previous
+    // foreign-toplevel's focused flag without activating another window.
+    current.is_some() && current != previous
+}
+
+fn update_panel_touch_press(pressed: &mut Option<String>, current: Option<&str>) {
+    if pressed.as_deref() != current {
+        *pressed = None;
+    }
+}
+
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
@@ -603,6 +694,7 @@ fn run_live(
     let mut panel_scene: Option<Scene> = None;
     let mut panel_pointer_press: Option<String> = None;
     let mut panel_touch_press: BTreeMap<i32, Option<String>> = BTreeMap::new();
+    let mut synthetic_pointer = SyntheticPointerFilter::default();
     let mut active_menu: Option<LiveMenu> = None;
     let mut panel_first_frame_presented = false;
     let mut live_provider_probe = defer_live_provider_refresh.then(|| {
@@ -730,7 +822,8 @@ fn run_live(
                     .iter()
                     .find(|window| window.focused)
                     .map(|window| window.id.clone());
-                if new_focused != prev_focused {
+                if should_dismiss_for_focus_change(prev_focused.as_deref(), new_focused.as_deref())
+                {
                     close_live_menu(&mut backend, &mut panel, &mut active_menu)?;
                 }
             }
@@ -764,6 +857,53 @@ fn run_live(
         let events: Vec<_> = backend.drain_events().collect();
 
         for event in events {
+            // Correlate touch and synthesized pointer across panel, menu and
+            // backdrop surfaces before any of them can dispatch an action.
+            match &event.event {
+                WaylandEvent::TouchDown { id, x, y }
+                    if event.surface == Some(panel_surface)
+                        || active_menu
+                            .as_ref()
+                            .is_some_and(|menu| event.surface == Some(menu.surface)) =>
+                {
+                    synthetic_pointer.down(
+                        *id,
+                        TouchPosition {
+                            surface: event.surface,
+                            x: *x,
+                            y: *y,
+                        },
+                    );
+                }
+                WaylandEvent::TouchMotion { id, x, y } => {
+                    synthetic_pointer.motion(
+                        *id,
+                        TouchPosition {
+                            surface: event.surface,
+                            x: *x,
+                            y: *y,
+                        },
+                    );
+                }
+                WaylandEvent::TouchUp { id } => {
+                    synthetic_pointer.up(*id, std::time::Instant::now());
+                }
+                WaylandEvent::TouchCancel { ids } => synthetic_pointer.cancel(ids),
+                WaylandEvent::PointerButton { x, y, pressed, .. }
+                    if synthetic_pointer.suppress_pointer(
+                        TouchPosition {
+                            surface: event.surface,
+                            x: *x,
+                            y: *y,
+                        },
+                        *pressed,
+                        std::time::Instant::now(),
+                    ) =>
+                {
+                    continue;
+                }
+                _ => {}
+            }
             if event.surface == Some(panel_surface) {
                 match event.event {
                     WaylandEvent::Configure {
@@ -822,7 +962,15 @@ fn run_live(
                             .map(str::to_owned);
                         panel_touch_press.insert(id, hit);
                     }
+                    WaylandEvent::TouchMotion { id, x, y } => {
+                        if let Some(pressed) = panel_touch_press.get_mut(&id) {
+                            let current =
+                                panel_scene.as_ref().and_then(|scene| scene.hit_test(x, y));
+                            update_panel_touch_press(pressed, current);
+                        }
+                    }
                     WaylandEvent::TouchUp { id } => {
+                        panel_pointer_press = None;
                         if let Some(Some(item_id)) = panel_touch_press.remove(&id) {
                             activate_panel_target(
                                 &mut backend,
@@ -1854,19 +2002,92 @@ fn build_panel_scene(
             continue;
         }
 
+        if affordance.id == "power" && horizontal {
+            // Draw the power symbol with Cairo primitives: the SL101 does not
+            // need a font containing U+23FB to display its shutdown affordance.
+            let cx = rect.x + rect.width / 2.0;
+            let cy = rect.y + rect.height / 2.0;
+            for (x1, y1, x2, y2) in [
+                (0.0, -9.0, 0.0, 0.0),
+                (-5.0, -6.0, -8.0, -2.0),
+                (-8.0, -2.0, -8.0, 3.0),
+                (-8.0, 3.0, -5.0, 7.0),
+                (-5.0, 7.0, 0.0, 9.0),
+                (0.0, 9.0, 5.0, 7.0),
+                (5.0, 7.0, 8.0, 3.0),
+                (8.0, 3.0, 8.0, -2.0),
+                (8.0, -2.0, 5.0, -6.0),
+            ] {
+                paint.push(PaintNode::Line {
+                    from: Point::new(cx + x1, cy + y1),
+                    to: Point::new(cx + x2, cy + y2),
+                    width: 2.0,
+                    color: theme.primary_text,
+                });
+            }
+            paint.push(PaintNode::Line {
+                from: Point::new(rect.x, rect.y + 8.0),
+                to: Point::new(rect.x, rect.bottom() - 8.0),
+                width: 1.0,
+                color: theme.separator,
+            });
+            hits.push(RenderHitRegion {
+                item_id: affordance.id.clone(),
+                rect,
+                actionable: true,
+                enabled: true,
+                kind: RowKind::Action,
+            });
+            continue;
+        }
+
         let marker_color = state_color(affordance.state, theme);
-        let marker = if horizontal {
-            Rect::new(rect.x + 8.0, rect.y + rect.height / 2.0 - 2.5, 5.0, 5.0)
-        } else {
-            Rect::new(rect.x + 6.0, rect.y + 8.0, 5.0, 5.0)
-        };
-        paint.push(PaintNode::FillRect {
-            rect: marker,
-            color: marker_color,
-        });
+        if affordance.id == "battery" && horizontal {
+            // Real battery outline + terminal + proportional fill, rather
+            // than a generic status dot or a font-dependent Unicode block.
+            let (capacity, charging) = battery_presentation(affordance.value.as_deref());
+            let battery = Rect::new(rect.x + 8.0, rect.y + rect.height / 2.0 - 6.0, 20.0, 12.0);
+            paint.push(PaintNode::RoundedRect {
+                rect: battery,
+                radius: 0.0,
+                fill: nuraloumi_render_cairo::Fill::Solid(theme.raised),
+                stroke: Some((marker_color, 1.0)),
+            });
+            paint.push(PaintNode::FillRect {
+                rect: Rect::new(battery.right() + 1.0, battery.y + 4.0, 3.0, 4.0),
+                color: marker_color,
+            });
+            if let Some(capacity) = capacity {
+                paint.push(PaintNode::FillRect {
+                    rect: Rect::new(
+                        battery.x + 2.0,
+                        battery.y + 2.0,
+                        16.0 * f64::from(capacity) / 100.0,
+                        8.0,
+                    ),
+                    color: if charging { theme.accent } else { marker_color },
+                });
+            }
+        } else if affordance.id != "power" {
+            let marker = if horizontal {
+                Rect::new(rect.x + 8.0, rect.y + rect.height / 2.0 - 2.5, 5.0, 5.0)
+            } else {
+                Rect::new(rect.x + 6.0, rect.y + 8.0, 5.0, 5.0)
+            };
+            paint.push(PaintNode::FillRect {
+                rect: marker,
+                color: marker_color,
+            });
+        }
 
         let available = if horizontal {
-            (rect.width - 28.0).max(18.0)
+            (rect.width
+                - if affordance.id == "battery" {
+                    44.0
+                } else {
+                    28.0
+                })
+            .max(18.0)
         } else {
             (rect.width - 22.0).max(18.0)
         };
@@ -1877,7 +2098,17 @@ fn build_panel_scene(
             rect.y + rect.height / 2.0 + 4.0
         };
         paint.push(PaintNode::Text {
-            origin: Point::new(rect.x + 20.0, baseline),
+            origin: Point::new(
+                rect.x
+                    + if affordance.id == "battery" && horizontal {
+                        38.0
+                    } else if affordance.id == "power" && horizontal {
+                        18.0
+                    } else {
+                        20.0
+                    },
+                baseline,
+            ),
             text: label,
             style: TextStyle {
                 size: 12.0,
@@ -2011,7 +2242,8 @@ fn panel_affordance_rects(
             "audio" => Some(140.0),
             "battery" => Some(180.0),
             "renderer" => Some(96.0),
-            "clock" => Some(118.0),
+            "clock" => Some(84.0),
+            "power" => Some(48.0),
             _ => None,
         }
     }
@@ -2026,7 +2258,12 @@ fn panel_affordance_rects(
         .sum();
     let right_total: f64 = affordances
         .iter()
-        .filter(|item| matches!(item.id.as_str(), "audio" | "battery" | "renderer" | "clock"))
+        .filter(|item| {
+            matches!(
+                item.id.as_str(),
+                "audio" | "battery" | "renderer" | "clock" | "power"
+            )
+        })
         .filter_map(|item| width_for(&item.id))
         .sum();
     let center_available = panel_rect.width - left_total - right_total;
@@ -2079,9 +2316,55 @@ fn panel_search_view(active_menu: Option<&LiveMenu>) -> PanelSearchView {
         .unwrap_or_default()
 }
 
+fn battery_presentation(value: Option<&str>) -> (Option<u8>, bool) {
+    let Some((capacity, status)) = value.and_then(|value| value.split_once('%')) else {
+        return (None, false);
+    };
+    let percent = capacity
+        .trim()
+        .parse::<u8>()
+        .ok()
+        .filter(|percent| *percent <= 100);
+    let charging = status
+        .rsplit('·')
+        .next()
+        .is_some_and(|status| status.trim().eq_ignore_ascii_case("charging"));
+    (percent, charging)
+}
+
+fn compact_clock(value: Option<&str>) -> String {
+    let time = value.unwrap_or("").trim().as_bytes();
+    if time.len() >= 5
+        && time[0..2].iter().all(u8::is_ascii_digit)
+        && time[2] == b':'
+        && time[3..5].iter().all(u8::is_ascii_digit)
+        && time[0..2]
+            .iter()
+            .fold(0_u32, |n, digit| n * 10 + u32::from(*digit - b'0'))
+            < 24
+        && time[3..5]
+            .iter()
+            .fold(0_u32, |n, digit| n * 10 + u32::from(*digit - b'0'))
+            < 60
+    {
+        String::from_utf8(time[0..5].to_vec()).expect("validated ASCII time")
+    } else {
+        "--:--".to_owned()
+    }
+}
+
 fn panel_text(affordance: &PanelAffordance, available_width: f64) -> String {
-    let raw = match affordance.value.as_deref() {
-        Some(value) if !value.is_empty() => format!("{} · {value}", affordance.label),
+    let raw = match (affordance.id.as_str(), affordance.value.as_deref()) {
+        ("clock", value) => compact_clock(value),
+        ("battery", value) => {
+            let (percent, charging) = battery_presentation(value);
+            match percent {
+                Some(percent) if charging => format!("{percent}% ⚡"),
+                Some(percent) => format!("{percent}%"),
+                None => "--%".to_owned(),
+            }
+        }
+        (_, Some(value)) if !value.is_empty() => format!("{} · {value}", affordance.label),
         _ => affordance.label.clone(),
     };
     let approx_chars = (available_width / 7.0).floor().max(3.0) as usize;
@@ -2124,6 +2407,7 @@ fn panel_target_for_id(id: &str) -> Option<PanelTarget> {
             false,
             Some(ControlCenterTab::Media),
         ),
+        "power" => (MenuFamily::Power, false, None),
         "battery" | "renderer" | "clock" => (
             MenuFamily::ControlCenter,
             false,
@@ -3014,6 +3298,96 @@ mod tests {
     use super::*;
 
     #[test]
+    fn touch_then_synthetic_pointer_is_one_activation_but_real_mouse_still_works() {
+        use std::time::{Duration, Instant};
+        let mut guard = SyntheticPointerFilter::default();
+        let t0 = Instant::now();
+        let apps = TouchPosition {
+            surface: None,
+            x: 44.0,
+            y: 16.0,
+        };
+        let network = TouchPosition {
+            surface: None,
+            x: 250.0,
+            y: 16.0,
+        };
+        guard.down(7, apps);
+        // Spurious pointer press while the finger is still down.
+        assert!(guard.suppress_pointer(apps, true, t0));
+        assert!(guard.suppress_pointer(apps, false, t0 + Duration::from_millis(2)));
+        guard.up(7, t0 + Duration::from_millis(10));
+        // The emulated click following touch-up must not re-open the menu.
+        assert!(guard.suppress_pointer(apps, true, t0 + Duration::from_millis(20)));
+        assert!(guard.suppress_pointer(apps, false, t0 + Duration::from_millis(21)));
+        // Real mouse targeting a *different* widget works immediately.
+        assert!(!guard.suppress_pointer(network, true, t0 + Duration::from_millis(22)));
+        assert!(!guard.suppress_pointer(network, false, t0 + Duration::from_millis(23)));
+        // Even at the same spot the mouse works after the bounded window.
+        assert!(!guard.suppress_pointer(apps, true, t0 + Duration::from_millis(220)));
+        assert!(!guard.suppress_pointer(apps, false, t0 + Duration::from_millis(221)));
+    }
+
+    #[test]
+    fn touch_move_cancel_and_focus_transition_are_safe() {
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let apps = TouchPosition {
+            surface: None,
+            x: 44.0,
+            y: 16.0,
+        };
+        let mut guard = SyntheticPointerFilter::default();
+        guard.down(8, apps);
+        guard.motion(8, TouchPosition { x: 150.0, ..apps });
+        guard.up(8, t0);
+        assert!(!guard.suppress_pointer(apps, true, t0 + Duration::from_millis(10)));
+        guard.down(9, apps);
+        guard.cancel(&[9]);
+        assert!(!guard.suppress_pointer(apps, true, t0 + Duration::from_millis(210)));
+
+        let mut pressed = Some("apps".to_owned());
+        update_panel_touch_press(&mut pressed, Some("network"));
+        assert!(
+            pressed.is_none(),
+            "dragging away must cancel the original target"
+        );
+        assert!(!should_dismiss_for_focus_change(Some("window-a"), None));
+        assert!(!should_dismiss_for_focus_change(None, None));
+        assert!(!should_dismiss_for_focus_change(
+            Some("window-a"),
+            Some("window-a")
+        ));
+        assert!(should_dismiss_for_focus_change(
+            Some("window-a"),
+            Some("window-b")
+        ));
+    }
+
+    #[test]
+    fn battery_and_clock_present_compact_truthful_panel_values() {
+        let display = |id: &str, value: Option<&str>| {
+            panel_text(
+                &PanelAffordance {
+                    id: id.to_owned(),
+                    label: if id == "clock" { "Clock" } else { "Battery" }.to_owned(),
+                    value: value.map(str::to_owned),
+                    state: ValueState::Ready,
+                },
+                140.0,
+            )
+        };
+        assert_eq!(display("clock", Some("07:05 Europe/Berlin")), "07:05");
+        assert_eq!(display("clock", None), "--:--");
+        assert_eq!(display("clock", Some("nonsense")), "--:--");
+        assert_eq!(display("battery", Some("75% · Discharging")), "75%");
+        assert_eq!(display("battery", Some("75% · Charging")), "75% ⚡");
+        assert_eq!(display("battery", Some("75% · Not charging")), "75%");
+        assert_eq!(display("battery", None), "--%");
+        assert_eq!(battery_presentation(Some("101% · Charging")), (None, true));
+    }
+
+    #[test]
     fn live_provider_refresh_is_deferred_only_without_fixture_providers() {
         let live = Args {
             live: true,
@@ -3126,7 +3500,50 @@ mod tests {
         assert_eq!(search.rect.width, 360.0);
         assert!(network.rect.right() < search.rect.x);
         assert!(search.rect.right() < audio.rect.x);
-        assert_eq!(clock.rect.right(), scene.panel_rect.right());
+        let power = scene
+            .hits
+            .iter()
+            .find(|hit| hit.item_id == "power")
+            .unwrap();
+        assert!(clock.rect.right() <= power.rect.x);
+        assert_eq!(power.rect.right(), scene.panel_rect.right());
+    }
+
+    #[test]
+    fn battery_fill_and_power_icon_are_deterministic_and_font_independent() {
+        let mut snapshot = FixtureSnapshot::default();
+        snapshot.battery.value = Some("25% · Charging".to_owned());
+        snapshot.battery.state = ValueState::Ready;
+        let config = ShellConfig::default();
+        let scene = build_panel_scene(
+            &snapshot,
+            &config,
+            &PanelSearchView::default(),
+            (1280, config.panel_height, 1),
+            RenderTheme::dark(),
+        );
+        let battery = scene
+            .hits
+            .iter()
+            .find(|hit| hit.item_id == "battery")
+            .unwrap();
+        let power = scene
+            .hits
+            .iter()
+            .find(|hit| hit.item_id == "power")
+            .unwrap();
+        assert_eq!(power.rect.width, 48.0);
+        assert!(scene.paint.iter().any(|node| matches!(
+            node,
+            PaintNode::FillRect { rect, .. }
+                if (rect.width - 4.0).abs() < f64::EPSILON
+                    && rect.x >= battery.rect.x
+                    && rect.right() <= battery.rect.right()
+        )));
+        assert!(!scene.paint.iter().any(|node| matches!(
+            node,
+            PaintNode::Text { text, .. } if text == "⏻"
+        )));
     }
 
     #[test]

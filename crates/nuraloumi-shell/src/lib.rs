@@ -3213,6 +3213,12 @@ pub fn panel_affordances(snapshot: &FixtureSnapshot) -> Vec<PanelAffordance> {
             value: snapshot.clock.value.clone(),
             state: snapshot.clock.state,
         },
+        PanelAffordance {
+            id: "power".into(),
+            label: "⏻".into(),
+            value: None,
+            state: ValueState::Ready,
+        },
     ]
 }
 
