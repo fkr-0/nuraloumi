@@ -28,6 +28,13 @@ When inspecting via SSH, `$XDG_SESSION_ID` refers to the SSH connection, **not**
 - `ssh -o BatchMode=yes -o ConnectTimeout=4 root@192.168.23.106`: `Permission denied (publickey,password,keyboard-interactive)`.
 - Therefore **neither device topology nor installed build/version is verified**. These addresses and root user originate from repository scripts, not a confirmed current inventory. Do not deploy or terminate a session based solely on this note.
 
+## Integration review flags (provider work-in-progress)
+
+- Real SL101 compositor may report `/proc/<pid>/comm` as `sl101-sway` (see `docs/qualification/RENDERER-SWAY-20261109.md`), not `sway`. Binding only to the literal `sway` name would reject the legitimate session; prove executable identity and path before accepting both variants.
+- On Alpine/OpenRC + seatd/elogind, `XDG_SESSION_ID`, `XDG_SESSION_TYPE=wayland`, `XDG_VTNR`, and `loginctl show-session` may not be populated like systemd's native sessions. A hard dependency must be reported as a compatibility gap, never silently treated as success.
+- Verify `swaymsg exit` followed by `chvt 1` is actually executable from the panel's lifetime: the compositor may tear down the Wayland client and session before the subsequent `chvt` command. A supervisor on a separate stable VT/session may be required.
+- Check the provider's `CommandLimits`, `CommandRunner`, `CommandSpec` imports and strict Clippy before promotion; in-flight work may be temporarily incomplete.
+
 ## Acceptance gates
 
 1. The power menu action is visible; confirmation rejects accidental touch, and Cancel has zero system effects.
