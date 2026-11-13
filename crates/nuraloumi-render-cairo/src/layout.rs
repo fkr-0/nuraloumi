@@ -227,7 +227,10 @@ pub fn layout_menu_scaled<M: MenuSource, T: TextMeasurer>(
         panel.x,
         panel.y + metrics.header_height + tab_height,
         panel.width,
-        (panel.height - metrics.header_height).max(0.0),
+        // Tabs occupy their own fixed strip above the scrollable content.
+        // Excluding them from the viewport also fixes max_offset and keeps
+        // the last actionable row inside the actual Wayland surface.
+        (panel.height - metrics.header_height - tab_height).max(0.0),
     );
 
     let max_offset = (content_height - body.height).max(0.0);
@@ -739,6 +742,54 @@ mod launcher_tab_tests {
             id: "launcher".into(),
             title: "Launcher".into(),
             items,
+        }
+    }
+
+    #[test]
+    fn launcher_last_action_scrolls_fully_into_clipped_body() {
+        let mut menu = launcher_fixture();
+        for index in 9..80 {
+            menu.items.push(MenuItemView::action(
+                format!("application.{index}"),
+                format!("App {index}"),
+            ));
+        }
+        for width in [448.0, 1264.0] {
+            let scene = layout_menu(
+                &menu,
+                &InteractionState {
+                    selected_id: Some("application.79".into()),
+                    ..InteractionState::default()
+                },
+                Viewport::new(width, 320.0, 1.0),
+                &Theme::dark(),
+                &ToyText,
+                false,
+            );
+            let body = scene.scroll.viewport;
+            let last = scene
+                .hits
+                .iter()
+                .find(|hit| hit.item_id == "application.79")
+                .expect("last action should be reachable");
+            assert!(scene.scroll.clipped);
+            assert!(scene.scroll.max_offset > 0.0);
+            assert!(body.y >= scene.panel_rect.y);
+            assert!(
+                body.bottom() <= scene.panel_rect.bottom() + f64::EPSILON,
+                "scroll body must fit inside menu: width {width}"
+            );
+            assert!(
+                last.rect.y >= body.y && last.rect.bottom() <= body.bottom() + f64::EPSILON,
+                "last selected action must remain fully tappable at width {width}"
+            );
+            assert_eq!(
+                scene.hit_test(
+                    last.rect.x + last.rect.width / 2.0,
+                    last.rect.y + last.rect.height / 2.0,
+                ),
+                Some("application.79"),
+            );
         }
     }
 

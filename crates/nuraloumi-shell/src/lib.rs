@@ -97,12 +97,27 @@ pub enum Theme {
 
 /// Appearance palettes. Kept separate from the legacy two-value `theme`
 /// field so existing binaries and serialized configs remain compatible.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ThemePalette {
+    #[default]
     SlateDark,
     PaperLight,
     HighContrast,
+}
+
+/// The selected Appearance value is model state, not an ephemeral row style.
+/// It must survive generic provider/window refreshes of the open menu.
+fn selected_appearance_palette(menu: &MenuModel) -> Option<ThemePalette> {
+    if menu.id != "appearance" {
+        return None;
+    }
+    menu.items.iter().find_map(|item| {
+        (item.subtitle.as_deref() == Some("✓ Selected"))
+            .then(|| item.id.strip_prefix("appearance.palette."))
+            .flatten()
+            .and_then(|id| ThemePalette::parse(id).ok())
+    })
 }
 
 impl ThemePalette {
@@ -3092,6 +3107,10 @@ pub struct ShellState {
     pub menu: MenuModel,
     /// Canonical semantic navigation/search state from nuraloumi-core.
     pub state: MenuState,
+    /// The active palette for the Appearance menu, independent of provider
+    /// model updates. The caller still owns theme persistence and rendering.
+    #[serde(default)]
+    pub appearance_palette: ThemePalette,
     #[serde(default)]
     pub search_focused: bool,
     #[serde(default)]
@@ -3114,9 +3133,11 @@ impl ShellState {
     pub fn new(menu: MenuModel, reduced_motion: bool) -> Result<Self, String> {
         menu.validate().map_err(|error| error.to_string())?;
         let state = MenuState::new(&menu);
+        let appearance_palette = selected_appearance_palette(&menu).unwrap_or_default();
         Ok(Self {
             menu,
             state,
+            appearance_palette,
             search_focused: false,
             reduced_motion,
             closed: false,
@@ -3155,6 +3176,9 @@ impl ShellState {
 
     pub fn refresh_menu(&mut self, menu: MenuModel) -> Result<(), String> {
         menu.validate().map_err(|error| error.to_string())?;
+        if let Some(palette) = selected_appearance_palette(&menu) {
+            self.appearance_palette = palette;
+        }
         self.menu = menu;
         self.state.normalize(&self.menu);
         // Never carry confirmation authorization across a provider/model refresh.
@@ -3171,7 +3195,7 @@ impl ShellState {
             MenuFamily::Launcher => {
                 build_launcher_menu_for_query(snapshot, self.overview_mode, &self.state.query)
             }
-            MenuFamily::Appearance => build_appearance_menu(ThemePalette::SlateDark),
+            MenuFamily::Appearance => build_appearance_menu(self.appearance_palette),
             MenuFamily::ControlCenter => {
                 build_control_center_menu(snapshot, self.control_center_tab)
             }
@@ -4226,6 +4250,52 @@ after_one_shot_action = true
             "palette = \"high_contrast\"\n"
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn appearance_refresh_retains_actual_palette_instead_of_resetting_to_dark() {
+        let snapshot = FixtureSnapshot::default();
+        for palette in [
+            ThemePalette::SlateDark,
+            ThemePalette::PaperLight,
+            ThemePalette::HighContrast,
+        ] {
+            let mut shell = shell_with(build_appearance_menu(palette));
+            assert_eq!(shell.appearance_palette, palette);
+            for _ in 0..3 {
+                shell
+                    .refresh_family(MenuFamily::Appearance, &snapshot)
+                    .unwrap();
+                assert_eq!(shell.appearance_palette, palette);
+                let selected = shell
+                    .menu
+                    .items
+                    .iter()
+                    .filter(|item| item.subtitle.as_deref() == Some("✓ Selected"))
+                    .collect::<Vec<_>>();
+                assert_eq!(selected.len(), 1);
+                assert_eq!(
+                    selected[0].id,
+                    format!("appearance.palette.{}", palette.as_str())
+                );
+            }
+            // Switching the palette through the normal menu refresh updates
+            // the state used by subsequent generic provider refreshes.
+            let next = if palette == ThemePalette::PaperLight {
+                ThemePalette::HighContrast
+            } else {
+                ThemePalette::PaperLight
+            };
+            shell.refresh_menu(build_appearance_menu(next)).unwrap();
+            shell
+                .refresh_family(MenuFamily::Appearance, &snapshot)
+                .unwrap();
+            assert_eq!(shell.appearance_palette, next);
+            assert!(shell.menu.items.iter().any(|item| {
+                item.id == format!("appearance.palette.{}", next.as_str())
+                    && item.subtitle.as_deref() == Some("✓ Selected")
+            }));
+        }
     }
 
     #[test]
