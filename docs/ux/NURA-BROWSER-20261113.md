@@ -28,6 +28,13 @@ does not overwrite a partially typed value during status refresh. All
 URI authority/credential/port checks belong to the native engine validator.
 The control protocol is private to the same UID; pages cannot invoke it.
 
+Touch and pointer follow the shared NuraLoumi activation contract: a press
+never executes an action. Pointer release must hit the same actionable
+control, while touch release must match the original contact ID and must
+not have moved off that control. Touch cancel, pointer leave and a refreshed
+layout invalidate pending gestures. Disabled/selected tabs are not
+actionable. Keyboard Enter continues to invoke the selected action.
+
 The offline Rust browser fixture, software scenes and host WPE compilation
 are NOT evidence of SL101 touch input, real compositor positioning, valid
 graphics pixels, sandbox closure or a usable released browser.

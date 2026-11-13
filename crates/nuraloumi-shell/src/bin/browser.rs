@@ -206,15 +206,73 @@ fn draw(
 }
 
 fn hit(scene: &Option<Scene>, menu: &MenuModel, x: f64, y: f64) -> Option<MenuAction> {
-    menu.item_by_id(scene.as_ref()?.hit_test(x, y)?)?
-        .action
-        .clone()
+    let item = menu.item_by_id(scene.as_ref()?.hit_test(x, y)?)?;
+    item.is_actionable().then(|| item.action.clone()).flatten()
 }
 
 fn selected(menu: &MenuModel, state: &MenuState) -> Option<MenuAction> {
-    menu.item_by_id(state.selected_id.as_deref()?)?
-        .action
-        .clone()
+    let item = menu.item_by_id(state.selected_id.as_deref()?)?;
+    item.is_actionable().then(|| item.action.clone()).flatten()
+}
+
+/// NuraLoumi's global interaction contract: a press is never an activation.
+/// Releasing must match the same action; a moved/cancelled touch or a
+/// refreshed browser model invalidates the gesture. This prevents a finger
+/// dragging across the tab strip from opening/closing the wrong tab.
+#[derive(Default)]
+struct BrowserPress {
+    pointer: Option<MenuAction>,
+    touch: Option<(i32, MenuAction)>,
+}
+
+impl BrowserPress {
+    fn pointer_down(&mut self, action: Option<MenuAction>) {
+        self.pointer = action;
+    }
+
+    fn pointer_up(&mut self, released: Option<MenuAction>) -> Option<MenuAction> {
+        self.pointer
+            .take()
+            .filter(|pressed| Some(pressed) == released.as_ref())
+    }
+
+    fn touch_down(&mut self, id: i32, action: Option<MenuAction>) {
+        if self.touch.is_none() {
+            self.touch = action.map(|pressed| (id, pressed));
+        }
+    }
+
+    fn touch_motion(&mut self, id: i32, current: Option<MenuAction>) {
+        if self
+            .touch
+            .as_ref()
+            .is_some_and(|(active, pressed)| *active == id && Some(pressed) != current.as_ref())
+        {
+            self.touch = None;
+        }
+    }
+
+    fn touch_up(&mut self, id: i32) -> Option<MenuAction> {
+        if self.touch.as_ref().is_some_and(|(active, _)| *active == id) {
+            return self.touch.take().map(|(_, pressed)| pressed);
+        }
+        None
+    }
+
+    fn touch_cancel(&mut self, ids: &[i32]) {
+        if self
+            .touch
+            .as_ref()
+            .is_some_and(|(active, _)| ids.contains(active))
+        {
+            self.touch = None;
+        }
+    }
+
+    fn reset(&mut self) {
+        self.pointer = None;
+        self.touch = None;
+    }
 }
 
 /// Only poll while WebKit reports an outstanding load; otherwise block on
@@ -285,6 +343,7 @@ fn run(
     let mut state = MenuState::new(&menu);
     let mut scene = None;
     let mut geometry = None;
+    let mut press = BrowserPress::default();
     loop {
         let tick = dispatch_until_event(&mut backend, ui.page.is_loading)?;
         let mut redraw = tick;
@@ -353,10 +412,22 @@ fn run(
                     y,
                     pressed: true,
                     button: 0x110,
-                } => {
-                    action = hit(&scene, &menu, x, y);
+                } => press.pointer_down(hit(&scene, &menu, x, y)),
+                PlatformEvent::PointerButton {
+                    x,
+                    y,
+                    pressed: false,
+                    button: 0x110,
+                } => action = press.pointer_up(hit(&scene, &menu, x, y)),
+                PlatformEvent::PointerLeave => press.pointer = None,
+                PlatformEvent::TouchDown { id, x, y } => {
+                    press.touch_down(id, hit(&scene, &menu, x, y));
                 }
-                PlatformEvent::TouchDown { x, y, .. } => action = hit(&scene, &menu, x, y),
+                PlatformEvent::TouchMotion { id, x, y } => {
+                    press.touch_motion(id, hit(&scene, &menu, x, y));
+                }
+                PlatformEvent::TouchUp { id } => action = press.touch_up(id),
+                PlatformEvent::TouchCancel { ids } => press.touch_cancel(&ids),
                 _ => {}
             }
             if let Some(action) = action {
@@ -367,6 +438,9 @@ fn run(
             }
         }
         if redraw {
+            // A changed menu/layout can recycle an item ID while a touch is
+            // held; never apply the old gesture to that new snapshot.
+            press.reset();
             let keep = state.selected_id.clone();
             menu = ui.menu();
             state = MenuState::new(&menu);
@@ -426,6 +500,48 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tab_action(index: u8) -> MenuAction {
+        MenuAction::Custom {
+            kind: "browser.tab.select".into(),
+            payload: index.to_string(),
+        }
+    }
+
+    #[test]
+    fn browser_pointer_activates_only_on_matching_release() {
+        let first = tab_action(0);
+        let second = tab_action(1);
+        let mut press = BrowserPress::default();
+        press.pointer_down(Some(first.clone()));
+        assert_eq!(press.pointer_up(Some(second)), None);
+        press.pointer_down(Some(first.clone()));
+        assert_eq!(press.pointer_up(None), None);
+        press.pointer_down(Some(first.clone()));
+        assert_eq!(press.pointer_up(Some(first.clone())), Some(first));
+        assert_eq!(press.pointer_up(None), None);
+    }
+
+    #[test]
+    fn browser_touch_must_release_same_finger_without_leaving_action() {
+        let first = tab_action(0);
+        let second = tab_action(1);
+        let mut press = BrowserPress::default();
+        press.touch_down(7, Some(first.clone()));
+        assert_eq!(press.touch_up(8), None);
+        press.touch_motion(7, Some(second));
+        assert_eq!(press.touch_up(7), None);
+
+        press.touch_down(7, Some(first.clone()));
+        press.touch_cancel(&[8]);
+        assert_eq!(press.touch_up(7), Some(first.clone()));
+        press.touch_down(7, Some(first.clone()));
+        press.touch_cancel(&[7]);
+        assert_eq!(press.touch_up(7), None);
+        press.touch_down(7, Some(first.clone()));
+        press.reset();
+        assert_eq!(press.touch_up(7), None);
+    }
 
     #[test]
     fn fixture_allows_actual_tab_switch_and_bookmark_mutation() {
