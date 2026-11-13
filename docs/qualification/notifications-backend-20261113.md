@@ -59,6 +59,10 @@ not enable the opt-in for production/UI use.
 | `CARGO_TARGET_DIR=/tmp/nuraloumi-notifications-0c7114-target cargo test -p nuraloumi-providers --lib notifications --locked` | 12/12 PASS on current source (including action-label alignment) |
 | `cargo fmt --check` after concurrent UI edits | BLOCKED by unrelated `render-cairo/src/layout.rs`, `shell/src/lib.rs`, `shell/src/bin/panel.rs` changes |
 | `cargo clippy --workspace --all-targets --locked -- -D warnings` after concurrent UI edits | BLOCKED by unused imports in unrelated `shell/src/bin/panel.rs` |
+| `CARGO_TARGET_DIR=/tmp/nuraloumi-notifications-0c7114-target cargo test --workspace --locked` after concurrent UI edits | BLOCKED: missing `DARK_THEME` import in unrelated `shell/src/bin/menu.rs` test |
+| `CARGO_TARGET_DIR=/tmp/nuraloumi-notifications-0c7114-target cargo clippy -p nuraloumi-providers --all-targets --locked -- -D warnings` | PASS, exit 0 |
+
+Independent reviewer automation was attempted but the advertised review tools were unavailable (`Tool llm_review_code not found` and `Tool spawn_llm_agent not found`); the code has **not** received independent approval. A separate governed workflow review remains a release gate.
 
 The shared `target` directory was concurrently rebuilt: a later scoped test
 command unexpectedly executed only five older tests despite twelve current
