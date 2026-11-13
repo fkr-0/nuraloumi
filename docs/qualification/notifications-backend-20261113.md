@@ -210,6 +210,47 @@ Independent reviewer execution was attempted via both the managed OpenCode
 review preset and prompt-based LLM agent; their servers reported unavailable
 backends/tools. No independent approval or physical-device release is claimed.
 
+## P1 notification interaction and clear-budget hardening — 2026-11-13
+
+Implemented on top of commit c159b073 in the isolated P1 follow-up:
+
+1. The UI hides **Invoke** controls for Dunst historical actions because
+   the provider safely rejects the non-atomic operation by default.
+   Forged invoke activations fail closed. Backend errors now render a visible
+   notice instead of terminating the Wayland menu. Failed clear operations
+   report **Clear incomplete** and refresh the remaining history.
+2. Only primary pointer BTN_LEFT (0x110) and matching touch contacts can
+   activate on *release*. Crossing to another target, PointerLeave, cancel,
+   wrong touch ID, secondary buttons and multitouch are rejected. Outside
+   dismiss also waits for release; absent backdrop is explicitly guarded.
+3. ClearKnown and legacy Clear retain exact-ID removal, with at most 64
+   IDs. All subprocesses now share a single **3-second wall-clock deadline**,
+   passing the remaining budget as each subprocess timeout. The previous
+   64 * 3 seconds worst-case is removed. Partial clears remain possible
+   because Dunst does not expose atomic multi-ID removal.
+4. Live ClearKnown runs on one bounded worker thread and one-result channel.
+   Wayland polls only while a clear is in flight; idle still blocks without
+   periodic wakeups. Additional clear work is rejected while pending.
+5. An opt-in private D-Bus test now exercises the background worker as
+   well as the original confirmation-time ID UI/backend path. The test
+   verifies unrelated notifications remain after a clear operation.
+
+### Qualification evidence (isolated local worktree)
+
+| Check | Result |
+| --- | --- |
+| Notification-Center deterministic UI tests | **7 PASS**, plus 1 ignored-by-default integration test |
+| Backend notification tests | **16 PASS**, includes global-budget regression |
+| cargo test --workspace --locked | **PASS** |
+| cargo clippy --workspace --all-targets --locked -- -D warnings | **PASS** |
+| cargo fmt --check and git diff --check | **PASS** |
+| Private Xvfb + dbus-run-session + Dunst + notify-send + UI/provider test | **1 PASS**, verified isolated owner |
+
+Remaining: Numeric Dunst ID reuse after daemon restart is a separate
+P2 issue. The newly safe UI does not magically enable atomic historical
+action invocation. No complete Wayland pointer/touch pixel E2E, real SL101
+CPU/RSS, independent reviewer approval or hardware release is claimed.
+
 ## Remaining external qualification gates
 
 - In a controlled test bus with explicit Dunst config and lifecycle, prove

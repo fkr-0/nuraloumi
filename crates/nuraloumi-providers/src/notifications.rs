@@ -6,6 +6,8 @@ use std::time::{Duration, Instant};
 
 const SNAPSHOT_LIMITS: CommandLimits = CommandLimits::new(Duration::from_secs(2), 256 * 1024);
 const ACTION_LIMITS: CommandLimits = CommandLimits::new(Duration::from_secs(3), 32 * 1024);
+/// Total wall-clock budget for an entire multi-ID clear; not one timeout per ID.
+const CLEAR_BUDGET: Duration = Duration::from_secs(3);
 const MAX_NOTIFICATIONS: usize = 64;
 const MAX_ACTIONS: usize = 16;
 const MAX_JSON_DEPTH: usize = 32;
@@ -220,7 +222,18 @@ fn run_action<R: CommandRunner, I>(runner: &mut R, args: I) -> Result<(), Provid
 where
     I: IntoIterator<Item = String>,
 {
-    let output = runner.run(&CommandSpec::new("dunstctl").args(args), ACTION_LIMITS)?;
+    run_action_limited(runner, args, ACTION_LIMITS)
+}
+
+fn run_action_limited<R: CommandRunner, I>(
+    runner: &mut R,
+    args: I,
+    limits: CommandLimits,
+) -> Result<(), ProviderError>
+where
+    I: IntoIterator<Item = String>,
+{
+    let output = runner.run(&CommandSpec::new("dunstctl").args(args), limits)?;
     if output.status != 0 {
         return Err(ProviderError::backend(format!(
             "dunstctl action exited with status {}",
@@ -234,6 +247,15 @@ fn clear_exact_history<R: CommandRunner>(
     runner: &mut R,
     snapshot: &NotificationSnapshot,
     ids: &[u32],
+) -> Result<ActionResult, ProviderError> {
+    clear_exact_history_with_budget(runner, snapshot, ids, CLEAR_BUDGET)
+}
+
+fn clear_exact_history_with_budget<R: CommandRunner>(
+    runner: &mut R,
+    snapshot: &NotificationSnapshot,
+    ids: &[u32],
+    budget: Duration,
 ) -> Result<ActionResult, ProviderError> {
     if snapshot.meta.health != Health::Healthy {
         return Err(ProviderError::unavailable(
@@ -252,11 +274,26 @@ fn clear_exact_history<R: CommandRunner>(
         }
         require_notification(snapshot, *id)?;
     }
-    // Multiple exact-ID removals are bounded, but not an atomic transaction.
-    // A failed command stops immediately, so failures can produce a partial
-    // clear; importantly, unrelated notifications are not targeted.
+    // Per-command timeouts MUST share one deadline, otherwise 64 entries
+    // could block for 64 * 3 seconds. The caller runs this off the UI thread.
+    // Dunst does not offer an atomic specific-ID batch operation. If a command
+    // fails or the global budget runs out, report partial completion.
+    let started = Instant::now();
     for id in ids {
-        run_action(runner, ["history-rm".to_owned(), id.to_string()])?;
+        let remaining = budget.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return Err(ProviderError::timeout(
+                "notification clear deadline exhausted; history may be partially cleared",
+            ));
+        }
+        run_action_limited(
+            runner,
+            ["history-rm".to_owned(), id.to_string()],
+            CommandLimits::new(
+                remaining.min(ACTION_LIMITS.timeout),
+                ACTION_LIMITS.max_output_bytes,
+            ),
+        )?;
     }
     Ok(ActionResult::executed(format!(
         "removed {} known notification(s) from history",
@@ -1350,6 +1387,62 @@ mod tests {
                 .unwrap()
                 .executed
         );
+    }
+
+    #[derive(Default)]
+    struct SlowClearRunner {
+        calls: usize,
+        timeouts: Vec<Duration>,
+    }
+
+    impl CommandRunner for SlowClearRunner {
+        fn run(
+            &mut self,
+            spec: &CommandSpec,
+            limits: CommandLimits,
+        ) -> Result<CommandOutput, ProviderError> {
+            assert_eq!(spec.program, "dunstctl");
+            assert_eq!(spec.args.first().map(String::as_str), Some("history-rm"));
+            self.calls += 1;
+            self.timeouts.push(limits.timeout);
+            // Simulate a moderately slow IPC call. Each individual call
+            // completes, but the aggregate may not exceed the one deadline.
+            std::thread::sleep(Duration::from_millis(75));
+            Ok(output(""))
+        }
+    }
+
+    #[test]
+    fn clear_uses_one_global_deadline_not_64_individual_timeouts() {
+        let ids: Vec<u32> = (1..=8).collect();
+        let snapshot = NotificationSnapshot {
+            meta: SnapshotMeta::new(0, Health::Healthy, false, "dunstctl"),
+            backend: "dunstctl".into(),
+            notifications: ids
+                .iter()
+                .map(|id| NotificationEntry {
+                    id: *id,
+                    app: String::new(),
+                    summary: String::new(),
+                    body: String::new(),
+                    actions: Vec::new(),
+                    default_action: None,
+                })
+                .collect(),
+            issues: Vec::new(),
+        };
+        let mut runner = SlowClearRunner::default();
+        let started = Instant::now();
+        let result = clear_exact_history_with_budget(
+            &mut runner,
+            &snapshot,
+            &ids,
+            Duration::from_millis(145),
+        );
+        assert!(result.is_err());
+        assert!(runner.calls < ids.len());
+        assert!(runner.timeouts.windows(2).all(|pair| pair[1] < pair[0]));
+        assert!(started.elapsed() < Duration::from_millis(500));
     }
 
     #[test]
