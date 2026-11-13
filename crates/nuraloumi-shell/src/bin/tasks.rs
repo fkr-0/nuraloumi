@@ -11,11 +11,25 @@ use nuraloumi_wayland::{
     BackendError, DismissBackdropConfig, Frame, Key, MenuConfig as WaylandMenuConfig, PixelFormat,
     PlatformEvent as WaylandEvent, SurfaceId, WaylandBackend,
 };
-use std::{env, path::PathBuf, process::ExitCode};
+use std::{
+    collections::BTreeSet,
+    env,
+    os::fd::{AsRawFd, FromRawFd, OwnedFd},
+    path::PathBuf,
+    process::ExitCode,
+};
 #[derive(Default)]
 struct Args {
     config: Option<PathBuf>,
     fixture: bool,
+}
+/// A touch or pointer release may only activate the action originally pressed.
+/// In particular, a destructive confirmation cannot fire on touch-down.
+fn release_action(pressed: Option<MenuAction>, current: Option<MenuAction>) -> Option<MenuAction> {
+    match (pressed, current) {
+        (Some(armed), Some(released)) if armed == released => Some(armed),
+        _ => None,
+    }
 }
 fn parse_args() -> Result<Args, String> {
     let mut args = Args::default();
@@ -32,6 +46,7 @@ fn parse_args() -> Result<Args, String> {
             other => return Err(format!("unknown argument {other}")),
         }
     }
+
     Ok(args)
 }
 fn selected_action(model: &MenuModel, state: &MenuState) -> Option<MenuAction> {
@@ -44,11 +59,7 @@ fn hit_action(scene: &Option<Scene>, model: &MenuModel, x: f64, y: f64) -> Optio
         .item_by_id(scene.as_ref()?.hit_test(x, y)?)
         .and_then(|i| i.action.clone())
 }
-use nuraloumi_providers::{
-    CommandLimits, CommandRunner, CommandSpec, ProcessEntry, ProcessProvider, ProcessSnapshot,
-    SystemCommandRunner,
-};
-use std::time::Duration;
+use nuraloumi_providers::{ProcessEntry, ProcessProvider, ProcessSnapshot};
 #[derive(Clone, Copy)]
 enum SortMode {
     Cpu,
@@ -84,6 +95,9 @@ fn demo() -> ProcessSnapshot {
             pid: 100,
             label: "labwc".into(),
             state: "Running".into(),
+            uid: Some(1000),
+            start_time_ticks: Some(100),
+            cpu_ticks: Some(100),
             cpu_percent: Some(12),
             memory_mib: Some(42),
         },
@@ -92,6 +106,9 @@ fn demo() -> ProcessSnapshot {
             pid: 101,
             label: "waybar".into(),
             state: "Sleeping".into(),
+            uid: Some(1000),
+            start_time_ticks: Some(101),
+            cpu_ticks: Some(101),
             cpu_percent: Some(3),
             memory_mib: Some(24),
         },
@@ -100,6 +117,9 @@ fn demo() -> ProcessSnapshot {
             pid: 102,
             label: "terminal".into(),
             state: "Running".into(),
+            uid: Some(1000),
+            start_time_ticks: Some(102),
+            cpu_ticks: Some(102),
             cpu_percent: Some(25),
             memory_mib: Some(65),
         },
@@ -107,13 +127,11 @@ fn demo() -> ProcessSnapshot {
     s.issues.clear();
     s
 }
-fn load_data(fixture: bool) -> Result<ProcessSnapshot, String> {
+fn load_data(provider: &mut ProcessProvider, fixture: bool) -> Result<ProcessSnapshot, String> {
     if fixture {
         Ok(demo())
     } else {
-        ProcessProvider::system()
-            .snapshot()
-            .map_err(|e| e.to_string())
+        provider.snapshot().map_err(|e| e.to_string())
     }
 }
 fn ordered(data: &ProcessSnapshot, query: &str, sort: SortMode) -> Vec<ProcessEntry> {
@@ -139,7 +157,7 @@ fn build_model(
     data: &ProcessSnapshot,
     query: &str,
     sort: SortMode,
-    confirmation: Option<u32>,
+    confirmation: Option<&ProcessEntry>,
     message: &str,
 ) -> MenuModel {
     let mut items = vec![
@@ -151,7 +169,7 @@ fn build_model(
                 sort.name()
             ),
         )
-        .with_subtitle("s sort · k terminate · r refresh · q quit"),
+        .with_subtitle("s sort · k terminate · r refresh (CPU after 2 samples) · q quit"),
         MenuItem::separator("sep"),
     ];
     if !query.is_empty() {
@@ -160,19 +178,16 @@ fn build_model(
     if !message.is_empty() {
         items.push(MenuItem::status("result", message.to_string()))
     }
-    if let Some(pid) = confirmation {
-        let name = data
-            .processes
-            .iter()
-            .find(|p| p.pid == pid)
-            .map(|p| p.label.as_str())
-            .unwrap_or("process");
+    if let Some(target) = confirmation {
         items.push(MenuItem::action(
             "confirm",
-            format!("Kill {name} (PID {pid})? Press Enter to confirm."),
+            format!(
+                "Send SIGTERM to {} (PID {})? Press Enter to confirm.",
+                target.label, target.pid
+            ),
             MenuAction::Custom {
                 kind: "confirm".into(),
-                payload: pid.to_string(),
+                payload: target.pid.to_string(),
             },
         ));
     }
@@ -201,33 +216,131 @@ fn build_model(
     }
     MenuModel::new("tasks", "Tasks", items)
 }
-fn terminate(pid: u32, fixture: bool) -> Result<(), String> {
+/// Disallow critical session processes even if run by the current user.
+/// This is a defensive UI policy in addition to the immutable PID identity.
+fn protected_process(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name.starts_with("nuraloumi-")
+        || name.starts_with("sl101-")
+        || matches!(
+            name.as_str(),
+            "sway"
+                | "swaybar"
+                | "swaybg"
+                | "labwc"
+                | "wayvnc"
+                | "waybar"
+                | "seatd"
+                | "systemd"
+                | "init"
+                | "sshd"
+                | "dbus-daemon"
+                | "pipewire"
+                | "wireplumber"
+        )
+}
+
+fn validate_identity(
+    expected: &ProcessEntry,
+    actual: &ProcessEntry,
+    effective_uid: u32,
+    self_pid: u32,
+    parent_pid: u32,
+) -> Result<(), String> {
+    if expected.pid <= 1 || expected.pid == self_pid || expected.pid == parent_pid {
+        return Err("refusing to terminate an essential/current process".into());
+    }
+    if protected_process(&expected.label) || protected_process(&actual.label) {
+        return Err("protected compositor, panel, or session process".into());
+    }
+    if effective_uid == 0 {
+        return Err("task manager refuses process termination as root".into());
+    }
+    let expected_uid = expected.uid.ok_or("unknown original process UID")?;
+    let start = expected
+        .start_time_ticks
+        .filter(|ticks| *ticks > 0)
+        .ok_or("unknown original process start time")?;
+    if expected_uid != effective_uid
+        || actual.uid != Some(expected_uid)
+        || actual.pid != expected.pid
+        || actual.start_time_ticks != Some(start)
+        || actual.label != expected.label
+    {
+        return Err("process identity changed (UID/PID/starttime/name); refresh tasks".into());
+    }
+    Ok(())
+}
+
+/// PIDFD pins the kernel task identity after opening: a reused numeric PID
+/// cannot redirect the subsequent signal. Fail closed on older kernels.
+fn terminate(target: &ProcessEntry, fixture: bool) -> Result<(), String> {
     if fixture {
         return Ok(());
     }
-    let output = SystemCommandRunner
-        .run(
-            &CommandSpec::new("kill").arg("-TERM").arg(pid.to_string()),
-            CommandLimits::new(Duration::from_secs(2), 16 * 1024),
-        )
-        .map_err(|e| e.to_string())?;
-    if output.status == 0 {
-        Ok(())
-    } else {
-        Err(format!("kill exited {}", output.status))
+    let uid = unsafe { libc::geteuid() };
+    let parent = unsafe { libc::getppid() };
+    validate_identity(
+        target,
+        target,
+        uid,
+        std::process::id(),
+        u32::try_from(parent).unwrap_or_default(),
+    )?;
+    let pid = libc::pid_t::try_from(target.pid).map_err(|_| "PID out of range")?;
+    // SAFETY: pidfd_open has two scalar arguments; the returned owned fd is
+    // closed on every path, including failed checks. No signal is sent here.
+    let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0u32) };
+    if raw < 0 {
+        return Err(format!(
+            "pidfd_open unavailable; refusing unsafe fallback: {}",
+            std::io::Error::last_os_error()
+        ));
     }
+    // SAFETY: pidfd_open returned a new descriptor owned by this call.
+    let pidfd = unsafe { OwnedFd::from_raw_fd(raw as libc::c_int) };
+    let observed = ProcessProvider::system()
+        .inspect(target.pid)
+        .map_err(|e| format!("recheck process: {e}"))?
+        .ok_or("process disappeared before confirmation")?;
+    validate_identity(
+        target,
+        &observed,
+        uid,
+        std::process::id(),
+        u32::try_from(parent).unwrap_or_default(),
+    )?;
+    // SAFETY: the pidfd refers to the revalidated original task. A NULL
+    // siginfo pointer and flags=0 are the documented syscall arguments.
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_pidfd_send_signal,
+            pidfd.as_raw_fd(),
+            libc::SIGTERM,
+            std::ptr::null::<libc::siginfo_t>(),
+            0u32,
+        )
+    };
+    if result < 0 {
+        return Err(format!(
+            "pidfd_send_signal failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
 }
 fn run_live(config: ShellConfig, args: Args) -> Result<(), String> {
     let mut backend = WaylandBackend::connect().map_err(|e| format!("Wayland: {e}"))?;
     if !backend.capabilities().layer_shell {
         return Err("layer-shell not supported".into());
     }
-    let mut data = load_data(args.fixture)?;
+    let mut provider = ProcessProvider::system();
+    let mut data = load_data(&mut provider, args.fixture)?;
     let mut sort = SortMode::Cpu;
     let mut query = String::new();
-    let mut confirmation: Option<u32> = None;
+    let mut confirmation: Option<ProcessEntry> = None;
     let mut message = String::new();
-    let mut model = build_model(&data, &query, sort, confirmation, &message);
+    let mut model = build_model(&data, &query, sort, confirmation.as_ref(), &message);
     let mut state = MenuState::new(&model);
     let output = backend.outputs().into_iter().next();
     let width = output
@@ -268,6 +381,10 @@ fn run_live(config: ShellConfig, args: Args) -> Result<(), String> {
     };
     let mut geometry: Option<(u32, u32, i32)> = None;
     let mut scene: Option<Scene> = None;
+    let mut pointer_armed: Option<MenuAction> = None;
+    let mut touch_armed: Option<(i32, MenuAction)> = None;
+    let mut active_touches = BTreeSet::new();
+    let mut multitouch_cancelled = false;
     loop {
         backend
             .blocking_dispatch()
@@ -322,14 +439,7 @@ fn run_live(config: ShellConfig, args: Args) -> Result<(), String> {
                         redraw = true
                     }
                     Key::Enter => {
-                        if confirmation.is_some() {
-                            action = Some(MenuAction::Custom {
-                                kind: "confirm".into(),
-                                payload: String::new(),
-                            })
-                        } else {
-                            action = selected_action(&model, &state)
-                        }
+                        action = selected_action(&model, &state);
                     }
                     Key::Backspace => {
                         query.pop();
@@ -341,12 +451,12 @@ fn run_live(config: ShellConfig, args: Args) -> Result<(), String> {
                         return Ok(());
                     }
                     Key::Function(5) => {
-                        data = load_data(args.fixture)?;
+                        data = load_data(&mut provider, args.fixture)?;
                         confirmation = None;
                         redraw = true
                     }
                     Key::Text(ref t) if t == "r" && confirmation.is_none() => {
-                        data = load_data(args.fixture)?;
+                        data = load_data(&mut provider, args.fixture)?;
                         redraw = true
                     }
                     Key::Text(ref t) if t == "s" && confirmation.is_none() => {
@@ -354,24 +464,38 @@ fn run_live(config: ShellConfig, args: Args) -> Result<(), String> {
                         redraw = true
                     }
                     Key::Raw(111) => {
-                        if let Some(MenuAction::Custom { payload, .. }) =
+                        if let Some(MenuAction::Custom { kind, payload }) =
                             selected_action(&model, &state)
                         {
-                            confirmation = payload.parse().ok();
+                            if kind == "select" {
+                                confirmation = payload.parse::<u32>().ok().and_then(|pid| {
+                                    data.processes.iter().find(|p| p.pid == pid).cloned()
+                                });
+                            }
                             redraw = true
                         }
                     }
                     Key::Text(ref t) if t == "k" => {
-                        if let Some(MenuAction::Custom { payload, .. }) =
+                        if let Some(MenuAction::Custom { kind, payload }) =
                             selected_action(&model, &state)
                         {
-                            confirmation = payload.parse().ok();
+                            if kind == "select" {
+                                confirmation = payload.parse::<u32>().ok().and_then(|pid| {
+                                    data.processes.iter().find(|p| p.pid == pid).cloned()
+                                });
+                            }
                             redraw = true
                         }
                     }
 
                     Key::Text(ref t) if !t.is_empty() && t.chars().all(|c| !c.is_control()) => {
-                        query.push_str(t);
+                        // Bound query allocation and work on every key event.
+                        for ch in t
+                            .chars()
+                            .take(128_usize.saturating_sub(query.chars().count()))
+                        {
+                            query.push(ch);
+                        }
                         confirmation = None;
                         redraw = true
                     }
@@ -382,8 +506,53 @@ fn run_live(config: ShellConfig, args: Args) -> Result<(), String> {
                     y,
                     pressed: true,
                     ..
+                } => {
+                    pointer_armed = hit_action(&scene, &model, x, y);
                 }
-                | WaylandEvent::TouchDown { x, y, .. } => action = hit_action(&scene, &model, x, y),
+                WaylandEvent::PointerButton {
+                    x,
+                    y,
+                    pressed: false,
+                    ..
+                } => {
+                    action = release_action(pointer_armed.take(), hit_action(&scene, &model, x, y));
+                }
+                WaylandEvent::TouchDown { id, x, y } => {
+                    active_touches.insert(id);
+                    // Never re-arm an action while another finger remains down.
+                    if active_touches.len() != 1 || multitouch_cancelled {
+                        multitouch_cancelled = true;
+                        touch_armed = None;
+                    } else {
+                        touch_armed = hit_action(&scene, &model, x, y).map(|a| (id, a));
+                    }
+                }
+                WaylandEvent::TouchMotion { id, x, y } => {
+                    if touch_armed.as_ref().is_some_and(|(active, pressed)| {
+                        *active == id && hit_action(&scene, &model, x, y).as_ref() != Some(pressed)
+                    }) {
+                        touch_armed = None;
+                    }
+                }
+                WaylandEvent::TouchUp { id } => {
+                    if !multitouch_cancelled
+                        && touch_armed
+                            .as_ref()
+                            .is_some_and(|(active, _)| *active == id)
+                    {
+                        action = touch_armed.take().map(|(_, action)| action);
+                    }
+                    active_touches.remove(&id);
+                    if active_touches.is_empty() {
+                        touch_armed = None;
+                        multitouch_cancelled = false;
+                    }
+                }
+                WaylandEvent::TouchCancel { .. } => {
+                    touch_armed = None;
+                    active_touches.clear();
+                    multitouch_cancelled = false;
+                }
                 WaylandEvent::Close => {
                     close_surfaces(&mut backend, surface, dismiss)?;
                     return Ok(());
@@ -393,29 +562,36 @@ fn run_live(config: ShellConfig, args: Args) -> Result<(), String> {
             if let Some(a) = action {
                 match a {
                     MenuAction::Custom { kind, payload } if kind == "confirm" => {
-                        let pid = confirmation.or_else(|| payload.parse().ok());
-                        if let Some(pid) = pid {
-                            message = match terminate(pid, args.fixture) {
-                                Ok(()) => format!("SIGTERM sent to {pid}"),
+                        // Payload is presentation data, never authorization.
+                        // A previously selected immutable process is required.
+                        if let Some(target) = confirmation
+                            .take()
+                            .filter(|p| payload.is_empty() || payload == p.pid.to_string())
+                        {
+                            message = match terminate(&target, args.fixture) {
+                                Ok(()) => format!("SIGTERM sent to {}", target.pid),
                                 Err(e) => format!("SIGTERM failed: {e}"),
                             };
                             if args.fixture && message.starts_with("SIGTERM sent") {
-                                data.processes.retain(|process| process.pid != pid);
+                                data.processes.retain(|process| process.pid != target.pid);
                             } else {
-                                data = load_data(args.fixture)?;
+                                data = load_data(&mut provider, args.fixture)?;
                             }
                         }
                         confirmation = None;
                     }
                     MenuAction::Custom { kind, payload } if kind == "select" => {
-                        confirmation = payload.parse().ok()
+                        confirmation = payload
+                            .parse::<u32>()
+                            .ok()
+                            .and_then(|pid| data.processes.iter().find(|p| p.pid == pid).cloned())
                     }
                     _ => {}
                 };
                 redraw = true;
             }
             if redraw {
-                model = build_model(&data, &query, sort, confirmation, &message);
+                model = build_model(&data, &query, sort, confirmation.as_ref(), &message);
                 let previous = state.selected_id.clone();
                 state = MenuState::new(&model);
                 if let Some(id) = previous {
@@ -425,6 +601,11 @@ fn run_live(config: ShellConfig, args: Args) -> Result<(), String> {
                     {
                         state.selected_id = Some(id);
                     }
+                }
+                // Confirmation must be explicitly focused, rather than
+                // allowing Enter on an unrelated selected process row.
+                if confirmation.is_some() {
+                    state.selected_id = Some("confirm".to_owned());
                 }
                 if let Some((w, h, s)) = geometry {
                     scene = Some(render_and_present(
@@ -567,13 +748,54 @@ mod tests {
     #[test]
     fn kill_is_confirmed_and_fixture_is_safe() {
         let d = demo();
-        let m = build_model(&d, "", SortMode::Cpu, Some(101), "");
+        let m = build_model(&d, "", SortMode::Cpu, d.processes.get(1), "");
         assert!(m.item_by_id("confirm").is_some());
-        assert!(terminate(101, true).is_ok());
+        assert!(terminate(&d.processes[1], true).is_ok());
         let mut after = d;
         after.processes.retain(|process| process.pid != 101);
         assert!(ordered(&after, "", SortMode::Cpu)
             .iter()
             .all(|process| process.pid != 101));
+    }
+
+    #[test]
+    fn security_rejects_pid_reuse_owner_changes_unknown_identity_and_session_processes() {
+        let mut original = demo().processes[2].clone();
+        let mut observed = original.clone();
+        assert!(validate_identity(&original, &observed, 1000, 999, 998).is_ok());
+        observed.start_time_ticks = Some(9999);
+        assert!(validate_identity(&original, &observed, 1000, 999, 998).is_err());
+        observed = original.clone();
+        observed.uid = Some(1001);
+        assert!(validate_identity(&original, &observed, 1000, 999, 998).is_err());
+        observed = original.clone();
+        original.uid = None;
+        assert!(validate_identity(&original, &observed, 1000, 999, 998).is_err());
+        original = observed.clone();
+        assert!(validate_identity(&original, &observed, 0, 999, 998).is_err());
+        assert!(validate_identity(&original, &observed, 1000, 102, 998).is_err());
+        let protected = demo().processes[0].clone();
+        assert!(validate_identity(&protected, &protected, 1000, 999, 998).is_err());
+        assert!(protected_process("sl101-sway"));
+        assert!(protected_process("nuraloumi-pane"));
+    }
+
+    #[test]
+    fn release_requires_same_armed_action_and_cancel_is_noop() {
+        let select = MenuAction::Custom {
+            kind: "select".into(),
+            payload: "102".into(),
+        };
+        let confirm = MenuAction::Custom {
+            kind: "confirm".into(),
+            payload: "102".into(),
+        };
+        assert_eq!(
+            release_action(Some(select.clone()), Some(select.clone())),
+            Some(select.clone())
+        );
+        assert_eq!(release_action(Some(confirm.clone()), Some(select)), None);
+        assert_eq!(release_action(None, Some(confirm.clone())), None);
+        assert_eq!(release_action(Some(confirm), None), None);
     }
 }
