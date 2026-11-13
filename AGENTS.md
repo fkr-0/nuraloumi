@@ -2,6 +2,28 @@
 
 NuraLoumi is a low-resource touch shell/menu suite for the ASUS Eee Pad Slider SL101 ("Nura", Tegra20/ARMv7).
 
+## Owner privacy and local-only development policy
+
+**Local-only by default.** Work directly in the local repository and governed
+worktrees using local tests, reviews, commits, and merges. Do not use GitHub,
+GitLab, public pull requests, remote CI, `git fetch`, `git push`, or any other
+network Git operation without the owner's explicit authorization for that
+particular external action. Authorization to implement, test, commit, merge,
+or deploy **locally** never implies permission to publish anything.
+
+**Private infrastructure stays private.** Treat hostnames, IP addresses,
+internal paths and URLs, network topology, account details, credentials, and
+device identifiers as non-public. Do not put them into public PR bodies,
+issues, commit messages, release notes, shared logs, or external tool calls.
+Use generic placeholders in text and test fixtures where addresses are
+unnecessary. Check outbound content for leaks before any separately
+authorized publication.
+
+Preserve unrelated local edits, never reset or clean another agent's state,
+and never assume a successful host build authorizes replacing a live SL101
+session. Any device operation needs its own verified qualification and
+rollback plan.
+
 ## Product boundary
 
 NuraLoumi is not a desktop environment. It is a compact Wayland-native set of menu surfaces intended to run on top of labwc/wlroots and remain usable with WLR_RENDERER=pixman. GPU acceleration is optional.
