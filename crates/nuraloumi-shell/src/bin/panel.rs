@@ -1,4 +1,3 @@
-use nuraloumi_core::{DARK_THEME, LIGHT_THEME};
 use nuraloumi_providers::{
     session::OwnedDesktopSession, ActionProvider, ActionResult, ApplicationProvider,
     ApplicationSnapshot, AudioAction, AudioProvider, BacklightAction, BacklightProvider,
@@ -27,8 +26,7 @@ use nuraloumi_shell::{
     NotificationHistoryEntry as ShellNotificationHistoryEntry, OverviewMode, PanelAffordance,
     PanelController, PanelEdge as ShellPanelEdge, PlatformEvent as ShellPlatformEvent,
     ProviderValue, SceneTransitionClock, ShellConfig, ShellState, TaskEntry as ShellTaskEntry,
-    Theme as ShellTheme, ValueState, WifiNetworkEntry, WindowCommand, WindowControlCapabilities,
-    WindowThumbnailEntry,
+    ValueState, WifiNetworkEntry, WindowCommand, WindowControlCapabilities, WindowThumbnailEntry,
 };
 use nuraloumi_wayland::{
     BackendCapabilities as WaylandCapabilities, BackendError, DismissBackdropConfig, Frame,
@@ -187,6 +185,7 @@ struct LiveMenu {
 fn surface_name(family: MenuFamily) -> &'static str {
     match family {
         MenuFamily::Launcher => "launcher",
+        MenuFamily::Appearance => "appearance",
         MenuFamily::ControlCenter => "control-center",
         MenuFamily::Network => "network",
         MenuFamily::Bluetooth => "bluetooth",
@@ -691,8 +690,8 @@ fn run_live(
     let panel_surface = backend
         .create_panel_at(
             WaylandPanelConfig {
-                height: config.panel_height,
-                exclusive_zone: i32::try_from(config.panel_height)
+                height: config.effective_panel_height(),
+                exclusive_zone: i32::try_from(config.effective_panel_height())
                     .map_err(|_| "panel height does not fit exclusive zone".to_owned())?,
                 output: output.as_ref().map(|output| output.id),
                 namespace: "nuraloumi-panel".into(),
@@ -1089,6 +1088,7 @@ fn run_live(
             let mut redraw = false;
             let mut close = false;
             let mut switch_family: Option<MenuFamily> = None;
+            let mut recreate_launcher = false;
             let mut report = None;
 
             match event.event {
@@ -1229,6 +1229,23 @@ fn run_live(
                             (!config.reduced_motion).then(|| SceneTransitionClock::new(false));
                         panel_scene = None;
                         redraw = true;
+                    } else if kind == "overview.layout" && payload == "toggle" {
+                        config.launcher_fullscreen = !config.launcher_fullscreen;
+                        recreate_launcher = true;
+                    } else if kind == "theme.select" {
+                        let palette = nuraloumi_shell::ThemePalette::parse(payload)?;
+                        config.select_palette(palette);
+                        if policy.execute_provider_actions {
+                            if let Err(error) = nuraloumi_shell::persist_palette_override(palette) {
+                                eprintln!("nuraloumi-appearance-persistence: {error}");
+                            }
+                        }
+                        menu.shell
+                            .refresh_menu(nuraloumi_shell::build_appearance_menu(
+                                config.active_palette(),
+                            ))?;
+                        panel_scene = None;
+                        redraw = true;
                     } else if kind == "control.tab" {
                         let tab = ControlCenterTab::parse(payload)?;
                         if policy.execute_provider_actions {
@@ -1251,6 +1268,8 @@ fn run_live(
                             MenuAction::Custom { kind, .. }
                                 if kind == "menu.open"
                                     || kind == "overview.mode"
+                                    || kind == "overview.layout"
+                                    || kind == "theme.select"
                                     || kind == "control.tab"
                         );
                         let launcher_action_handled = if policy.execute_provider_actions {
@@ -1489,16 +1508,52 @@ fn run_live(
 
             if let Some(family) = switch_family {
                 menu.family = family;
-                if family != MenuFamily::Launcher && menu.shell.search_focused {
-                    let _ = menu.shell.focus_search(false);
+                if family != MenuFamily::Launcher {
+                    menu.shell.state.query.clear();
+                    if menu.shell.search_focused {
+                        let _ = menu.shell.focus_search(false);
+                    }
                 }
                 if policy.execute_provider_actions && family == MenuFamily::ControlCenter {
                     refresh_control_center_tab_snapshot(&mut snapshot, ControlCenterTab::Media);
                 }
                 menu.shell.refresh_family(family, &snapshot)?;
+                if family == MenuFamily::Appearance {
+                    menu.shell
+                        .refresh_menu(nuraloumi_shell::build_appearance_menu(
+                            config.active_palette(),
+                        ))?;
+                }
                 menu.motion = (!config.reduced_motion).then(|| SceneTransitionClock::new(false));
                 panel_scene = None;
                 redraw = true;
+            }
+
+            if recreate_launcher {
+                // A Wayland layer surface cannot be safely resized just by
+                // repainting: recreate it and retain semantic search/view state.
+                let old_mode = menu.shell.overview_mode;
+                let old_query = menu.shell.state.query.clone();
+                let old_focus = menu.shell.search_focused;
+                replace_live_menu(
+                    &mut backend,
+                    &config,
+                    &snapshot,
+                    output.as_ref(),
+                    &mut panel,
+                    &mut active_menu,
+                    MenuFamily::Launcher,
+                )?;
+                if let Some(new_menu) = active_menu.as_mut() {
+                    new_menu.shell.set_overview_mode(old_mode, &snapshot)?;
+                    new_menu.shell.state.query = old_query;
+                    new_menu.shell.search_focused = old_focus;
+                    new_menu
+                        .shell
+                        .refresh_family(MenuFamily::Launcher, &snapshot)?;
+                }
+                panel_scene = None;
+                continue;
             }
 
             if close {
@@ -1701,12 +1756,19 @@ fn open_live_menu(
     panel: &mut PanelController,
     family: MenuFamily,
 ) -> Result<LiveMenu, String> {
+    let fullscreen = family == MenuFamily::Launcher && config.launcher_fullscreen;
     let requested_width = output
         .and_then(|output| {
             let scale = output.scale.max(1) as u32;
             (output.mode_width > 0).then_some(output.mode_width as u32 / scale)
         })
-        .map(|width| config.menu_width.min(width.saturating_sub(16).max(240)))
+        .map(|width| {
+            if fullscreen {
+                width.saturating_sub(16).max(240)
+            } else {
+                config.menu_width.min(width.saturating_sub(16).max(240))
+            }
+        })
         .unwrap_or(config.menu_width);
     let requested_height = output
         .and_then(|output| {
@@ -1717,7 +1779,7 @@ fn open_live_menu(
             height
                 .saturating_sub(
                     config
-                        .panel_height
+                        .effective_panel_height()
                         .saturating_add(PANEL_MENU_GAP)
                         .saturating_add(16),
                 )
@@ -1725,7 +1787,9 @@ fn open_live_menu(
         })
         .unwrap_or(640);
 
-    let panel_menu_offset = config.panel_height.saturating_add(PANEL_MENU_GAP);
+    let panel_menu_offset = config
+        .effective_panel_height()
+        .saturating_add(PANEL_MENU_GAP);
     let margin_top = if config.panel_edge == ShellPanelEdge::Top {
         panel_menu_offset as i32
     } else {
@@ -1748,7 +1812,7 @@ fn open_live_menu(
     }
     let dismiss_surface = if dismiss_backdrop_enabled {
         let (margin_top, margin_right, margin_bottom, margin_left) =
-            dismiss_backdrop_margins(config.panel_edge, config.panel_height);
+            dismiss_backdrop_margins(config.panel_edge, config.effective_panel_height());
         Some(
             backend
                 .create_dismiss_backdrop(DismissBackdropConfig {
@@ -1781,11 +1845,17 @@ fn open_live_menu(
         }
     };
     panel.open_menu(family, true);
+    let mut shell = ShellState::new(build_family(family, snapshot), config.reduced_motion)?;
+    if family == MenuFamily::Appearance {
+        shell.refresh_menu(nuraloumi_shell::build_appearance_menu(
+            config.active_palette(),
+        ))?;
+    }
     Ok(LiveMenu {
         surface,
         dismiss_surface,
         family,
-        shell: ShellState::new(build_family(family, snapshot), config.reduced_motion)?,
+        shell,
         geometry: None,
         scene: None,
         touch_regions: BTreeMap::new(),
@@ -1877,10 +1947,7 @@ fn render_panel_and_present(
     search: &PanelSearchView,
     geometry: (u32, u32, i32),
 ) -> Result<Scene, String> {
-    let theme = RenderTheme::from(match config.theme {
-        ShellTheme::Dark => &DARK_THEME,
-        ShellTheme::Light => &LIGHT_THEME,
-    });
+    let theme = RenderTheme::from(config.active_theme_tokens());
     let scene = build_panel_scene(snapshot, config, search, geometry, theme);
     present_scene(backend, surface, renderer, &scene)?;
     Ok(scene)
@@ -1902,10 +1969,7 @@ fn render_menu_and_present(
         f64::from(logical_height),
         f64::from(scale.max(1)),
     );
-    let theme_tokens = match config.theme {
-        ShellTheme::Dark => &DARK_THEME,
-        ShellTheme::Light => &LIGHT_THEME,
-    };
+    let theme_tokens = config.active_theme_tokens();
     let presentation_menu = shell.renderer_presentation_menu();
     let (scene, mut buffer) = render_menu_follow_selection(
         renderer,

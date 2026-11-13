@@ -1,10 +1,12 @@
 # Versioned NuraLoumi example (legacy files may omit config_version).
 config_version = 1
 panel_edge = "top"
-panel_height = 40
+panel_height = 48
 menu_width = 448
 row_height = 48
 theme = "dark"
+palette = "slate_dark" # slate_dark | paper_light | high_contrast
+launcher_fullscreen = false
 reduced_motion = false
 
 [panel]
