@@ -251,6 +251,39 @@ P2 issue. The newly safe UI does not magically enable atomic historical
 action invocation. No complete Wayland pointer/touch pixel E2E, real SL101
 CPU/RSS, independent reviewer approval or hardware release is claimed.
 
+## P1 review remediation: backdrop drag and post-clear verification (2026-11-13)
+
+This follow-up addresses both findings from the prior review of commit
+`039f60a7`, workflow packet `2090cb83`:
+
+- A dedicated backdrop press state machine now records the initial pointer or
+  finger coordinates and cancels the armed close action when movement exceeds
+  **12 logical pixels**. Small finger jitter remains a valid tap. A down event
+  followed by a drag and release never dismisses the center, including when
+  Wayland retains touch focus on the original backdrop surface.
+  Unmatched releases, touch cancel, multitouch and non-primary buttons are
+  rejected. The existing in-menu release matching is retained.
+- The real background `ClearKnown` worker now evaluates the **post-clear
+  history snapshot** before returning a successful UI result. It requires
+  `Health::Healthy` **and** verifies that each confirmed ID is absent from
+  the history returned by Dunst. If the backend read fails or reports degraded
+  or unavailable history, removal is reported as **unverified** rather than
+  as success. The UI also distinguishes unavailable history from a genuinely
+  empty inbox. A failed command still reports failure or possible partial
+  completion. No atomicity is claimed.
+- The worker execution is factored into a generic, injectable function for
+  regression tests, without changing the production Dunst command runner.
+  A mock runner tests a successful history-rm followed by a failed
+  history read, a healthy but still-present notification, and a confirmed
+  successful removal. Gesture tests cover small-jitter tap, drag away and
+  return, wrong finger, cancellation, multitouch and pointer motion.
+
+These checks do not prove SL101 .106 touch calibration or release behavior on
+hardware; they validate the input state machine and system-command result
+contract. Real Dunst numeric ID reuse after restart remains a separate P2
+identity issue. All work remains local; no production notification service,
+Wayland session or device was modified.
+
 ## Remaining external qualification gates
 
 - In a controlled test bus with explicit Dunst config and lifecycle, prove

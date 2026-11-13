@@ -4,7 +4,7 @@ use nuraloumi_core::{
 use nuraloumi_providers::notifications::{
     NotificationAction, NotificationEntry, NotificationProvider, NotificationSnapshot,
 };
-use nuraloumi_providers::{ActionProvider, Provider};
+use nuraloumi_providers::{ActionProvider, CommandRunner, Health, Provider};
 use nuraloumi_render_cairo::{CairoRenderer, RenderOptions, Scene, Viewport};
 use nuraloumi_shell::{
     dismiss_backdrop_margins, load_config_or_default, render_menu_with_glyphs, ShellConfig,
@@ -222,20 +222,156 @@ impl SafePress {
     }
 }
 
+const BACKDROP_TAP_TOLERANCE: f64 = 12.0;
+
+fn moved_beyond_tap(start: (f64, f64), point: (f64, f64)) -> bool {
+    let dx = (point.0 - start.0).abs();
+    let dy = (point.1 - start.1).abs();
+    !dx.is_finite() || !dy.is_finite() || dx.max(dy) > BACKDROP_TAP_TOLERANCE
+}
+
+/// Backdrop touch focus remains on the initial Wayland surface during drag.
+/// A release is a dismiss only if it was a short, single-contact tap.
+#[derive(Default)]
+struct BackdropPress {
+    press: SafePress,
+    pointer_origin: Option<(f64, f64)>,
+    touch_origin: Option<(i32, f64, f64)>,
+}
+
+impl BackdropPress {
+    fn handle(&mut self, event: &WaylandEvent) -> bool {
+        match event {
+            WaylandEvent::PointerButton {
+                x,
+                y,
+                button,
+                pressed,
+            } => {
+                if *button != PRIMARY_POINTER_BUTTON {
+                    return false;
+                }
+                if *pressed {
+                    self.pointer_origin = Some((*x, *y));
+                } else {
+                    // Also guard release coordinates if the compositor did not
+                    // deliver intermediate pointer-motion events.
+                    let dragged = self
+                        .pointer_origin
+                        .is_some_and(|start| moved_beyond_tap(start, (*x, *y)));
+                    self.pointer_origin = None;
+                    if dragged {
+                        self.press.pointer_leave();
+                        return false;
+                    }
+                }
+                self.press
+                    .pointer_button(*button, *pressed, Some(MenuAction::Close))
+                    .is_some()
+            }
+            WaylandEvent::PointerMove { x, y } => {
+                if self
+                    .pointer_origin
+                    .is_some_and(|start| moved_beyond_tap(start, (*x, *y)))
+                {
+                    self.pointer_origin = None;
+                    self.press.pointer_leave();
+                }
+                false
+            }
+            WaylandEvent::PointerLeave => {
+                self.pointer_origin = None;
+                self.press.pointer_leave();
+                false
+            }
+            WaylandEvent::TouchDown { id, x, y } => {
+                self.press.touch_down(*id, Some(MenuAction::Close));
+                self.touch_origin = (self.press.touches.len() == 1
+                    && self
+                        .press
+                        .touch
+                        .as_ref()
+                        .is_some_and(|(active, _)| active == id))
+                .then_some((*id, *x, *y));
+                false
+            }
+            WaylandEvent::TouchMotion { id, x, y } => {
+                if self.touch_origin.is_some_and(|(active, sx, sy)| {
+                    active == *id && moved_beyond_tap((sx, sy), (*x, *y))
+                }) {
+                    self.touch_origin = None;
+                    self.press.touch_move(*id, None);
+                }
+                false
+            }
+            WaylandEvent::TouchUp { id } => {
+                // An unmatched finger must not allow a later up to dismiss.
+                let matching = self
+                    .touch_origin
+                    .is_some_and(|(active, _, _)| active == *id);
+                self.touch_origin = None;
+                if !matching {
+                    self.press.touch_cancel(&[*id]);
+                    return false;
+                }
+                self.press.touch_up(*id).is_some()
+            }
+            WaylandEvent::TouchCancel { ids } => {
+                self.touch_origin = None;
+                self.press.touch_cancel(ids);
+                false
+            }
+            _ => false,
+        }
+    }
+}
+
+fn verified_clear_result(
+    result: Result<String, String>,
+    snapshot: &NotificationSnapshot,
+    ids: &[u32],
+) -> Result<String, String> {
+    let message = result?;
+    if snapshot.meta.health != Health::Healthy {
+        return Err(format!(
+            "removal was attempted but history re-read is {} ({} issue(s)); result not verified",
+            snapshot.meta.health.as_str(),
+            snapshot.issues.len()
+        ));
+    }
+    if ids
+        .iter()
+        .any(|id| snapshot.notifications.iter().any(|entry| entry.id == *id))
+    {
+        return Err(
+            "confirmed notification ID still in history after removal; result not verified".into(),
+        );
+    }
+    Ok(message)
+}
+
 /// At most one bounded clear task can be active, and the UI is not blocked
 /// while Dunst performs subprocess operations. The result channel is bounded.
+fn execute_and_verify_clear<R: CommandRunner>(
+    provider: &mut NotificationProvider<R>,
+    ids: Vec<u32>,
+) -> (Result<String, String>, NotificationSnapshot) {
+    let result = provider
+        .execute(NotificationAction::ClearKnown { ids: ids.clone() })
+        .map(|result| result.message)
+        .map_err(|error| format!("{error:?}"));
+    let snapshot = provider
+        .snapshot()
+        .unwrap_or_else(|error| NotificationSnapshot::unavailable(0, format!("{error:?}")));
+    let verified = verified_clear_result(result, &snapshot, &ids);
+    (verified, snapshot)
+}
+
 fn start_clear(ids: Vec<u32>) -> mpsc::Receiver<(Result<String, String>, NotificationSnapshot)> {
     let (sender, receiver) = mpsc::sync_channel(1);
     thread::spawn(move || {
         let mut provider = NotificationProvider::system();
-        let result = provider
-            .execute(NotificationAction::ClearKnown { ids })
-            .map(|result| result.message)
-            .map_err(|error| format!("{error:?}"));
-        let snapshot = provider
-            .snapshot()
-            .unwrap_or_else(|error| NotificationSnapshot::unavailable(0, format!("{error:?}")));
-        let _ = sender.send((result, snapshot));
+        let _ = sender.send(execute_and_verify_clear(&mut provider, ids));
     });
     receiver
 }
@@ -372,7 +508,9 @@ fn model(
     if shown == 0 {
         items.push(MenuItem::status(
             "empty",
-            if query.is_empty() {
+            if snapshot.meta.health == Health::Unavailable && snapshot.backend != "fixture" {
+                "Notification history unavailable"
+            } else if query.is_empty() {
                 "No notifications"
             } else {
                 "No matching notifications"
@@ -461,7 +599,7 @@ fn run(config: ShellConfig, fixture_mode: bool) -> Result<(), String> {
     let mut pending_clear: Option<mpsc::Receiver<(Result<String, String>, NotificationSnapshot)>> =
         None;
     let mut press = SafePress::default();
-    let mut dismiss_press = SafePress::default();
+    let mut dismiss_press = BackdropPress::default();
     let mut backend = WaylandBackend::connect().map_err(|e| e.to_string())?;
     if !backend.capabilities().layer_shell {
         return Err("layer shell unavailable".into());
@@ -522,28 +660,18 @@ fn run(config: ShellConfig, fixture_mode: bool) -> Result<(), String> {
                         height,
                         scale,
                     )?,
-                    WaylandEvent::PointerButton {
-                        button, pressed, ..
-                    } => {
-                        if dismiss_press
-                            .pointer_button(button, pressed, Some(MenuAction::Close))
-                            .is_some()
-                        {
+                    input @ (WaylandEvent::PointerButton { .. }
+                    | WaylandEvent::PointerMove { .. }
+                    | WaylandEvent::PointerLeave
+                    | WaylandEvent::TouchDown { .. }
+                    | WaylandEvent::TouchMotion { .. }
+                    | WaylandEvent::TouchUp { .. }
+                    | WaylandEvent::TouchCancel { .. }) => {
+                        if dismiss_press.handle(&input) {
                             close(&mut backend, surface, dismiss)?;
                             return Ok(());
                         }
                     }
-                    WaylandEvent::TouchDown { id, .. } => {
-                        dismiss_press.touch_down(id, Some(MenuAction::Close));
-                    }
-                    WaylandEvent::TouchUp { id } => {
-                        if dismiss_press.touch_up(id).is_some() {
-                            close(&mut backend, surface, dismiss)?;
-                            return Ok(());
-                        }
-                    }
-                    WaylandEvent::TouchCancel { ids } => dismiss_press.touch_cancel(&ids),
-                    WaylandEvent::PointerLeave => dismiss_press.pointer_leave(),
                     WaylandEvent::Close => {
                         close(&mut backend, surface, dismiss)?;
                         return Ok(());
@@ -751,7 +879,7 @@ fn run(config: ShellConfig, fixture_mode: bool) -> Result<(), String> {
                 snapshot = fresh; // Reflect partial success after any failure.
                 notice = Some(match result {
                     Ok(message) => message,
-                    Err(error) => format!("Clear incomplete: {error}"),
+                    Err(error) => format!("Clear incomplete or unverified: {error}"),
                 });
                 menu = model(
                     &snapshot,
@@ -890,6 +1018,205 @@ mod tests {
         p.touch_down(12, Some(first));
         p.reset();
         assert!(p.touch_up(12).is_none());
+    }
+
+    #[test]
+    fn backdrop_touch_drag_does_not_dismiss_but_small_tap_does() {
+        let mut backdrop = BackdropPress::default();
+        assert!(!backdrop.handle(&WaylandEvent::TouchDown {
+            id: 7,
+            x: 100.0,
+            y: 100.0,
+        }));
+        assert!(!backdrop.handle(&WaylandEvent::TouchMotion {
+            id: 7,
+            x: 102.0,
+            y: 104.0,
+        }));
+        assert!(backdrop.handle(&WaylandEvent::TouchUp { id: 7 }));
+
+        // Wayland retains the original touch surface while dragging:
+        // moving away must cancel and cannot dismiss on release.
+        assert!(!backdrop.handle(&WaylandEvent::TouchDown {
+            id: 8,
+            x: 100.0,
+            y: 100.0,
+        }));
+        assert!(!backdrop.handle(&WaylandEvent::TouchMotion {
+            id: 8,
+            x: 140.0,
+            y: 100.0,
+        }));
+        assert!(!backdrop.handle(&WaylandEvent::TouchMotion {
+            id: 8,
+            x: 100.0,
+            y: 100.0,
+        }));
+        assert!(!backdrop.handle(&WaylandEvent::TouchUp { id: 8 }));
+    }
+
+    #[test]
+    fn backdrop_release_rejects_cancel_multitouch_wrong_id_and_pointer_drag() {
+        let mut backdrop = BackdropPress::default();
+        assert!(!backdrop.handle(&WaylandEvent::TouchDown {
+            id: 1,
+            x: 1.0,
+            y: 1.0,
+        }));
+        assert!(!backdrop.handle(&WaylandEvent::TouchUp { id: 99 }));
+        assert!(!backdrop.handle(&WaylandEvent::TouchUp { id: 1 }));
+
+        assert!(!backdrop.handle(&WaylandEvent::TouchDown {
+            id: 2,
+            x: 1.0,
+            y: 1.0,
+        }));
+        assert!(!backdrop.handle(&WaylandEvent::TouchCancel { ids: vec![2] }));
+        assert!(!backdrop.handle(&WaylandEvent::TouchUp { id: 2 }));
+
+        assert!(!backdrop.handle(&WaylandEvent::TouchDown {
+            id: 3,
+            x: 1.0,
+            y: 1.0,
+        }));
+        assert!(!backdrop.handle(&WaylandEvent::TouchDown {
+            id: 4,
+            x: 1.0,
+            y: 1.0,
+        }));
+        assert!(!backdrop.handle(&WaylandEvent::TouchUp { id: 3 }));
+        assert!(!backdrop.handle(&WaylandEvent::TouchUp { id: 4 }));
+
+        assert!(!backdrop.handle(&WaylandEvent::PointerButton {
+            x: 3.0,
+            y: 3.0,
+            pressed: true,
+            button: PRIMARY_POINTER_BUTTON,
+        }));
+        assert!(!backdrop.handle(&WaylandEvent::PointerMove { x: 30.0, y: 3.0 }));
+        assert!(!backdrop.handle(&WaylandEvent::PointerButton {
+            x: 3.0,
+            y: 3.0,
+            pressed: false,
+            button: PRIMARY_POINTER_BUTTON,
+        }));
+        assert!(!backdrop.handle(&WaylandEvent::PointerButton {
+            x: 3.0,
+            y: 3.0,
+            pressed: true,
+            button: PRIMARY_POINTER_BUTTON,
+        }));
+        assert!(!backdrop.handle(&WaylandEvent::PointerButton {
+            x: 30.0,
+            y: 3.0,
+            pressed: false,
+            button: PRIMARY_POINTER_BUTTON,
+        }));
+        assert!(!backdrop.handle(&WaylandEvent::PointerButton {
+            x: 3.0,
+            y: 3.0,
+            pressed: true,
+            button: 0x111,
+        }));
+        assert!(!backdrop.handle(&WaylandEvent::PointerButton {
+            x: 3.0,
+            y: 3.0,
+            pressed: false,
+            button: 0x111,
+        }));
+        assert!(!backdrop.handle(&WaylandEvent::PointerButton {
+            x: 3.0,
+            y: 3.0,
+            pressed: true,
+            button: PRIMARY_POINTER_BUTTON,
+        }));
+        assert!(backdrop.handle(&WaylandEvent::PointerButton {
+            x: 3.0,
+            y: 3.0,
+            pressed: false,
+            button: PRIMARY_POINTER_BUTTON,
+        }));
+    }
+
+    #[derive(Default)]
+    struct ReadAfterClearRunner {
+        history_reads: usize,
+        fail_second_history: bool,
+        retain_removed_id: bool,
+    }
+
+    impl CommandRunner for ReadAfterClearRunner {
+        fn run(
+            &mut self,
+            spec: &nuraloumi_providers::CommandSpec,
+            _limits: nuraloumi_providers::CommandLimits,
+        ) -> Result<nuraloumi_providers::CommandOutput, nuraloumi_providers::ProviderError>
+        {
+            assert_eq!(spec.program, "dunstctl");
+            let success = |stdout: &str| nuraloumi_providers::CommandOutput {
+                status: 0,
+                stdout: stdout.into(),
+                stderr: String::new(),
+            };
+            match spec.args.as_slice() {
+                [cmd] if cmd == "history" => {
+                    self.history_reads += 1;
+                    if self.fail_second_history && self.history_reads == 2 {
+                        return Ok(nuraloumi_providers::CommandOutput {
+                            status: 2,
+                            stdout: String::new(),
+                            stderr: "Dunst vanished".into(),
+                        });
+                    }
+                    if self.history_reads == 1 || self.retain_removed_id {
+                        Ok(success(
+                            r#"{"data":[[{"id":{"data":42},"appname":{"data":"test"},"summary":{"data":"Alert"},"body":{"data":"message"}}]]}"#,
+                        ))
+                    } else {
+                        Ok(success(r#"{"data":[]}"#))
+                    }
+                }
+                [cmd, id] if cmd == "history-rm" && id == "42" => Ok(success("")),
+                _ => Err(nuraloumi_providers::ProviderError::backend(
+                    "unexpected mock dunstctl command",
+                )),
+            }
+        }
+    }
+
+    #[test]
+    fn clear_post_read_failure_is_not_reported_as_success() {
+        let mut provider = NotificationProvider::new(ReadAfterClearRunner {
+            fail_second_history: true,
+            ..Default::default()
+        });
+        let (result, snapshot) = execute_and_verify_clear(&mut provider, vec![42]);
+        let error = result.unwrap_err();
+        assert!(error.contains("not verified"), "{error}");
+        assert_eq!(snapshot.meta.health, Health::Unavailable);
+        let menu = model(&snapshot, "", None, Some(&error), false);
+        assert!(menu.item_by_id("feedback").is_some());
+        assert_eq!(
+            menu.item_by_id("empty").unwrap().label,
+            "Notification history unavailable"
+        );
+    }
+
+    #[test]
+    fn clear_post_read_must_prove_id_absence() {
+        let mut provider = NotificationProvider::new(ReadAfterClearRunner {
+            retain_removed_id: true,
+            ..Default::default()
+        });
+        let (result, snapshot) = execute_and_verify_clear(&mut provider, vec![42]);
+        assert_eq!(snapshot.meta.health, Health::Healthy);
+        assert!(result.unwrap_err().contains("still in history"));
+
+        let mut provider = NotificationProvider::new(ReadAfterClearRunner::default());
+        let (result, snapshot) = execute_and_verify_clear(&mut provider, vec![42]);
+        assert_eq!(snapshot.meta.health, Health::Healthy);
+        assert!(snapshot.notifications.is_empty());
+        assert!(result.unwrap().contains("removed 1 known"));
     }
 
     #[test]
