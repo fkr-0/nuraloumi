@@ -2,7 +2,7 @@ use crate::command::{CommandLimits, CommandRunner, CommandSpec, SystemCommandRun
 use crate::common::{timestamp_ms, ActionProvider, ActionResult, Health, Provider, SnapshotMeta};
 use crate::error::ProviderError;
 use std::collections::BTreeMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const SNAPSHOT_LIMITS: CommandLimits = CommandLimits::new(Duration::from_secs(2), 256 * 1024);
 const ACTION_LIMITS: CommandLimits = CommandLimits::new(Duration::from_secs(3), 32 * 1024);
@@ -10,6 +10,10 @@ const MAX_NOTIFICATIONS: usize = 64;
 const MAX_ACTIONS: usize = 16;
 const MAX_JSON_DEPTH: usize = 32;
 const MAX_TEXT_CHARS: usize = 240;
+const MAX_HISTORY_BYTES: usize = 256 * 1024;
+const MAX_ISSUES: usize = 16;
+const MIN_REFRESH_MS: u64 = 1_000;
+const MAX_DISPLAY_TIMEOUT_MS: u64 = 120_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NotificationEntry {
@@ -51,6 +55,7 @@ pub enum NotificationAction {
 pub struct NotificationProvider<R> {
     runner: R,
     timestamp_override: Option<u64>,
+    unsafe_best_effort_actions: bool,
 }
 
 impl NotificationProvider<SystemCommandRunner> {
@@ -64,7 +69,16 @@ impl<R> NotificationProvider<R> {
         Self {
             runner,
             timestamp_override: None,
+            unsafe_best_effort_actions: false,
         }
+    }
+
+    /// Opt in to Dunst's non-atomic history-pop -> action sequence.
+    /// It can target a different notification if another sender races.
+    /// Safe production use MUST leave this disabled.
+    pub fn with_unsafe_best_effort_actions(mut self, enabled: bool) -> Self {
+        self.unsafe_best_effort_actions = enabled;
+        self
     }
 
     pub fn with_timestamp(mut self, timestamp: Option<u64>) -> Self {
@@ -156,8 +170,14 @@ impl<R: CommandRunner> ActionProvider<NotificationAction> for NotificationProvid
                     )));
                 }
 
-                // Dunst addresses action invocation by displayed position rather
-                // than history id. Redisplay the exact history entry first, then
+                if !self.unsafe_best_effort_actions {
+                    return Err(ProviderError::unavailable(
+                        "Dunst cannot atomically invoke actions by history ID; unsafe best-effort invocation is disabled",
+                    ));
+                }
+                // This explicitly opted-in path remains non-atomic! Dunst
+                // addresses actions by displayed position, not history ID.
+                // Redisplay the exact history entry first, then
                 // invoke its validated action as the new topmost notification.
                 run_action(&mut self.runner, ["history-pop".to_owned(), id.to_string()])?;
                 run_action(
@@ -201,10 +221,10 @@ fn require_notification(
 
 fn validate_action_name(value: &str) -> Result<(), ProviderError> {
     if value.is_empty()
-        || value.len() > 256
-        || value
-            .chars()
-            .any(|ch| ch == '\0' || ch == '\n' || ch == '\r')
+        || value.len() > 128
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':'))
     {
         return Err(ProviderError::parse("invalid notification action name"));
     }
@@ -212,6 +232,17 @@ fn validate_action_name(value: &str) -> Result<(), ProviderError> {
 }
 
 fn parse_history(text: &str) -> Result<(Vec<NotificationEntry>, Vec<String>), ProviderError> {
+    let (records, issues) = parse_history_records(text)?;
+    Ok((
+        records.into_iter().map(|record| record.entry).collect(),
+        issues,
+    ))
+}
+
+fn parse_history_records(text: &str) -> Result<(Vec<ParsedRecord>, Vec<String>), ProviderError> {
+    if text.len() > MAX_HISTORY_BYTES {
+        return Err(ProviderError::parse("dunst history exceeds byte limit"));
+    }
     let root = JsonParser::new(text).parse()?;
     let entries = root
         .object()
@@ -227,7 +258,7 @@ fn parse_history(text: &str) -> Result<(Vec<NotificationEntry>, Vec<String>), Pr
 
 fn collect_history_entries(
     entries: &[JsonValue],
-    notifications: &mut Vec<NotificationEntry>,
+    notifications: &mut Vec<ParsedRecord>,
     issues: &mut Vec<String>,
 ) {
     for entry in entries {
@@ -240,20 +271,23 @@ fn collect_history_entries(
         }
 
         let Some(object) = entry.object() else {
-            issues.push("dunst history contained a non-object entry".to_owned());
+            push_issue(issues, "dunst history contained a non-object entry");
             continue;
         };
         let Some(id) = variant_i64(object.get("id")).and_then(|id| u32::try_from(id).ok()) else {
-            issues.push("dunst history entry missing valid id".to_owned());
+            push_issue(issues, "dunst history entry missing valid id");
             continue;
         };
+        if notifications.iter().any(|record| record.entry.id == id) {
+            push_issue(issues, "dunst history contained a duplicate id");
+            continue;
+        }
 
         let app = bounded_text(&variant_string(object.get("appname")).unwrap_or_default());
         let summary = bounded_text(&variant_string(object.get("summary")).unwrap_or_default());
         let body = bounded_text(&variant_string(object.get("body")).unwrap_or_default());
         let default_action = variant_string(object.get("default_action_name"))
-            .filter(|value| !value.trim().is_empty())
-            .map(|value| bounded_text(&value));
+            .filter(|value| validate_action_name(value).is_ok());
         let mut actions = variant_action_names(object.get("actions"));
         if let Some(default_action) = &default_action {
             if !actions.iter().any(|action| action == default_action) {
@@ -262,13 +296,32 @@ fn collect_history_entries(
         }
         actions.truncate(MAX_ACTIONS);
 
-        notifications.push(NotificationEntry {
-            id,
-            app,
-            summary,
-            body,
-            actions,
-            default_action,
+        let urgency = match variant_string(object.get("urgency"))
+            .unwrap_or_default()
+            .to_ascii_uppercase()
+            .as_str()
+        {
+            "LOW" => NotificationUrgency::Low,
+            "NORMAL" => NotificationUrgency::Normal,
+            "CRITICAL" => NotificationUrgency::Critical,
+            _ => NotificationUrgency::Unknown,
+        };
+        // Dunst represents display timeout in microseconds; not history TTL.
+        let timeout_ms = variant_i64(object.get("timeout"))
+            .and_then(|v| u64::try_from(v).ok())
+            .filter(|v| *v > 0)
+            .map(|v| v.div_ceil(1000).min(MAX_DISPLAY_TIMEOUT_MS));
+        notifications.push(ParsedRecord {
+            entry: NotificationEntry {
+                id,
+                app,
+                summary,
+                body,
+                actions,
+                default_action,
+            },
+            urgency,
+            timeout_ms,
         });
     }
 }
@@ -292,27 +345,331 @@ fn variant_action_names(value: Option<&JsonValue>) -> Vec<String> {
     let raw = values
         .iter()
         .filter_map(JsonValue::string)
-        .map(bounded_text)
-        .filter(|value| !value.is_empty())
         .collect::<Vec<_>>();
 
-    // D-Bus notification actions are conventionally alternating key/label
-    // pairs. Dunst versions that export only action keys are also accepted.
-    let candidates = if raw.len() >= 2 && raw.len() % 2 == 0 {
+    // Preserve the original key/label pairing before validation: labels may
+    // contain arbitrary punctuation, whitespace or markup.
+    let keys = if raw.len() >= 2 && raw.len() % 2 == 0 {
         raw.into_iter().step_by(2).collect::<Vec<_>>()
     } else {
         raw
     };
-    candidates.into_iter().take(MAX_ACTIONS).collect()
+    keys.into_iter()
+        .filter(|value| validate_action_name(value).is_ok())
+        .take(MAX_ACTIONS)
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 fn bounded_text(value: &str) -> String {
-    if value.chars().count() <= MAX_TEXT_CHARS {
-        return value.to_owned();
+    // Dunst history can contain remote untrusted HTML and terminal controls.
+    // Remove tags before entity decoding; render only plain text.
+    let chars: Vec<char> = value.chars().take(4096).collect();
+    let mut plain = String::new();
+    let mut index = 0;
+    while index < chars.len() && plain.chars().count() <= MAX_TEXT_CHARS {
+        let ch = chars[index];
+        if ch == '<'
+            && matches!(
+                chars.get(index + 1),
+                Some('a'..='z' | 'A'..='Z' | '/' | '!')
+            )
+        {
+            if let Some(close) = chars[index + 1..].iter().take(128).position(|c| *c == '>') {
+                index += close + 2;
+                continue;
+            }
+        }
+        if ch == '\u{1b}' {
+            index += 1;
+            if chars.get(index) == Some(&'[') {
+                index += 1;
+                while index < chars.len() {
+                    let byte = chars[index];
+                    index += 1;
+                    if ('@'..='~').contains(&byte) {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        if !(matches!(ch, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+            || (ch.is_control() && ch != '\n' && ch != '\t'))
+        {
+            plain.push(if ch == '\t' { ' ' } else { ch });
+        }
+        index += 1;
     }
-    let mut truncated = value.chars().take(MAX_TEXT_CHARS - 1).collect::<String>();
-    truncated.push('…');
-    truncated
+    let plain = plain
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&amp;", "&");
+    if plain.chars().count() <= MAX_TEXT_CHARS {
+        return plain;
+    }
+    let mut result: String = plain.chars().take(MAX_TEXT_CHARS - 1).collect();
+    result.push('…');
+    result
+}
+
+fn push_issue(issues: &mut Vec<String>, message: &str) {
+    if issues.len() < MAX_ISSUES {
+        issues.push(message.to_owned());
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotificationUrgency {
+    Low,
+    Normal,
+    Critical,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedRecord {
+    entry: NotificationEntry,
+    urgency: NotificationUrgency,
+    timeout_ms: Option<u64>,
+}
+
+/// The display timeout is metadata, not a history-retention deadline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeliveredNotification {
+    pub entry: NotificationEntry,
+    pub urgency: NotificationUrgency,
+    pub unread: bool,
+    pub first_observed_ms: u64,
+    pub display_timeout_ms: Option<u64>,
+    pub display_expired: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NotificationDeliveryEvent {
+    Added { id: u32 },
+    Updated { id: u32 },
+    Removed { id: u32 },
+    DisplayExpired { id: u32 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotificationDeliverySnapshot {
+    pub health: Health,
+    pub notifications: Vec<DeliveredNotification>,
+    pub unread_count: usize,
+    pub events: Vec<NotificationDeliveryEvent>,
+    pub issues: Vec<String>,
+}
+
+/// Passive, bounded Dunst history observer. Does NOT own the
+/// org.freedesktop.Notifications DBus name, start a daemon or create threads.
+/// Dunst history is populated after display/close, not on every Notify call.
+pub struct NotificationDelivery<R> {
+    provider: NotificationProvider<R>,
+    started: Instant,
+    entries: BTreeMap<u32, DeliveredNotification>,
+    order: Vec<u32>,
+    initialized: bool,
+    last_poll_ms: Option<u64>,
+    health: Health,
+    issues: Vec<String>,
+}
+
+impl NotificationDelivery<SystemCommandRunner> {
+    pub fn system() -> Self {
+        Self::new(SystemCommandRunner)
+    }
+}
+
+impl<R> NotificationDelivery<R> {
+    pub fn new(runner: R) -> Self {
+        Self {
+            provider: NotificationProvider::new(runner),
+            started: Instant::now(),
+            entries: BTreeMap::new(),
+            order: Vec::new(),
+            initialized: false,
+            last_poll_ms: None,
+            health: Health::Unavailable,
+            issues: Vec::new(),
+        }
+    }
+
+    pub fn mark_read(&mut self, id: u32) -> bool {
+        if let Some(entry) = self.entries.get_mut(&id) {
+            if entry.unread {
+                entry.unread = false;
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn mark_all_read(&mut self) {
+        for entry in self.entries.values_mut() {
+            entry.unread = false;
+        }
+    }
+
+    pub fn snapshot(&self) -> NotificationDeliverySnapshot {
+        self.snapshot_with_events(Vec::new())
+    }
+
+    fn snapshot_with_events(
+        &self,
+        events: Vec<NotificationDeliveryEvent>,
+    ) -> NotificationDeliverySnapshot {
+        let notifications: Vec<_> = self
+            .order
+            .iter()
+            .filter_map(|id| self.entries.get(id).cloned())
+            .collect();
+        NotificationDeliverySnapshot {
+            health: self.health,
+            unread_count: notifications.iter().filter(|entry| entry.unread).count(),
+            notifications,
+            events,
+            issues: self.issues.clone(),
+        }
+    }
+
+    fn expire_display(&mut self, now_ms: u64) -> Vec<NotificationDeliveryEvent> {
+        let mut events = Vec::new();
+        for entry in self.entries.values_mut() {
+            if !entry.display_expired
+                && entry.display_timeout_ms.is_some_and(|timeout| {
+                    now_ms >= entry.first_observed_ms.saturating_add(timeout)
+                })
+            {
+                entry.display_expired = true;
+                events.push(NotificationDeliveryEvent::DisplayExpired { id: entry.entry.id });
+            }
+        }
+        events
+    }
+
+    fn reconcile(
+        &mut self,
+        records: Vec<ParsedRecord>,
+        now_ms: u64,
+        issues: Vec<String>,
+    ) -> NotificationDeliverySnapshot {
+        let mut events = Vec::new();
+        let mut next = BTreeMap::new();
+        let mut order = Vec::new();
+        for record in records.into_iter().take(MAX_NOTIFICATIONS) {
+            let id = record.entry.id;
+            let old = self.entries.remove(&id);
+            let entry = match old {
+                Some(previous)
+                    if previous.entry == record.entry
+                        && previous.urgency == record.urgency
+                        && previous.display_timeout_ms == record.timeout_ms =>
+                {
+                    previous
+                }
+                Some(_) => {
+                    events.push(NotificationDeliveryEvent::Updated { id });
+                    DeliveredNotification {
+                        entry: record.entry,
+                        urgency: record.urgency,
+                        unread: true,
+                        first_observed_ms: now_ms,
+                        display_timeout_ms: record.timeout_ms,
+                        display_expired: false,
+                    }
+                }
+                None => {
+                    if self.initialized {
+                        events.push(NotificationDeliveryEvent::Added { id });
+                    }
+                    DeliveredNotification {
+                        entry: record.entry,
+                        urgency: record.urgency,
+                        unread: self.initialized,
+                        first_observed_ms: now_ms,
+                        display_timeout_ms: record.timeout_ms,
+                        display_expired: !self.initialized,
+                    }
+                }
+            };
+            next.insert(id, entry);
+            order.push(id);
+        }
+        if self.initialized {
+            for id in self.entries.keys() {
+                events.push(NotificationDeliveryEvent::Removed { id: *id });
+            }
+        }
+        self.entries = next;
+        self.order = order;
+        self.initialized = true;
+        self.health = if issues.is_empty() {
+            Health::Healthy
+        } else {
+            Health::Degraded
+        };
+        self.issues = issues;
+        events.extend(self.expire_display(now_ms));
+        self.snapshot_with_events(events)
+    }
+}
+
+impl<R: CommandRunner> NotificationDelivery<R> {
+    /// Reads the live Dunst history without owning its DBus service.
+    /// Actual monotonic time is internal, so callers cannot accidentally
+    /// defeat the <= 1 Hz subprocess budget.
+    pub fn poll(&mut self) -> NotificationDeliverySnapshot {
+        let elapsed = self.started.elapsed().as_millis();
+        let monotonic_ms = u64::try_from(elapsed).unwrap_or(u64::MAX);
+        self.poll_at(monotonic_ms)
+    }
+
+    /// Injected clock is private to deterministic tests.
+    fn poll_at(&mut self, monotonic_ms: u64) -> NotificationDeliverySnapshot {
+        let mut expiry_events = self.expire_display(monotonic_ms);
+        if let Some(last) = self.last_poll_ms {
+            if monotonic_ms >= last && monotonic_ms - last < MIN_REFRESH_MS {
+                return self.snapshot_with_events(expiry_events);
+            }
+        }
+        self.last_poll_ms = Some(monotonic_ms);
+        let text = match self.provider.runner.run(
+            &CommandSpec::new("dunstctl").arg("history"),
+            SNAPSHOT_LIMITS,
+        ) {
+            Ok(result) if result.status == 0 => result.stdout,
+            Ok(result) => {
+                self.health = Health::Unavailable;
+                self.issues = vec![format!(
+                    "dunstctl history exited with status {}",
+                    result.status
+                )];
+                return self.snapshot_with_events(expiry_events);
+            }
+            Err(error) => {
+                self.health = Health::Unavailable;
+                self.issues = vec![error.diagnostic()];
+                return self.snapshot_with_events(expiry_events);
+            }
+        };
+        match parse_history_records(&text) {
+            Ok((records, issues)) => {
+                let mut snapshot = self.reconcile(records, monotonic_ms, issues);
+                expiry_events.append(&mut snapshot.events);
+                snapshot.events = expiry_events;
+                snapshot
+            }
+            Err(error) => {
+                self.health = Health::Unavailable;
+                self.issues = vec![error.diagnostic()];
+                self.snapshot_with_events(expiry_events)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -690,6 +1047,7 @@ mod tests {
         );
 
         let result = NotificationProvider::new(runner)
+            .with_unsafe_best_effort_actions(true)
             .execute(NotificationAction::Invoke {
                 id: 42,
                 action: "reply".to_owned(),
@@ -712,7 +1070,196 @@ mod tests {
                 action: "reply;touch /tmp/nope".to_owned(),
             })
             .unwrap_err();
+        assert_eq!(error.category, crate::ProviderErrorCategory::Parse);
+    }
+
+    #[derive(Clone)]
+    struct SequenceRunner {
+        outputs: std::collections::VecDeque<CommandOutput>,
+        calls: std::rc::Rc<std::cell::Cell<usize>>,
+    }
+
+    impl SequenceRunner {
+        fn with_outputs(outputs: Vec<CommandOutput>) -> Self {
+            Self {
+                outputs: outputs.into(),
+                calls: std::rc::Rc::new(std::cell::Cell::new(0)),
+            }
+        }
+    }
+
+    impl CommandRunner for SequenceRunner {
+        fn run(
+            &mut self,
+            spec: &CommandSpec,
+            limits: CommandLimits,
+        ) -> Result<CommandOutput, ProviderError> {
+            assert_eq!(spec, &CommandSpec::new("dunstctl").arg("history"));
+            assert_eq!(limits, SNAPSHOT_LIMITS);
+            self.calls.set(self.calls.get() + 1);
+            self.outputs
+                .pop_front()
+                .ok_or_else(|| ProviderError::unavailable("fixture depleted"))
+        }
+    }
+
+    #[test]
+    fn delivery_observes_real_backend_snapshots_and_tracks_unread_delta() {
+        let empty = output(r#"{"data":[[]]}"#);
+        let runner = SequenceRunner::with_outputs(vec![
+            empty.clone(),
+            output(history()),
+            output(history()),
+            empty,
+        ]);
+        let calls = runner.calls.clone();
+        let mut feed = NotificationDelivery::new(runner);
+        assert!(feed.poll_at(0).notifications.is_empty());
+        assert!(feed.poll_at(300).events.is_empty());
+        assert_eq!(calls.get(), 1, "refresh throttled to one call per second");
+
+        let next = feed.poll_at(1_000);
+        assert_eq!(
+            next.events,
+            vec![NotificationDeliveryEvent::Added { id: 42 }]
+        );
+        assert_eq!(next.unread_count, 1);
+        assert_eq!(next.notifications[0].entry.summary, "Message 💬");
+        assert!(feed.mark_read(42));
+        assert!(!feed.mark_read(42));
+        assert_eq!(feed.snapshot().unread_count, 0);
+        assert!(feed.poll_at(2_000).events.is_empty());
+
+        let removed = feed.poll_at(3_000);
+        assert_eq!(
+            removed.events,
+            vec![NotificationDeliveryEvent::Removed { id: 42 }]
+        );
+        assert!(removed.notifications.is_empty());
+        assert_eq!(calls.get(), 4);
+    }
+
+    #[test]
+    fn baseline_is_read_and_display_timeout_does_not_erase_history() {
+        let decorated = history()
+            .replace(
+                r#""id":{"type":"i","data":42},"#,
+                r#""id":{"type":"i","data":42},"urgency":{"data":"CRITICAL"},"timeout":{"data":1500000},"#,
+            )
+            .replace(
+                r#"Hello\nworld"#,
+                r#"Hello <b>world</b> &amp; <i>friends</i>"#,
+            );
+        let runner = SequenceRunner::with_outputs(vec![
+            output(&decorated),
+            output(&decorated),
+            output(&decorated),
+        ]);
+        let mut feed = NotificationDelivery::new(runner);
+        let baseline = feed.poll_at(100);
+        assert!(
+            baseline.events.is_empty(),
+            "existing history must not start unread"
+        );
+        assert_eq!(baseline.unread_count, 0);
+        assert_eq!(
+            baseline.notifications[0].urgency,
+            NotificationUrgency::Critical
+        );
+        assert_eq!(
+            baseline.notifications[0].entry.body,
+            "Hello world & friends"
+        );
+        assert_eq!(baseline.notifications[0].display_timeout_ms, Some(1_500));
+        assert!(baseline.notifications[0].display_expired);
+
+        let next = feed.poll_at(1_100);
+        assert!(next.events.is_empty());
+        assert_eq!(
+            next.notifications.len(),
+            1,
+            "display timeout is not history TTL"
+        );
+        assert_eq!(next.unread_count, 0);
+    }
+
+    #[test]
+    fn transient_display_expiry_is_a_single_event() {
+        let timed = history().replace(
+            r#""id":{"type":"i","data":42},"#,
+            r#""id":{"type":"i","data":42},"urgency":{"data":"LOW"},"timeout":{"data":1000000},"#,
+        );
+        let runner = SequenceRunner::with_outputs(vec![
+            output(r#"{"data":[[]]}"#),
+            output(&timed),
+            output(&timed),
+        ]);
+        let mut feed = NotificationDelivery::new(runner);
+        feed.poll_at(0);
+        let added = feed.poll_at(1_000);
+        assert_eq!(added.unread_count, 1);
+        assert!(!added.notifications[0].display_expired);
+        let expired = feed.poll_at(2_000);
+        assert_eq!(
+            expired.events,
+            vec![NotificationDeliveryEvent::DisplayExpired { id: 42 }]
+        );
+        assert_eq!(expired.notifications.len(), 1);
+        assert_eq!(feed.poll_at(2_200).unread_count, 1);
+        assert!(feed.poll_at(2_200).events.is_empty());
+    }
+
+    #[test]
+    fn unavailable_transport_retains_last_good_history_and_does_not_invent_removals() {
+        let mut failed = output("");
+        failed.status = 2;
+        let mut feed = NotificationDelivery::new(SequenceRunner::with_outputs(vec![
+            output(history()),
+            failed,
+        ]));
+        assert_eq!(feed.poll_at(0).notifications.len(), 1);
+        let degraded = feed.poll_at(1_000);
+        assert_eq!(degraded.health, Health::Unavailable);
+        assert_eq!(degraded.notifications.len(), 1);
+        assert!(degraded.events.is_empty());
+    }
+
+    #[test]
+    fn untrusted_markup_controls_and_action_ids_are_sanitized() {
+        let value = bounded_text("A<b>safe</b>&amp;yes\u{202e}\u{1b}[31m");
+        assert_eq!(value, "Asafe&yes");
+        assert!(validate_action_name("reply_open:1").is_ok());
+        assert!(validate_action_name("reply;touch /tmp/forged").is_err());
+        assert!(validate_action_name("../illegal path").is_err());
+        assert!(parse_history(&"x".repeat(MAX_HISTORY_BYTES + 1)).is_err());
+    }
+
+    #[test]
+    fn action_labels_do_not_shift_key_pairing() {
+        let input = history().replace(
+            r#""actions":{"type":"as","data":["default","Open","reply","Reply"]}"#,
+            r#""actions":{"type":"as","data":["default","Open now!","reply","Reply <b>today</b>"]}"#,
+        );
+        let (entries, issues) = parse_history(&input).unwrap();
+        assert!(issues.is_empty());
+        assert_eq!(entries[0].actions, vec!["default", "reply"]);
+    }
+
+    #[test]
+    fn non_atomic_dunst_action_is_disabled_by_default() {
+        let mut runner = FixtureCommandRunner::default();
+        runner.insert(
+            CommandSpec::new("dunstctl").arg("history"),
+            output(history()),
+        );
+        let error = NotificationProvider::new(runner)
+            .execute(NotificationAction::Invoke {
+                id: 42,
+                action: "reply".to_owned(),
+            })
+            .unwrap_err();
         assert_eq!(error.category, crate::ProviderErrorCategory::Unavailable);
+        assert!(error.to_string().contains("non") || error.to_string().contains("atom"));
     }
 
     #[test]
