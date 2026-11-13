@@ -26,6 +26,10 @@ name = "nuraloumi-viewer"
 path = "src/bin/viewer.rs"
 
 [[bin]]
+name = "nuraloumi-browser"
+path = "src/bin/browser.rs"
+
+[[bin]]
 name = "nuraloumi-ctl"
 path = "src/bin/ctl.rs"
 

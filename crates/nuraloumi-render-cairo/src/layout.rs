@@ -156,15 +156,21 @@ pub fn layout_menu_scaled<M: MenuSource, T: TextMeasurer>(
     };
     let metrics = LayoutMetrics::default().for_text_scale(scale);
     let fullscreen_launcher = menu.id() == "launcher" && viewport.width >= 850.0;
-    let width = if fullscreen_launcher {
+    let wide_browser = menu.id() == "browser" && viewport.width >= 650.0;
+    let width = if fullscreen_launcher || wide_browser {
         (viewport.width - metrics.outer_margin * 2.0).max(1.0)
     } else {
         panel_width(viewport, metrics)
     };
     let x = ((viewport.width - width) / 2.0).max(0.0);
-    let tab_count = if menu.id() == "launcher" {
+    let tab_prefix = match menu.id() {
+        "launcher" => Some("overview.mode."),
+        "browser" => Some("browser.tab."),
+        _ => None,
+    };
+    let tab_count = if let Some(prefix) = tab_prefix {
         (0..menu.len())
-            .take_while(|&index| menu.item(index).id.starts_with("overview.mode."))
+            .take_while(|&index| menu.item(index).id.starts_with(prefix))
             .count()
     } else {
         0
@@ -176,7 +182,11 @@ pub fn layout_menu_scaled<M: MenuSource, T: TextMeasurer>(
     // Responsive overview grid: section/empty rows span the width; actions
     // become three columns only on the optional wide launcher surface. These
     // are measured scene rectangles, not a separate GPU or widget hierarchy.
-    let columns = if fullscreen_launcher { 3 } else { 1 };
+    let columns = if fullscreen_launcher || wide_browser {
+        3
+    } else {
+        1
+    };
     let mut content_rows = Vec::with_capacity(menu.len().saturating_sub(tab_count));
     let mut content_y = 0.0_f64;
     let mut group_column = 0_usize;
@@ -184,7 +194,7 @@ pub fn layout_menu_scaled<M: MenuSource, T: TextMeasurer>(
     for index in tab_count..menu.len() {
         let item = menu.item(index);
         let height = metrics.row_height(item.kind, item.subtitle.is_some(), scale);
-        if columns > 1 && item.kind.actionable() {
+        if columns > 1 && item.kind.actionable() && item.id != "browser.address" {
             let column_width = width / columns as f64;
             content_rows.push((
                 index,
@@ -845,5 +855,59 @@ mod launcher_tab_tests {
         assert_eq!(app(&wide, "application.1").y, app(&wide, "application.0").y);
         assert!(app(&wide, "application.1").x > app(&wide, "application.0").x);
         assert!(app(&wide, "application.0").height >= 48.0);
+    }
+    #[test]
+    fn browser_tabs_are_natively_drawn_in_fixed_touch_strip() {
+        let menu = MenuView {
+            id: "browser".into(),
+            title: "Nura Browser".into(),
+            items: vec![
+                MenuItemView {
+                    id: "browser.tab.0".into(),
+                    label: "First".into(),
+                    subtitle: None,
+                    shortcut: None,
+                    glyph: None,
+                    kind: RowKind::Action,
+                    enabled: false,
+                },
+                MenuItemView::action("browser.tab.1", "Second"),
+                MenuItemView::action("browser.address", "URL: https://example.org/"),
+                MenuItemView::action("browser.go", "Go"),
+            ],
+        };
+        let scene = layout_menu(
+            &menu,
+            &InteractionState::default(),
+            Viewport::new(480.0, 360.0, 1.0),
+            &Theme::dark(),
+            &ToyText,
+            false,
+        );
+        let first = scene
+            .hits
+            .iter()
+            .find(|hit| hit.item_id == "browser.tab.0")
+            .unwrap();
+        let second = scene
+            .hits
+            .iter()
+            .find(|hit| hit.item_id == "browser.tab.1")
+            .unwrap();
+        let address = scene
+            .hits
+            .iter()
+            .find(|hit| hit.item_id == "browser.address")
+            .unwrap();
+        assert_eq!(first.rect.y, second.rect.y);
+        assert_eq!(first.rect.height, 48.0);
+        assert!(second.rect.width >= 48.0);
+        assert!(!first.enabled);
+        assert!(second.enabled);
+        assert!(address.rect.y >= scene.scroll.viewport.y);
+        assert_eq!(
+            scene.hit_test(second.rect.x + 20.0, second.rect.y + 20.0),
+            Some("browser.tab.1")
+        );
     }
 }

@@ -8,6 +8,7 @@
 
 pub mod config_migration;
 pub mod config_reload;
+pub mod browser;
 pub mod maps;
 pub use nuraloumi_core::{
     Confirmation, MenuAction, MenuItem, MenuItemKind, MenuModel, MenuState, NavigationOutcome,

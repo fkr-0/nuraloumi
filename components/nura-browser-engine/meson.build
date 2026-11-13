@@ -1,0 +1,87 @@
+project('nuraloumi-browser-engine', 'c',
+  version: '0.1.0',
+  meson_version: '>=0.63',
+  default_options: ['c_std=c11', 'warning_level=3', 'werror=true'])
+
+# GCC strict C11 hides lstat() unless POSIX feature-test macros are enabled.
+# Define this globally before any GLib/system headers, for genuine ARMHF.
+add_project_arguments('-D_POSIX_C_SOURCE=200809L', language: 'c')
+
+# Explicit cross-worker source inventory; never glob or silently skip a lane.
+# Engine/navigation/control are owned and implemented by workers A/B/C.
+browser_sources = files(
+  'src/engine/main.c',
+  'src/engine/engine.c',
+  'src/engine/options.c',
+  'src/navigation/navigation.c',
+  'src/navigation/state.c',
+  'src/navigation/url.c',
+  'src/bookmarks/bookmarks.c',
+  'src/control/control.c',
+  'src/control/remote.c',
+)
+
+glib = dependency('glib-2.0', version: '>=2.70', required: true)
+gio = dependency('gio-2.0', required: true)
+gio_unix = dependency('gio-unix-2.0', required: true) # <gio/gunixsocketaddress.h>
+gobject = dependency('gobject-2.0', required: true)
+webkit = dependency('wpe-webkit-2.0', version: '>=2.54.0', required: true)
+platform = dependency('wpe-platform-2.0', required: true)
+json_glib = dependency('json-glib-1.0', required: true)
+
+if get_option('armhf_qualification')
+  if not meson.is_cross_build()
+    error('armhf_qualification requires an actual Meson cross build')
+  endif
+  if host_machine.cpu_family() != 'arm' or host_machine.system() != 'linux'
+    error('ARMHF target must be Linux on ARM, never a native host build')
+  endif
+  if not meson.get_compiler('c').has_multi_arguments('-march=armv7-a', '-mfpu=vfpv3-d16', '-mfloat-abi=hard')
+    error('Cross C compiler does not support required Tegra2 hard-float/VFPv3-D16 flags')
+  endif
+endif
+
+inc = include_directories('include')
+executable('nurabrowser-core', browser_sources,
+  include_directories: inc,
+  dependencies: [glib, gio, gio_unix, gobject, webkit, platform, json_glib],
+  install: true,
+  install_dir: get_option('libexecdir') / 'nuraloumi' / 'browser')
+
+# NO public CLI alias is installed from this backend component. The only
+# user-facing command is the NuraLoumi Rust binary: nuraloumi-browser.
+# The imported historical shell launcher remains a reference for private-root
+# qualification; it is not a second app and does not own a graphical UI.
+
+py = import('python').find_installation('python3')
+test('nuraloumi-migration-contract', py,
+  args: ['-m', 'unittest', 'discover', '-s', meson.project_source_root() / 'tests',
+         '-p', 'test_migration_contract.py', '-v'],
+  env: ['NURABROWSER_SOURCE_DIR=' + meson.project_source_root()],
+  timeout: 120)
+
+# These three scripts compile/run only small native GLib test doubles on the
+# build host. They never invoke a cross-built ARM executable or any device.
+shell = find_program('sh')
+test('engine-options-host', shell,
+  args: [meson.project_source_root() / 'src/engine/tests/run-host-smoke.sh'],
+  timeout: 120)
+test('navigation-host', shell,
+  args: [meson.project_source_root() / 'src/navigation/tests/run-host-tests.sh'],
+  timeout: 120)
+test('control-ipc-host', shell,
+  args: [meson.project_source_root() / 'src/control/tests/run-host-tests.sh'],
+  timeout: 120)
+# A real link of worker B + worker C implementation through AF_UNIX;
+# fake WebKit type/behavior exists only inside this CPU integration test.
+test('navigation-control-integration-host', shell,
+  args: [meson.project_source_root() / 'tests/run-crosslane-host.sh'],
+  timeout: 120)
+
+test('browser-remote-client-host', shell,
+  args: [meson.project_source_root() / 'tests/run-remote-host.sh'],
+  timeout: 120)
+
+test('bookmarks-persistence-host', shell,
+  args: [meson.project_source_root() / 'src/bookmarks/tests/run-host-tests.sh'],
+  timeout: 120)

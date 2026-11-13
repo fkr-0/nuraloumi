@@ -4,6 +4,25 @@
 
 Ship a coherent set of small, operating binaries for the SL101/Nura rapidly, while preserving a software-rendered recovery path and keeping every subsystem independently testable.
 
+### Nura Browser migration — local integration, 2026-11-13
+
+- [x] Move the native C/WPEPlatform engine source into NuraLoumi-owned
+      components/nura-browser-engine; preserve the previous SL101 source.
+- [x] Provide nuraloumi-browser with Rust/Cairo/wl_shm address editing,
+      navigation, horizontal tabs and durable bookmarks, without GTK.
+- [x] Implement independent native WebKitWebView tabs and bounded
+      authenticated Unix-socket commands; keep NuraLoumi's recovery shell
+      independent of WebKit.
+- [x] Install and use genuine host WPE 2.54.2 development headers for a
+      native C compile/link (not an ARMHF/device qualification).
+- [ ] Validate real WPE sandbox and Wayland pixels/touch, correct focus and
+      compositing, and the ARMHF VFPv3-D16/no-NEON dependency closure.
+- [ ] Integrate supervised startup/crash recovery; qualify packaging and
+      independently review release ownership before device replacement.
+
+See docs/architecture/NURA-BROWSER-20261113.md and
+docs/ux/NURA-BROWSER-20261113.md for current contracts and release gates.
+
 ## Patch releases — 0.0.x
 
 ### 0.0.4 — on-device validation and binary deployment
