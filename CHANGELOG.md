@@ -4,6 +4,25 @@ All notable user-visible changes to NuraLoumi are recorded here.
 
 ## [Unreleased]
 
+## [0.0.4-rc.1] — untagged candidate preparation (2026-11-13)
+
+**Source candidate only; NOT tagged, deployed or hardware qualified.**
+
+- Current origin/main now includes the reviewed media player and bounded
+  playerd IPC lineage (c7c6194, 77c71b2, 24dd60b); this candidate builds
+  on those commits instead of duplicating them.
+- Seek rejects stopped or error pipelines and failed backend seeks stop
+  rather than publishing fabricated active positions; inactive status
+  polling cannot report stale playbin timestamps.
+- Candidate Debian ARMHF build recompiles Rust std with Tegra20 VFPv3-D16
+  flags and preserves ARM mapping symbols. The strict no-NEON, no-D32 and
+  no-hwdiv ABI/ELF instruction gates remain in place.
+- Exact candidate CI for generic, Alpine and Debian, ELF/ABI and SHA
+  attestations, independent review and .106 WayVNC HH:MM verification are
+  mandatory and pending. The old panel shows literal "Clock"; a source-only
+  change is not proof of deployment.
+- Resource manager 0.0.5 and Notification Center 0.0.6 remain separate.
+
 ### Media player release-review hardening (2026-11-12)
 
 - Failed track selection, playlist removal or next-track transitions now roll
