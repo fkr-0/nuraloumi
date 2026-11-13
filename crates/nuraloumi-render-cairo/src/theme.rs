@@ -84,45 +84,18 @@ pub struct Theme {
 }
 
 impl Theme {
-    /// High-contrast light palette for the same square Cairo scene grammar.
-    pub const fn light() -> Self {
-        Self {
-            base: Color::rgb(0xf7, 0xf8, 0xfa),
-            raised: Color::rgb(0xff, 0xff, 0xff),
-            overlay: Color::rgb(0xf8, 0xf9, 0xfc),
-            card: Color::rgb(0xf0, 0xf2, 0xf7),
-            selected: Color::rgb(0xdf, 0xe5, 0xf4),
-            primary_text: Color::rgb(0x16, 0x1d, 0x2c),
-            secondary_text: Color::rgb(0x39, 0x45, 0x58),
-            hint: Color::rgb(0x48, 0x55, 0x6b),
-            accent: Color::rgb(0x30, 0x4a, 0x86),
-            warning: Color::rgb(0x86, 0x54, 0x00),
-            error: Color::rgb(0x9a, 0x24, 0x28),
-            border: Color::rgba(0x24, 0x30, 0x46, 68),
-            border_width: 1.0,
-            separator: Color::rgba(0x24, 0x30, 0x46, 65),
-            panel_radius: 0.0,
-        }
+    /// Cairo renders canonical core palette tokens, never a parallel set of
+    /// near-identical colour literals.
+    pub fn light() -> Self {
+        Self::from(&nuraloumi_core::LIGHT_THEME)
     }
 
-    pub const fn dark() -> Self {
-        Self {
-            base: Color::rgb(0x11, 0x12, 0x18),
-            raised: Color::rgb(0x18, 0x19, 0x21),
-            overlay: Color::rgb(0x1c, 0x1d, 0x27),
-            card: Color::rgb(0x1f, 0x20, 0x2b),
-            selected: Color::rgb(0x3a, 0x2d, 0x5c),
-            primary_text: Color::rgb(0xf4, 0xf4, 0xf8),
-            secondary_text: Color::rgb(0xbe, 0xbf, 0xcc),
-            hint: Color::rgb(0x8e, 0x90, 0xa0),
-            accent: Color::rgb(0xa7, 0x8b, 0xfa),
-            warning: Color::rgb(0xfb, 0xbf, 0x24),
-            error: Color::rgb(0xf8, 0x71, 0x71),
-            border: Color::rgba(0xff, 0xff, 0xff, 36),
-            border_width: 1.0,
-            separator: Color::rgba(0xff, 0xff, 0xff, 28),
-            panel_radius: 12.0,
-        }
+    pub fn dark() -> Self {
+        Self::from(&nuraloumi_core::DARK_THEME)
+    }
+
+    pub fn high_contrast() -> Self {
+        Self::from(&nuraloumi_core::theme::HIGH_CONTRAST_THEME)
     }
 }
 

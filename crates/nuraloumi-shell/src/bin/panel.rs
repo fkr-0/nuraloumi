@@ -1,4 +1,3 @@
-use nuraloumi_core::{DARK_THEME, LIGHT_THEME};
 use nuraloumi_providers::{
     session::OwnedDesktopSession, ActionProvider, ActionResult, ApplicationProvider,
     ApplicationSnapshot, AudioAction, AudioProvider, BacklightAction, BacklightProvider,
@@ -27,8 +26,7 @@ use nuraloumi_shell::{
     NotificationHistoryEntry as ShellNotificationHistoryEntry, OverviewMode, PanelAffordance,
     PanelController, PanelEdge as ShellPanelEdge, PlatformEvent as ShellPlatformEvent,
     ProviderValue, SceneTransitionClock, ShellConfig, ShellState, TaskEntry as ShellTaskEntry,
-    Theme as ShellTheme, ValueState, WifiNetworkEntry, WindowCommand, WindowControlCapabilities,
-    WindowThumbnailEntry,
+    ValueState, WifiNetworkEntry, WindowCommand, WindowControlCapabilities, WindowThumbnailEntry,
 };
 use nuraloumi_wayland::{
     BackendCapabilities as WaylandCapabilities, BackendError, DismissBackdropConfig, Frame,
@@ -68,6 +66,7 @@ fn sl101_round_bits(value: f64) -> f64 {
     if raw_exponent == EXPONENT_MASK as i32 {
         return value;
     }
+
     let exponent = raw_exponent - EXPONENT_BIAS;
     if exponent >= FRACTION_BITS {
         return value;
@@ -186,6 +185,7 @@ struct LiveMenu {
 fn surface_name(family: MenuFamily) -> &'static str {
     match family {
         MenuFamily::Launcher => "launcher",
+        MenuFamily::Appearance => "appearance",
         MenuFamily::ControlCenter => "control-center",
         MenuFamily::Network => "network",
         MenuFamily::Bluetooth => "bluetooth",
@@ -690,8 +690,8 @@ fn run_live(
     let panel_surface = backend
         .create_panel_at(
             WaylandPanelConfig {
-                height: config.panel_height,
-                exclusive_zone: i32::try_from(config.panel_height)
+                height: config.effective_panel_height(),
+                exclusive_zone: i32::try_from(config.effective_panel_height())
                     .map_err(|_| "panel height does not fit exclusive zone".to_owned())?,
                 output: output.as_ref().map(|output| output.id),
                 namespace: "nuraloumi-panel".into(),
@@ -1088,6 +1088,7 @@ fn run_live(
             let mut redraw = false;
             let mut close = false;
             let mut switch_family: Option<MenuFamily> = None;
+            let mut recreate_launcher = false;
             let mut report = None;
 
             match event.event {
@@ -1228,6 +1229,23 @@ fn run_live(
                             (!config.reduced_motion).then(|| SceneTransitionClock::new(false));
                         panel_scene = None;
                         redraw = true;
+                    } else if kind == "overview.layout" && payload == "toggle" {
+                        config.launcher_fullscreen = !config.launcher_fullscreen;
+                        recreate_launcher = true;
+                    } else if kind == "theme.select" {
+                        let palette = nuraloumi_shell::ThemePalette::parse(payload)?;
+                        config.select_palette(palette);
+                        if policy.execute_provider_actions {
+                            if let Err(error) = nuraloumi_shell::persist_palette_override(palette) {
+                                eprintln!("nuraloumi-appearance-persistence: {error}");
+                            }
+                        }
+                        menu.shell
+                            .refresh_menu(nuraloumi_shell::build_appearance_menu(
+                                config.active_palette(),
+                            ))?;
+                        panel_scene = None;
+                        redraw = true;
                     } else if kind == "control.tab" {
                         let tab = ControlCenterTab::parse(payload)?;
                         if policy.execute_provider_actions {
@@ -1250,6 +1268,8 @@ fn run_live(
                             MenuAction::Custom { kind, .. }
                                 if kind == "menu.open"
                                     || kind == "overview.mode"
+                                    || kind == "overview.layout"
+                                    || kind == "theme.select"
                                     || kind == "control.tab"
                         );
                         let launcher_action_handled = if policy.execute_provider_actions {
@@ -1488,16 +1508,52 @@ fn run_live(
 
             if let Some(family) = switch_family {
                 menu.family = family;
-                if family != MenuFamily::Launcher && menu.shell.search_focused {
-                    let _ = menu.shell.focus_search(false);
+                if family != MenuFamily::Launcher {
+                    menu.shell.state.query.clear();
+                    if menu.shell.search_focused {
+                        let _ = menu.shell.focus_search(false);
+                    }
                 }
                 if policy.execute_provider_actions && family == MenuFamily::ControlCenter {
                     refresh_control_center_tab_snapshot(&mut snapshot, ControlCenterTab::Media);
                 }
                 menu.shell.refresh_family(family, &snapshot)?;
+                if family == MenuFamily::Appearance {
+                    menu.shell
+                        .refresh_menu(nuraloumi_shell::build_appearance_menu(
+                            config.active_palette(),
+                        ))?;
+                }
                 menu.motion = (!config.reduced_motion).then(|| SceneTransitionClock::new(false));
                 panel_scene = None;
                 redraw = true;
+            }
+
+            if recreate_launcher {
+                // A Wayland layer surface cannot be safely resized just by
+                // repainting: recreate it and retain semantic search/view state.
+                let old_mode = menu.shell.overview_mode;
+                let old_query = menu.shell.state.query.clone();
+                let old_focus = menu.shell.search_focused;
+                replace_live_menu(
+                    &mut backend,
+                    &config,
+                    &snapshot,
+                    output.as_ref(),
+                    &mut panel,
+                    &mut active_menu,
+                    MenuFamily::Launcher,
+                )?;
+                if let Some(new_menu) = active_menu.as_mut() {
+                    new_menu.shell.set_overview_mode(old_mode, &snapshot)?;
+                    new_menu.shell.state.query = old_query;
+                    new_menu.shell.search_focused = old_focus;
+                    new_menu
+                        .shell
+                        .refresh_family(MenuFamily::Launcher, &snapshot)?;
+                }
+                panel_scene = None;
+                continue;
             }
 
             if close {
@@ -1700,12 +1756,19 @@ fn open_live_menu(
     panel: &mut PanelController,
     family: MenuFamily,
 ) -> Result<LiveMenu, String> {
+    let fullscreen = family == MenuFamily::Launcher && config.launcher_fullscreen;
     let requested_width = output
         .and_then(|output| {
             let scale = output.scale.max(1) as u32;
             (output.mode_width > 0).then_some(output.mode_width as u32 / scale)
         })
-        .map(|width| config.menu_width.min(width.saturating_sub(16).max(240)))
+        .map(|width| {
+            if fullscreen {
+                width.saturating_sub(16).max(240)
+            } else {
+                config.menu_width.min(width.saturating_sub(16).max(240))
+            }
+        })
         .unwrap_or(config.menu_width);
     let requested_height = output
         .and_then(|output| {
@@ -1716,7 +1779,7 @@ fn open_live_menu(
             height
                 .saturating_sub(
                     config
-                        .panel_height
+                        .effective_panel_height()
                         .saturating_add(PANEL_MENU_GAP)
                         .saturating_add(16),
                 )
@@ -1724,7 +1787,9 @@ fn open_live_menu(
         })
         .unwrap_or(640);
 
-    let panel_menu_offset = config.panel_height.saturating_add(PANEL_MENU_GAP);
+    let panel_menu_offset = config
+        .effective_panel_height()
+        .saturating_add(PANEL_MENU_GAP);
     let margin_top = if config.panel_edge == ShellPanelEdge::Top {
         panel_menu_offset as i32
     } else {
@@ -1747,7 +1812,7 @@ fn open_live_menu(
     }
     let dismiss_surface = if dismiss_backdrop_enabled {
         let (margin_top, margin_right, margin_bottom, margin_left) =
-            dismiss_backdrop_margins(config.panel_edge, config.panel_height);
+            dismiss_backdrop_margins(config.panel_edge, config.effective_panel_height());
         Some(
             backend
                 .create_dismiss_backdrop(DismissBackdropConfig {
@@ -1780,11 +1845,17 @@ fn open_live_menu(
         }
     };
     panel.open_menu(family, true);
+    let mut shell = ShellState::new(build_family(family, snapshot), config.reduced_motion)?;
+    if family == MenuFamily::Appearance {
+        shell.refresh_menu(nuraloumi_shell::build_appearance_menu(
+            config.active_palette(),
+        ))?;
+    }
     Ok(LiveMenu {
         surface,
         dismiss_surface,
         family,
-        shell: ShellState::new(build_family(family, snapshot), config.reduced_motion)?,
+        shell,
         geometry: None,
         scene: None,
         touch_regions: BTreeMap::new(),
@@ -1876,10 +1947,7 @@ fn render_panel_and_present(
     search: &PanelSearchView,
     geometry: (u32, u32, i32),
 ) -> Result<Scene, String> {
-    let theme = RenderTheme::from(match config.theme {
-        ShellTheme::Dark => &DARK_THEME,
-        ShellTheme::Light => &LIGHT_THEME,
-    });
+    let theme = RenderTheme::from(config.active_theme_tokens());
     let scene = build_panel_scene(snapshot, config, search, geometry, theme);
     present_scene(backend, surface, renderer, &scene)?;
     Ok(scene)
@@ -1901,10 +1969,7 @@ fn render_menu_and_present(
         f64::from(logical_height),
         f64::from(scale.max(1)),
     );
-    let theme_tokens = match config.theme {
-        ShellTheme::Dark => &DARK_THEME,
-        ShellTheme::Light => &LIGHT_THEME,
-    };
+    let theme_tokens = config.active_theme_tokens();
     let presentation_menu = shell.renderer_presentation_menu();
     let (scene, mut buffer) = render_menu_follow_selection(
         renderer,
@@ -2142,7 +2207,18 @@ fn build_panel_scene(
                     color: if charging { theme.accent } else { marker_color },
                 });
             }
-        } else if affordance.id != "power" {
+        } else if horizontal && matches!(affordance.id.as_str(), "apps" | "network" | "audio") {
+            draw_panel_status_icon(
+                &mut paint,
+                &affordance.id,
+                rect,
+                marker_color,
+                affordance
+                    .value
+                    .as_deref()
+                    .is_some_and(|value| value.to_ascii_lowercase().contains("muted")),
+            );
+        } else if affordance.id != "power" && affordance.id != "clock" {
             let marker = if horizontal {
                 Rect::new(rect.x + 8.0, rect.y + rect.height / 2.0 - 2.5, 5.0, 5.0)
             } else {
@@ -2156,7 +2232,10 @@ fn build_panel_scene(
 
         let available = if horizontal {
             (rect.width
-                - if affordance.id == "battery" {
+                - if matches!(
+                    affordance.id.as_str(),
+                    "battery" | "apps" | "network" | "audio"
+                ) {
                     44.0
                 } else {
                     28.0
@@ -2174,7 +2253,12 @@ fn build_panel_scene(
         paint.push(PaintNode::Text {
             origin: Point::new(
                 rect.x
-                    + if affordance.id == "battery" && horizontal {
+                    + if horizontal
+                        && matches!(
+                            affordance.id.as_str(),
+                            "battery" | "apps" | "network" | "audio"
+                        )
+                    {
                         38.0
                     } else if affordance.id == "power" && horizontal {
                         18.0
@@ -2264,6 +2348,111 @@ fn build_panel_scene(
     }
 }
 
+fn stroke_panel_icon_path(
+    paint: &mut Vec<PaintNode>,
+    center: Point,
+    path: &[(f64, f64)],
+    color: Color,
+) {
+    for pair in path.windows(2) {
+        paint.push(PaintNode::Line {
+            from: Point::new(center.x + pair[0].0, center.y + pair[0].1),
+            to: Point::new(center.x + pair[1].0, center.y + pair[1].1),
+            width: 1.8,
+            color,
+        });
+    }
+}
+
+/// Font-independent status icons: missing Nerd Fonts must not make Wi-Fi
+/// and volume controls indistinguishable on the ARMv7 software path.
+fn draw_panel_status_icon(
+    paint: &mut Vec<PaintNode>,
+    id: &str,
+    rect: Rect,
+    color: Color,
+    muted: bool,
+) {
+    let cx = rect.x + 18.0;
+    let cy = rect.y + rect.height / 2.0;
+    let center = Point::new(cx, cy);
+    match id {
+        "apps" => {
+            for (dx, dy) in [(-8.0, -8.0), (1.0, -8.0), (-8.0, 1.0), (1.0, 1.0)] {
+                paint.push(PaintNode::FillRect {
+                    rect: Rect::new(cx + dx, cy + dy, 6.0, 6.0),
+                    color,
+                });
+            }
+        }
+        "network" => {
+            stroke_panel_icon_path(
+                paint,
+                center,
+                &[
+                    (-11.0, -4.0),
+                    (-7.0, -7.0),
+                    (-3.0, -9.0),
+                    (3.0, -9.0),
+                    (7.0, -7.0),
+                    (11.0, -4.0),
+                ],
+                color,
+            );
+            stroke_panel_icon_path(
+                paint,
+                center,
+                &[
+                    (-7.0, 0.0),
+                    (-3.0, -3.0),
+                    (0.0, -4.0),
+                    (3.0, -3.0),
+                    (7.0, 0.0),
+                ],
+                color,
+            );
+            stroke_panel_icon_path(paint, center, &[(-3.0, 4.0), (0.0, 2.0), (3.0, 4.0)], color);
+            paint.push(PaintNode::FillRect {
+                rect: Rect::new(cx - 1.5, cy + 7.0, 3.0, 3.0),
+                color,
+            });
+        }
+        "audio" => {
+            stroke_panel_icon_path(
+                paint,
+                center,
+                &[
+                    (-10.0, -4.0),
+                    (-6.0, -4.0),
+                    (0.0, -9.0),
+                    (0.0, 9.0),
+                    (-6.0, 4.0),
+                    (-10.0, 4.0),
+                    (-10.0, -4.0),
+                ],
+                color,
+            );
+            if muted {
+                stroke_panel_icon_path(paint, center, &[(4.0, -6.0), (12.0, 6.0)], color);
+            } else {
+                stroke_panel_icon_path(
+                    paint,
+                    center,
+                    &[(4.0, -4.0), (7.0, 0.0), (4.0, 4.0)],
+                    color,
+                );
+                stroke_panel_icon_path(
+                    paint,
+                    center,
+                    &[(7.0, -8.0), (12.0, 0.0), (7.0, 8.0)],
+                    color,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
 fn live_panel_affordances(
     snapshot: &FixtureSnapshot,
     search: &PanelSearchView,
@@ -2311,12 +2500,12 @@ fn panel_affordance_rects(
 
     fn width_for(id: &str) -> Option<f64> {
         match id {
-            "apps" => Some(96.0),
-            "network" => Some(310.0),
-            "audio" => Some(140.0),
-            "battery" => Some(180.0),
-            "renderer" => Some(96.0),
-            "clock" => Some(84.0),
+            "apps" => Some(84.0),
+            "network" => Some(180.0),
+            "audio" => Some(104.0),
+            "battery" => Some(104.0),
+            "renderer" => Some(90.0),
+            "clock" => Some(72.0),
             "power" => Some(48.0),
             _ => None,
         }
@@ -2430,6 +2619,12 @@ fn compact_clock(value: Option<&str>) -> String {
 fn panel_text(affordance: &PanelAffordance, available_width: f64) -> String {
     let raw = match (affordance.id.as_str(), affordance.value.as_deref()) {
         ("clock", value) => compact_clock(value),
+        ("network" | "audio", Some(value)) => {
+            // The icon replaces the category label; detail stays in the
+            // controls sheet where it has room for the complete value.
+            value.split('·').next().unwrap_or(value).trim().to_owned()
+        }
+        ("network" | "audio", None) => "—".to_owned(),
         ("battery", value) => {
             let (percent, charging) = battery_presentation(value);
             match percent {
@@ -3384,6 +3579,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn status_bar_has_non_overlapping_touch_regions_across_sl101_widths() {
+        let config = ShellConfig::default();
+        let snapshot = FixtureSnapshot::default();
+        for width in [800, 1024, 1280] {
+            let scene = build_panel_scene(
+                &snapshot,
+                &config,
+                &PanelSearchView::default(),
+                (width, config.panel_height, 1),
+                RenderTheme::dark(),
+            );
+            let mut hits = scene.hits.iter().collect::<Vec<_>>();
+            hits.sort_by(|left, right| left.rect.x.total_cmp(&right.rect.x));
+            assert!(hits.iter().all(|hit| hit.rect.width >= 48.0));
+            assert!(
+                hits.windows(2)
+                    .all(|pair| { pair[0].rect.right() <= pair[1].rect.x + f64::EPSILON }),
+                "status slots must not overlap at width {width}"
+            );
+            assert!(hits.first().unwrap().rect.x >= 0.0);
+            assert!(hits.last().unwrap().rect.right() <= f64::from(width));
+        }
+    }
+
+    #[test]
     fn touch_then_synthetic_pointer_is_one_activation_but_real_mouse_still_works() {
         use std::time::{Duration, Instant};
         let mut guard = SyntheticPointerFilter::default();
@@ -3608,8 +3828,8 @@ mod tests {
             .iter()
             .find(|hit| hit.item_id == "clock")
             .unwrap();
-        assert_eq!(apps.rect.width, 96.0);
-        assert_eq!(network.rect.width, 310.0);
+        assert_eq!(apps.rect.width, 84.0);
+        assert_eq!(network.rect.width, 180.0);
         assert_eq!(search.rect.width, 360.0);
         assert!(network.rect.right() < search.rect.x);
         assert!(search.rect.right() < audio.rect.x);
@@ -3703,12 +3923,59 @@ mod tests {
         let affordance = PanelAffordance {
             id: "network".into(),
             label: "Network".into(),
-            value: Some("Werkstatt · 82%".into()),
+            value: Some("Werkstatt-Gastnetz · 82%".into()),
             state: ValueState::Ready,
         };
         let label = panel_text(&affordance, 70.0);
         assert!(label.ends_with('…'));
         assert!(label.chars().count() <= 10);
+    }
+
+    #[test]
+    fn status_bar_draws_network_and_audio_icons_without_redundant_labels() {
+        let mut snapshot = FixtureSnapshot::default();
+        snapshot.network.value = Some("Was Geht Lan · 77%".into());
+        snapshot.audio.value = Some("35% · Speakers".into());
+        let config = ShellConfig::default();
+        let scene = build_panel_scene(
+            &snapshot,
+            &config,
+            &PanelSearchView::default(),
+            (1280, config.panel_height, 1),
+            RenderTheme::dark(),
+        );
+        let texts: Vec<&str> = scene
+            .paint
+            .iter()
+            .filter_map(|node| match node {
+                PaintNode::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(texts.contains(&"Was Geht Lan"));
+        assert!(texts.contains(&"35%"));
+        assert!(!texts.iter().any(|text| {
+            text.starts_with("Network") || text.starts_with("Audio") || text.starts_with("Clock")
+        }));
+        for id in ["network", "audio"] {
+            let hit = scene.hits.iter().find(|hit| hit.item_id == id).unwrap();
+            let strokes = scene
+                .paint
+                .iter()
+                .filter(|node| {
+                    matches!(node,
+                        PaintNode::Line { from, to, width, .. }
+                            if (*width - 1.8).abs() < 0.001
+                                && from.x > hit.rect.x && from.x < hit.rect.right()
+                                && to.x > hit.rect.x && to.x < hit.rect.right()
+                    )
+                })
+                .count();
+            assert!(
+                strokes >= 6,
+                "{id} should render a recognizable vector icon"
+            );
+        }
     }
 
     #[test]

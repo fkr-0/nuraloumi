@@ -181,49 +181,74 @@ const _: () = {
 
 pub const DARK_THEME: ThemeTokens = ThemeTokens {
     surfaces: SurfaceColors {
-        base: UiColor::rgb(0x0b, 0x0d, 0x0f),
-        raised: UiColor::rgb(0x10, 0x12, 0x15),
-        overlay: UiColor::rgb(0x14, 0x17, 0x1b),
-        card: UiColor::rgb(0x17, 0x1a, 0x1f),
-        selected: UiColor::rgb(0x24, 0x29, 0x30),
+        base: UiColor::rgb(0x15, 0x1b, 0x24),
+        raised: UiColor::rgb(0x20, 0x29, 0x38),
+        overlay: UiColor::rgb(0x26, 0x32, 0x44),
+        card: UiColor::rgb(0x28, 0x36, 0x48),
+        selected: UiColor::rgb(0x35, 0x4b, 0x64),
     },
     text: TextColors {
-        primary: UiColor::rgb(0xe8, 0xea, 0xed),
-        secondary: UiColor::rgb(0xa9, 0xae, 0xb6),
-        hint: UiColor::rgb(0x7b, 0x81, 0x8a),
-        accent: UiColor::rgb(0x95, 0x9e, 0xac),
-        warning: UiColor::rgb(0xc9, 0xa2, 0x5d),
-        error: UiColor::rgb(0xd7, 0x78, 0x78),
+        primary: UiColor::rgb(0xf1, 0xf5, 0xfa),
+        secondary: UiColor::rgb(0xc1, 0xd0, 0xe1),
+        hint: UiColor::rgb(0xab, 0xb7, 0xc8),
+        accent: UiColor::rgb(0x83, 0xb7, 0xee),
+        warning: UiColor::rgb(0xff, 0xce, 0x54),
+        error: UiColor::rgb(0xff, 0x8c, 0x93),
     },
     border: BorderTokens {
         width: 1.0,
         radius_small: 0.0,
         radius_menu: 0.0,
-        color: UiColor::rgb(0x2c, 0x31, 0x37),
+        color: UiColor::rgb(0x50, 0x64, 0x7a),
     },
 };
 
 pub const LIGHT_THEME: ThemeTokens = ThemeTokens {
     surfaces: SurfaceColors {
-        base: UiColor::rgb(0xf8, 0xf8, 0xfc),
+        base: UiColor::rgb(0xf5, 0xf7, 0xfa),
         raised: UiColor::rgb(0xff, 0xff, 0xff),
-        overlay: UiColor::rgb(0xfa, 0xfa, 0xff),
+        overlay: UiColor::rgb(0xf9, 0xfb, 0xfd),
         card: UiColor::rgb(0xff, 0xff, 0xff),
-        selected: UiColor::rgb(0xed, 0xe9, 0xfe),
+        selected: UiColor::rgb(0xdc, 0xe8, 0xf6),
     },
     text: TextColors {
-        primary: UiColor::rgb(0x18, 0x18, 0x20),
-        secondary: UiColor::rgb(0x4b, 0x4e, 0x5c),
-        hint: UiColor::rgb(0x6b, 0x72, 0x80),
-        accent: UiColor::rgb(0x6d, 0x28, 0xd9),
-        warning: UiColor::rgb(0xb4, 0x53, 0x09),
-        error: UiColor::rgb(0xb9, 0x1c, 0x1c),
+        primary: UiColor::rgb(0x18, 0x24, 0x33),
+        secondary: UiColor::rgb(0x40, 0x55, 0x6b),
+        hint: UiColor::rgb(0x53, 0x67, 0x7c),
+        accent: UiColor::rgb(0x2b, 0x60, 0x9a),
+        warning: UiColor::rgb(0x9a, 0x5c, 0x12),
+        error: UiColor::rgb(0xa6, 0x27, 0x35),
     },
     border: BorderTokens {
         width: 1.0,
         radius_small: 0.0,
         radius_menu: 0.0,
-        color: UiColor::rgb(0xd1, 0xd5, 0xdb),
+        color: UiColor::rgb(0xbb, 0xca, 0xda),
+    },
+};
+
+/// High-contrast, square-corner software-rendered accessibility palette.
+pub const HIGH_CONTRAST_THEME: ThemeTokens = ThemeTokens {
+    surfaces: SurfaceColors {
+        base: UiColor::rgb(0x09, 0x0b, 0x0f),
+        raised: UiColor::rgb(0x19, 0x1d, 0x24),
+        overlay: UiColor::rgb(0x22, 0x26, 0x30),
+        card: UiColor::rgb(0x25, 0x2d, 0x38),
+        selected: UiColor::rgb(0x37, 0x5b, 0x8e),
+    },
+    text: TextColors {
+        primary: UiColor::rgb(0xff, 0xff, 0xff),
+        secondary: UiColor::rgb(0xe5, 0xeb, 0xf2),
+        hint: UiColor::rgb(0xc7, 0xd2, 0xe0),
+        accent: UiColor::rgb(0xff, 0xce, 0x54),
+        warning: UiColor::rgb(0xff, 0xce, 0x54),
+        error: UiColor::rgb(0xff, 0x80, 0x91),
+    },
+    border: BorderTokens {
+        width: 2.0,
+        radius_small: 0.0,
+        radius_menu: 0.0,
+        color: UiColor::rgb(0x87, 0x95, 0xaa),
     },
 };
 
@@ -269,7 +294,7 @@ mod tests {
 
     #[test]
     fn primary_and_secondary_text_reach_body_contrast_on_base_and_card() {
-        for theme in [DARK_THEME, LIGHT_THEME] {
+        for theme in [DARK_THEME, LIGHT_THEME, HIGH_CONTRAST_THEME] {
             for surface in [theme.surfaces.base, theme.surfaces.card] {
                 assert!(contrast_ratio(theme.text.primary, surface) >= 4.5);
                 assert!(contrast_ratio(theme.text.secondary, surface) >= 4.5);
