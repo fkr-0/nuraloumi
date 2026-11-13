@@ -195,6 +195,10 @@ pub fn stage_package(
         &root.join("packaging/nuraloumi.toml.example"),
         &config_dir.join("nuraloumi.toml.example"),
     )?;
+    copy_required(
+        &root.join("packaging/applications/nuraloumi-player.desktop"),
+        &stage.join("share/applications/nuraloumi-player.desktop"),
+    )?;
     copy_tree(
         &root.join("docs/qualification"),
         &share_dir.join("qualification"),
@@ -325,6 +329,7 @@ pub fn check_package(root: &Path, stage: &Path) -> Result<(), String> {
         "README.md",
         "LICENSE",
         "config/nuraloumi.toml.example",
+        "share/applications/nuraloumi-player.desktop",
         "share/nuraloumi/qualification/README.md",
     ] {
         if !expected_files.contains_key(required) {
