@@ -284,6 +284,37 @@ contract. Real Dunst numeric ID reuse after restart remains a separate P2
 identity issue. All work remains local; no production notification service,
 Wayland session or device was modified.
 
+## P2: incomplete Dunst history beyond the 64-entry snapshot limit (2026-11-13)
+
+The P1 success verifier could previously mistake an ID absent from the first
+64 history entries for a deleted notification. Dunst history parsing silently
+stopped at `MAX_NOTIFICATIONS`, yet called a partial snapshot `Healthy`.
+
+- `collect_history_entries` now reports whether an additional non-array
+  entry exists after filling the bounded 64-entry vector, including in
+  nested history groups. It still avoids allocating or decoding further
+  notification records. Empty trailing nested groups do **not** cause a
+  false positive for exactly 64 records.
+- Any overflow records an explicit issue (`snapshot is incomplete`), so
+  `NotificationSnapshot.meta.health == Degraded`, **not** `Healthy`.
+  Existing `clear_exact_history` rejects non-healthy snapshots for both
+  `ClearKnown` and legacy `Clear` before issuing `history-rm`.
+- The UI's `verified_clear_result` already requires `Healthy`; a post-clear
+  history with 65+ records is now rejected as unverified, even if the
+  original confirmed ID is hidden as the 65th entry.
+- Deterministic tests cover counts 0, 63, **64**, **65**, and 70, including
+  empty trailing nested arrays. They assert accurate snapshot health and
+  bounded results; they also cover rejection of both destructive actions
+  on incomplete history and the end-to-end UI verification helper with the
+  still-present ID at position 65.
+- This deliberately fails closed rather than treating a partial snapshot
+  as a complete list. Removing entries from a history larger than the limit
+  will require an explicit future pagination or full-validation design,
+  which must not silently weaken safety or the Tegra20 memory bound.
+
+This does not resolve unrelated daemon-generation ID reuse (P2), nor does it
+claim qualification on the physical SL101 .106 device.
+
 ## Remaining external qualification gates
 
 - In a controlled test bus with explicit Dunst config and lifecycle, prove

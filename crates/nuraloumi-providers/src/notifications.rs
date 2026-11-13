@@ -347,22 +347,35 @@ fn parse_history_records(text: &str) -> Result<(Vec<ParsedRecord>, Vec<String>),
 
     let mut notifications = Vec::new();
     let mut issues = Vec::new();
-    collect_history_entries(entries, &mut notifications, &mut issues);
+    if collect_history_entries(entries, &mut notifications, &mut issues) {
+        // History is intentionally bounded for low-memory devices. Never
+        // describe a partial result as healthy: callers must not infer that
+        // absent IDs were removed, or mutate from an incomplete snapshot.
+        push_issue(
+            &mut issues,
+            "dunst history exceeded notification limit; snapshot is incomplete",
+        );
+    }
     Ok((notifications, issues))
 }
 
+/// Returns true when more history entries exist than the snapshot can keep.
+/// Traversal stops at the first extra leaf, without allocating the extra
+/// entry. Empty nested groups after exactly MAX_NOTIFICATIONS are harmless.
 fn collect_history_entries(
     entries: &[JsonValue],
     notifications: &mut Vec<ParsedRecord>,
     issues: &mut Vec<String>,
-) {
+) -> bool {
     for entry in entries {
-        if notifications.len() >= MAX_NOTIFICATIONS {
-            return;
-        }
         if let Some(group) = entry.array() {
-            collect_history_entries(group, notifications, issues);
+            if collect_history_entries(group, notifications, issues) {
+                return true;
+            }
             continue;
+        }
+        if notifications.len() >= MAX_NOTIFICATIONS {
+            return true;
         }
 
         let Some(object) = entry.object() else {
@@ -419,6 +432,7 @@ fn collect_history_entries(
             timeout_ms,
         });
     }
+    false
 }
 
 fn variant_data(value: Option<&JsonValue>) -> Option<&JsonValue> {
@@ -1338,6 +1352,75 @@ mod tests {
         let (entries, issues) = parse_history(&input).unwrap();
         assert!(issues.is_empty());
         assert_eq!(entries[0].actions, vec!["default", "reply"]);
+    }
+
+    fn history_with_count(count: usize) -> String {
+        let rows = (0..count)
+            .map(|index| {
+                format!(
+                    r#"{{"id":{{"data":{}}},"appname":{{"data":"fixture"}},"summary":{{"data":"item"}}}}"#,
+                    index + 1
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        // Include empty trailing nested groups to verify that exactly 64
+        // actual entries are not falsely classified as truncated.
+        format!(r#"{{"data":[[{rows}],[],[[]]]}}"#)
+    }
+
+    #[test]
+    fn history_at_limit_is_healthy_but_65th_entry_degrades_snapshot() {
+        for count in [0, 63, 64, 65, 70] {
+            let fixture = history_with_count(count);
+            let mut runner = FixtureCommandRunner::default();
+            runner.insert(
+                CommandSpec::new("dunstctl").arg("history"),
+                output(&fixture),
+            );
+            let snapshot = NotificationProvider::new(runner).snapshot().unwrap();
+
+            let truncated = count > MAX_NOTIFICATIONS;
+            assert_eq!(
+                snapshot.meta.health,
+                if truncated {
+                    Health::Degraded
+                } else {
+                    Health::Healthy
+                },
+                "history count {count}"
+            );
+            assert_eq!(snapshot.notifications.len(), count.min(MAX_NOTIFICATIONS));
+            assert_eq!(
+                snapshot
+                    .issues
+                    .iter()
+                    .any(|issue| issue.contains("incomplete")),
+                truncated,
+                "history count {count}: {:?}",
+                snapshot.issues
+            );
+        }
+    }
+
+    #[test]
+    fn known_and_legacy_clear_fail_closed_on_truncated_history() {
+        let mut runner = FixtureCommandRunner::default();
+        runner.insert(
+            CommandSpec::new("dunstctl").arg("history"),
+            output(&history_with_count(MAX_NOTIFICATIONS + 1)),
+        );
+        // No history-rm fixture: a failed test with an unexpected action
+        // could not accidentally pass as a successful removal.
+        let mut provider = NotificationProvider::new(runner);
+        for action in [
+            NotificationAction::ClearKnown { ids: vec![1] },
+            NotificationAction::Clear,
+        ] {
+            let error = provider.execute(action).unwrap_err();
+            assert_eq!(error.category, crate::ProviderErrorCategory::Unavailable);
+            assert!(error.to_string().contains("healthy"), "{error:?}");
+        }
     }
 
     fn history_with_two_entries() -> String {

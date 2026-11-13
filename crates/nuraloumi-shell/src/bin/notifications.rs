@@ -1143,6 +1143,7 @@ mod tests {
         history_reads: usize,
         fail_second_history: bool,
         retain_removed_id: bool,
+        reintroduce_id_as_65th: bool,
     }
 
     impl CommandRunner for ReadAfterClearRunner {
@@ -1172,6 +1173,16 @@ mod tests {
                         Ok(success(
                             r#"{"data":[[{"id":{"data":42},"appname":{"data":"test"},"summary":{"data":"Alert"},"body":{"data":"message"}}]]}"#,
                         ))
+                    } else if self.reintroduce_id_as_65th {
+                        // History grew after removal. The original 64 entries
+                        // do not contain ID 42, but the 65th does: absence
+                        // from the bounded snapshot must NOT prove deletion.
+                        let entries = (100..164)
+                            .chain(std::iter::once(42))
+                            .map(|id| format!(r#"{{"id":{{"data":{id}}}}}"#))
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        Ok(success(&format!(r#"{{"data":[[{entries}]]}}"#)))
                     } else {
                         Ok(success(r#"{"data":[]}"#))
                     }
@@ -1217,6 +1228,29 @@ mod tests {
         assert_eq!(snapshot.meta.health, Health::Healthy);
         assert!(snapshot.notifications.is_empty());
         assert!(result.unwrap().contains("removed 1 known"));
+    }
+
+    #[test]
+    fn post_clear_65th_entry_cannot_fake_verified_absence() {
+        let mut provider = NotificationProvider::new(ReadAfterClearRunner {
+            reintroduce_id_as_65th: true,
+            ..Default::default()
+        });
+        let (result, snapshot) = execute_and_verify_clear(&mut provider, vec![42]);
+        assert_eq!(snapshot.notifications.len(), 64);
+        assert_eq!(snapshot.meta.health, Health::Degraded);
+        assert!(snapshot
+            .issues
+            .iter()
+            .any(|issue| issue.contains("incomplete")));
+        assert!(
+            !snapshot.notifications.iter().any(|entry| entry.id == 42),
+            "test fixture must hide the lingering ID beyond the snapshot bound"
+        );
+        let error = result.expect_err("incomplete post-clear history cannot prove ID removal");
+        assert!(error.contains("not verified"), "{error}");
+        let menu = model(&snapshot, "", None, Some(&error), false);
+        assert!(menu.item_by_id("feedback").is_some());
     }
 
     #[test]
