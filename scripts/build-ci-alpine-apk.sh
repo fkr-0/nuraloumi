@@ -13,12 +13,14 @@ grep -Fx 'git_dirty=false' "$manifest" >/dev/null
 grep -Fx "git_commit=$expected_sha" "$manifest" >/dev/null
 test "$(abuild -A)" = armv7
 version=$(sed -n 's/^version=//p' "$manifest")
-case "$version" in
-  *[!0-9a-zA-Z.+-]*|'') echo 'invalid version' >&2; exit 1;;
-esac
-# APK versions allow _preN, but not the arbitrary _devN SemVer suffix.
-# 0.0.4-dev.2 thus becomes 0.0.4_pre2, below the stable 0.0.4.
-apkver=$(printf '%s' "$version" | sed 's/-dev\./_pre/')
+# Fail closed on unknown prerelease formats. Alpine's abuild accepts _preN
+# and _rcN, but rejects SemVer hyphen suffixes such as 0.0.4-rc.1.
+printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-(dev|rc)\.[0-9]+)?$' || {
+    echo "invalid or unsupported Alpine package version: $version" >&2
+    exit 1
+}
+# Preserve ordering: 0.0.4_pre2 < 0.0.4_rc1 < 0.0.4.
+apkver=$(printf '%s' "$version" | sed 's/-dev\./_pre/;s/-rc\./_rc/')
 mkdir -p "$out"
 out=$(cd "$out" && pwd)
 tmp=$(mktemp -d /tmp/nuraloumi-abuild.XXXXXXXX)

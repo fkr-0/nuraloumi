@@ -1,6 +1,7 @@
 """Fail closed when either native-package CI lane loses provenance or ABI gates."""
 from pathlib import Path
 import re
+import subprocess
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -12,6 +13,46 @@ DEB_SCRIPT = (ROOT / "scripts/build-ci-debian-deb.sh").read_text()
 
 
 class NativePackageCiContract(unittest.TestCase):
+    def test_alpine_prerelease_versions_use_abuild_valid_suffixes(self):
+        # Exercise the exact sed conversion used by the CI packaging script,
+        # not a separately reimplemented Python version mapper.
+        matched = re.search(
+            r"^apkver=\$\(printf '%s' \"\$version\" \| sed '([^']+)'\)$",
+            APK_SCRIPT, re.MULTILINE,
+        )
+        self.assertIsNotNone(matched, "APK version conversion must remain testable")
+        sed_expression = matched.group(1)
+        for source, expected in (
+            ("0.0.4-dev.2", "0.0.4_pre2"),
+            ("0.0.4-rc.1", "0.0.4_rc1"),
+            ("0.0.4-rc.12", "0.0.4_rc12"),
+            ("0.0.4", "0.0.4"),
+        ):
+            with self.subTest(source=source):
+                result = subprocess.run(
+                    ["sed", sed_expression], input=source + "\n", text=True,
+                    check=True, capture_output=True,
+                )
+                self.assertEqual(result.stdout.strip(), expected)
+                self.assertNotIn("-", result.stdout)
+
+        self.assertIn(
+            r"grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-(dev|rc)\.[0-9]+)?$'",
+            APK_SCRIPT,
+        )
+        allow = re.search(r"grep -Eq '([^']+)'", APK_SCRIPT)
+        self.assertIsNotNone(allow)
+        for source in (
+            "0.0.4-rc.x", "0.0.4-dev.bad", "0.0.4-beta.1",
+            "0.0.4-rc.1-extra", "0.0.4-pre", "", "../0.0.4",
+        ):
+            with self.subTest(reject=source):
+                result = subprocess.run(
+                    ["grep", "-Eq", allow.group(1)],
+                    input=source + "\n", text=True, capture_output=True,
+                )
+                self.assertNotEqual(result.returncode, 0)
+
     def test_native_packaging_requires_prior_binary_audits(self):
         for ci, native in (
             (MUSL, "sh /work/scripts/build-ci-alpine-apk.sh"),
