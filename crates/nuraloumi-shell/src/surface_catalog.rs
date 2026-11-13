@@ -31,6 +31,7 @@ const EMBEDDED_MENUS: &[&str] = &[
 // These are existing, separately launched shell binaries, not evidence of
 // active processes. A missing binary is never advertised as installed.
 const PACKAGED_SURFACES: &[(&str, &str)] = &[
+    ("browser", "nuraloumi-browser"),
     ("calendar", "nuraloumi-calendar"),
     ("clipboard", "nuraloumi-clipboard"),
     ("editor", "nuraloumi-editor"),
@@ -619,6 +620,32 @@ mod tests {
                 .open_state,
             SurfaceOpenState::Closed
         );
+    }
+
+    #[test]
+    fn native_browser_is_discoverable_only_when_installed_and_never_assumed_open() {
+        let dir = TestDir::new();
+        assert!(!SurfaceCatalog::discover(&dir.0, &[]).contains("browser"));
+        dir.executable("nuraloumi-browser", 0o644);
+        assert!(!SurfaceCatalog::discover(&dir.0, &[]).contains("browser"));
+        fs::set_permissions(
+            dir.0.join("nuraloumi-browser"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        let catalog = SurfaceCatalog::discover(&dir.0, &[]);
+        assert!(catalog.contains("browser"));
+        let observed = catalog
+            .observe(None, None, 0, 423)
+            .into_iter()
+            .find(|row| row.name == "browser")
+            .unwrap();
+        assert_eq!(
+            catalog.entries.get("browser"),
+            Some(&SurfaceKind::InstalledBinary)
+        );
+        assert_eq!(observed.open_state, SurfaceOpenState::Unknown);
+        assert_eq!(observed.pid, 0);
     }
 
     #[test]
