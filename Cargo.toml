@@ -10,7 +10,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.0.4-dev.3"
+version = "0.0.5-dev.1"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/fkr-0/nuraloumi"

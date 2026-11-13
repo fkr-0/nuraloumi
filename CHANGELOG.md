@@ -4,6 +4,10 @@ All notable user-visible changes to NuraLoumi are recorded here.
 
 ## [Unreleased]
 
+## [0.0.5-dev.1] - 2026-11-13
+
+Development patch release for SL101 qualification, not a production-qualified image. Integrates the reviewed media-player and ARMv7 CI changes from remote `main` with the newer local notifications, browser, launcher, and appearance-persistence fixes. Hardware deployment remains gated on exact-SHA CI artifacts and device smoke checks.
+
 ### Media player release-review hardening (2026-11-12)
 
 - Failed track selection, playlist removal or next-track transitions now roll
