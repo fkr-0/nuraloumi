@@ -411,10 +411,21 @@ impl Player {
                 if self.gst.is_none() {
                     return Err("no media loaded".into());
                 }
+                // An initialized playbin may remain after Stop or a failed
+                // open. Never treat it as an active stream for seeking.
+                if self.status != "Playing" && self.status != "Paused" {
+                    return Err("no active stream for seek".into());
+                }
                 if duration > 0 && position_ms > duration {
                     return Err("seek beyond duration".into());
                 }
-                self.gst()?.seek(position_ms)?;
+                // A failed backend seek leaves the pipeline's position
+                // undefined. Stop it rather than publishing Playing with
+                // a position that we cannot justify.
+                if let Err(e) = self.gst()?.seek(position_ms) {
+                    self.stop();
+                    return Err(e);
+                }
                 self.position_ms = position_ms;
                 Ok(())
             }
@@ -460,6 +471,11 @@ impl Player {
         self.duration_ms = 0;
     }
     pub fn tick(&mut self) {
+        // Avoid repopulating stopped/error snapshots from stale playbin
+        // queries after a failed seek, EOS or backend error.
+        if self.status != "Playing" && self.status != "Paused" {
+            return;
+        }
         let Some(gst) = &mut self.gst else {
             return;
         };
@@ -896,6 +912,25 @@ mod tests {
         assert!(!player.command(Command::Remove { index: 0 }).ok);
         assert_eq!(player.playlist, original);
         assert_eq!(load_playlist(&path).unwrap(), original);
+        let _ = fs::remove_file(path);
+    }
+    #[test]
+    fn invalid_seek_never_sets_a_spurious_position_or_active_status() {
+        let path = temp_file("invalid-seek.json");
+        let mut player = Player::open(path.clone()).unwrap();
+        let reply = player.command(Command::Seek {
+            position_ms: 10_000,
+        });
+        assert!(!reply.ok);
+        assert_eq!(reply.state.position_ms, 0);
+        assert_ne!(reply.state.status, "Playing");
+        assert_ne!(reply.state.status, "Paused");
+        // A status poll is not a playback action and must not erase the
+        // diagnostic or invent position on an absent/stopped pipeline.
+        let status = player.command(Command::Status);
+        assert!(status.ok);
+        assert_eq!(status.state.position_ms, 0);
+        assert_eq!(status.state.error, reply.state.error);
         let _ = fs::remove_file(path);
     }
     #[test]
