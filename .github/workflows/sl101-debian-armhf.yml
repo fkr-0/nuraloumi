@@ -80,7 +80,11 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
+          # Recompile std with the same -d32 flags as the application.
+          # The precompiled armv7 Rust sysroot can contain D16-D31.
+          toolchain: nightly-2026-11-12
           targets: armv7-unknown-linux-gnueabihf
+          components: rust-src
 
       - name: Validate target and tracked CI contract
         shell: bash
@@ -98,7 +102,8 @@ jobs:
         run: |
           set -euo pipefail
           rustc -vV
-          cargo build --locked --release --workspace --bins --target "$TARGET"
+          # -Z build-std applies RUSTFLAGS (notably -d32) to the Rust sysroot.
+          cargo -Z build-std=std,panic_abort build --locked --release --workspace --bins --target "$TARGET"
           python3 scripts/package-binaries.py | tee /tmp/sl101-runtime-binaries.txt
           test "$(wc -l < /tmp/sl101-runtime-binaries.txt)" -ge 4
           du -sh "target/$TARGET/release"

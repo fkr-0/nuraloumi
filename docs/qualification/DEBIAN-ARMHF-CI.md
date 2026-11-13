@@ -19,6 +19,12 @@ Workflow: .github/workflows/sl101-debian-armhf.yml
 - Rust cross target is armv7-unknown-linux-gnueabihf (not musl).
 - Linker flags: -march=armv7-a -mfpu=vfpv3-d16 -mfloat-abi=hard.
 - Rust flags: -C target-feature=-neon,-d32,-hwdiv,-hwdiv-arm.
+- CI qualification experiment (2026-11-13): pinned nightly-2026-11-12
+  with rust-src and Cargo `-Z build-std=std,panic_abort` recompiles the Rust
+  target sysroot under those same flags. The prebuilt stdlib was a suspected
+  source of D16-D31 instructions despite `-d32` on user crates.
+  Keep this experimental until the exact GitHub runner passes the existing
+  strict ELF opcode audit; do not deploy an unverified build.
 - Cargo builds all declared workspace release binaries and existing
   cargo xtask package / package-check enforces completeness and SHA256
   per-file integrity.
@@ -68,10 +74,10 @@ and use the previous desktop. Avoid overwriting production binaries.
 
 - Both workflows package one committed and pushed Git source revision.
   Uncommitted changes from other agents are not implicitly included.
-- Debian:trixie multiarch repositories and stable Rust are live moving
-  inputs; the workflow records versions, but currently does not pin
-  digest-addressed container images, an apt snapshot or a specific
-  Rust toolchain release. Rebuilds are auditable, not necessarily
+- Debian:trixie multiarch repositories remain moving inputs. The workflow
+  pins nightly-2026-11-12 specifically to rebuild Rust core/std with D16-safe
+  target features, but does not pin digest-addressed container images or an
+  apt snapshot. Rebuilds are auditable, not necessarily
   byte-identical over time.
 - Static ELF validation is a safety gate, not evidence that every
   Cairo/Wayland/XKB path executes safely on Tegra20. The tablet runtime
