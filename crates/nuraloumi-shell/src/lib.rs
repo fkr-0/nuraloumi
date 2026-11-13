@@ -1340,12 +1340,30 @@ pub fn build_launcher_menu() -> MenuModel {
 }
 
 fn launcher_application_item(application: &ApplicationEntry) -> MenuItem {
-    let mut detail = Vec::new();
-    if let Some(generic_name) = &application.generic_name {
-        detail.push(generic_name.clone());
-    }
-    if !application.keywords.is_empty() {
-        detail.push(
+    // Desktop IDs and search keywords are implementation metadata, not
+    // useful subtitles. Keep just one human-readable generic name.
+    let subtitle = application
+        .generic_name
+        .as_deref()
+        .filter(|name| !name.trim().is_empty() && *name != application.label);
+    custom_action(
+        &format!("overview.app.{}", application.id),
+        &application.label,
+        subtitle,
+        "app.launch",
+        &application.id,
+        application.launchable,
+    )
+}
+
+fn launcher_application_search_item(application: &ApplicationEntry, query: &str) -> MenuItem {
+    let mut item = launcher_application_item(application);
+    if !query.trim().is_empty() && !application.keywords.is_empty() {
+        // Keep the existing keyword-based search semantics, but only expose
+        // keyword metadata when a search is active. The normal launcher list
+        // stays compact and free of technical desktop-entry fields.
+        let mut parts = item.subtitle.take().into_iter().collect::<Vec<_>>();
+        parts.push(
             application
                 .keywords
                 .iter()
@@ -1354,21 +1372,9 @@ fn launcher_application_item(application: &ApplicationEntry) -> MenuItem {
                 .collect::<Vec<_>>()
                 .join(" · "),
         );
+        item.subtitle = Some(parts.join(" · "));
     }
-    let subtitle = if detail.is_empty() {
-        Some(application.id.as_str())
-    } else {
-        None
-    };
-    let joined_detail = (!detail.is_empty()).then(|| detail.join(" · "));
-    custom_action(
-        &format!("overview.app.{}", application.id),
-        &application.label,
-        joined_detail.as_deref().or(subtitle),
-        "app.launch",
-        &application.id,
-        application.launchable,
-    )
+    item
 }
 
 pub fn build_launcher_menu_for(snapshot: &FixtureSnapshot, mode: OverviewMode) -> MenuModel {
@@ -1381,18 +1387,9 @@ fn build_launcher_menu_for_query(
     query: &str,
 ) -> MenuModel {
     let searching = !query.trim().is_empty();
-    let search_label = match mode {
-        OverviewMode::All => "Search applications and windows…",
-        OverviewMode::Windows => "Search open windows…",
-        OverviewMode::Apps => "Search applications…",
-        OverviewMode::Tasks => "Search running tasks…",
-        OverviewMode::Desktops => "Search desktops…",
-    };
-    let mut items = vec![status(
-        "launcher.search",
-        search_label,
-        "Type while search is focused",
-    )];
+    // The persistent panel offers a real search field. A duplicate,
+    // non-interactive pseudo-input obscured the first real menu items.
+    let mut items = Vec::new();
 
     if mode != OverviewMode::All {
         items.push(section("launcher.views", "View"));
@@ -1431,7 +1428,7 @@ fn build_launcher_menu_for_query(
             .applications
             .iter()
             .filter(|application| application.pinned)
-            .map(launcher_application_item)
+            .map(|application| launcher_application_search_item(application, query))
             .filter(|item| !searching || nuraloumi_core::matches_query(item, query))
             .take(8)
             .collect::<Vec<_>>();
@@ -1441,13 +1438,15 @@ fn build_launcher_menu_for_query(
         }
     }
 
-    if matches!(mode, OverviewMode::All | OverviewMode::Windows) {
+    if matches!(mode, OverviewMode::All | OverviewMode::Windows)
+        && (mode == OverviewMode::Windows || !snapshot.windows.is_empty())
+    {
         items.push(section("launcher.windows", "Open windows"));
         if snapshot.windows.is_empty() {
             items.push(status(
                 "launcher.windows.empty",
-                "No open windows",
-                "Compositor reported no mapped toplevels",
+                "No windows detected",
+                "Window listing may be unavailable with this compositor",
             ));
         } else {
             if mode == OverviewMode::Windows && !snapshot.window_thumbnails_available {
@@ -1501,7 +1500,7 @@ fn build_launcher_menu_for_query(
             .iter()
             .filter_map(|id| snapshot.applications.iter().find(|app| &app.id == id))
             .filter(|app| !app.pinned)
-            .map(launcher_application_item)
+            .map(|application| launcher_application_search_item(application, query))
             .filter(|item| !searching || nuraloumi_core::matches_query(item, query))
             .take(8)
             .collect::<Vec<_>>();
@@ -1523,7 +1522,7 @@ fn build_launcher_menu_for_query(
             .filter(|application| {
                 !application.pinned && !snapshot.recent_application_ids.contains(&application.id)
             })
-            .map(launcher_application_item)
+            .map(|application| launcher_application_search_item(application, query))
             .filter(|item| !searching || nuraloumi_core::matches_query(item, query))
             .take(application_limit)
             .collect::<Vec<_>>();
@@ -1547,7 +1546,10 @@ fn build_launcher_menu_for_query(
         items.push(section("launcher.manage", "Manage favorites and history"));
         for (position, application) in snapshot.applications.iter().enumerate().take(32) {
             if searching
-                && !nuraloumi_core::matches_query(&launcher_application_item(application), query)
+                && !nuraloumi_core::matches_query(
+                    &launcher_application_search_item(application, query),
+                    query,
+                )
             {
                 continue;
             }
@@ -3273,6 +3275,66 @@ pub fn live_backend_status() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launcher_overview_hides_technical_subtitles_and_empty_window_noise() {
+        let mut snapshot = FixtureSnapshot::default();
+        snapshot.windows.clear();
+        snapshot.applications = vec![
+            ApplicationEntry {
+                id: "sl101-firefox-debian.desktop".into(),
+                label: "Firefox".into(),
+                generic_name: Some("Web Browser".into()),
+                keywords: vec!["Internet".into(), "WWW".into(), "Browser".into()],
+                launchable: true,
+                pinned: true,
+            },
+            ApplicationEntry {
+                id: "untranslated-utility.desktop".into(),
+                label: "Utility".into(),
+                generic_name: None,
+                keywords: vec![],
+                launchable: true,
+                pinned: false,
+            },
+        ];
+        let overview = build_launcher_menu_for(&snapshot, OverviewMode::All);
+        assert!(!overview.items.iter().any(|item| {
+            item.id == "launcher.search"
+                || item.id == "launcher.windows"
+                || item.id == "launcher.windows.empty"
+        }));
+        let browser = overview
+            .items
+            .iter()
+            .find(|item| item.id == "overview.app.sl101-firefox-debian.desktop")
+            .unwrap();
+        assert_eq!(browser.label, "Firefox");
+        assert_eq!(browser.subtitle.as_deref(), Some("Web Browser"));
+        let utility = overview
+            .items
+            .iter()
+            .find(|item| item.id == "overview.app.untranslated-utility.desktop")
+            .unwrap();
+        assert!(utility.subtitle.is_none());
+
+        // Keywords remain searchable even though normal browse rows do not
+        // expose those arbitrary desktop-entry tags.
+        let searched = build_launcher_menu_for_query(&snapshot, OverviewMode::All, "www");
+        let state = MenuState {
+            query: "www".into(),
+            ..MenuState::default()
+        };
+        assert!(state
+            .visible_items(&searched)
+            .iter()
+            .any(|item| { item.id == "overview.app.sl101-firefox-debian.desktop" }));
+
+        let windows = build_launcher_menu_for(&snapshot, OverviewMode::Windows);
+        assert!(windows.items.iter().any(|item| {
+            item.id == "launcher.windows.empty" && item.label == "No windows detected"
+        }));
+    }
 
     #[test]
     fn default_render_path_paints_glyphs_and_custom_resolver_overrides() {
