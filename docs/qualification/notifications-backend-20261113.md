@@ -159,6 +159,57 @@ Host worktree verification at base `0a821ac` with this follow-up applied:
 
 ---
 
+## Notification Center confirmation closure — subsequent local integration
+
+Implemented in `crates/nuraloumi-shell/src/bin/notifications.rs` on top of
+backend commit `5c927aa`:
+
+- The destructive *Ask* action freezes the IDs in the UI's current bounded
+  notification snapshot as `Option<Vec<u32>>`. The confirmation menu displays
+  the **captured count**, not the possibly refreshed history count.
+- *Confirm* dispatches `NotificationAction::ClearKnown { ids }`; the legacy
+  broad `NotificationAction::Clear` is no longer used by the notification
+  center. A direct clear without arming a confirmation is inert.
+- Keyboard Escape cancels and discards the captured IDs. Re-arming explicitly
+  chooses a new set. After a successful action the confirmation state resets.
+- Fixture-mode clear removes only captured IDs, mirroring the real backend
+  contract instead of unconditionally emptying the entire snapshot.
+- Two new deterministic UI regressions establish that an item arriving after
+  Ask remains present after Confirm, and that a deliberate re-Ask updates the
+  captured set. The existing rendering/truncation test is preserved.
+- One additional `#[ignore]` integration test invokes the actual UI
+  `act()` implementation against `NotificationProvider::system()` on a
+  **fresh private D-Bus and dedicated Xvfb/Dunst**. An explicit opt-in and
+  ephemeral bus-address guard prevent it from affecting the production
+  notification service. On the host, the real sender→D-Bus→Dunst→UI
+  confirmation→provider→history sequence **PASS**; the notification arriving
+  after Ask survives ClearKnown. This test exercises UI action logic, **not**
+  Wayland-rendered pixels, pointer/touch input or a display session on SL101.
+- One unrelated formatting-only ordering fix in `crates/nuraloumi-shell/src/lib.rs`
+  restores the workspace-wide `cargo fmt --check` gate.
+
+On the isolated worktree based on `5c927aa`, the tests and checks return:
+
+| Gate | Result |
+| --- | --- |
+| `cargo test -p nuraloumi-shell --bin nuraloumi-notifications --locked` | **3/3 PASS**, one private-bus test ignored by default |
+| Opt-in ignored UI→real private D-Bus→provider confirmation test | **1/1 PASS**, dedicated test Dunst |
+| `cargo test --workspace --locked` | **PASS**, including 15 backend notification tests |
+| `cargo clippy --workspace --all-targets --locked -- -D warnings` | **PASS** |
+| `cargo fmt --check` | **PASS** |
+| `git diff --check` | **PASS** |
+
+This closes the confirmed-ID UI→provider arrival race **at the tested
+contract boundary** and confirms real isolated UI-action-to-D-Bus behavior.
+A complete live Wayland GUI/pixel/touch demonstration and actual
+SL101 .106 CPU/RSS/interaction numbers remain separately unverified.
+The historical "residual UI TOCTOU" statement above refers to the
+previous backend-only commit and is superseded by this section.
+
+Independent reviewer execution was attempted via both the managed OpenCode
+review preset and prompt-based LLM agent; their servers reported unavailable
+backends/tools. No independent approval or physical-device release is claimed.
+
 ## Remaining external qualification gates
 
 - In a controlled test bus with explicit Dunst config and lifecycle, prove
@@ -170,8 +221,9 @@ Host worktree verification at base `0a821ac` with this follow-up applied:
 - Verify on the actual SL101 .106 session with backend, transport,
   concurrent senders, bounded CPU/RSS and action identity. Without that
   evidence, report the hardware/live E2E requirement **BLOCKED**.
-- UI lane must explicitly adopt the additive API; it is not wired by this
-  backend-only task.
+- The notification center now uses `ClearKnown` with confirmation-time IDs;
+  repeat the UI-to-D-Bus live action check and SL101 interaction/power
+  qualification against the integrated release revision.
 
 ## Agent coordination
 

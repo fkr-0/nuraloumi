@@ -167,16 +167,19 @@ fn short(s: &str) -> String {
         )
     }
 }
-fn model(snapshot: &NotificationSnapshot, query: &str, confirm: bool) -> MenuModel {
+fn model(snapshot: &NotificationSnapshot, query: &str, confirmed_ids: Option<&[u32]>) -> MenuModel {
     let count = snapshot.notifications.len();
     let mut items = vec![
         MenuItem::status("header", format!("Notifications ({count})"))
             .with_subtitle(format!("Filter: {query}")),
     ];
-    if confirm {
+    if let Some(ids) = confirmed_ids {
         items.push(MenuItem::action(
             "confirm",
-            format!("Clear all {count} notifications? Enter to confirm"),
+            format!(
+                "Clear {} confirmed notifications? Enter to confirm",
+                ids.len()
+            ),
             MenuAction::Custom {
                 kind: "clear".into(),
                 payload: String::new(),
@@ -246,15 +249,26 @@ fn act(
     snapshot: &mut NotificationSnapshot,
     provider: &mut NotificationProvider<nuraloumi_providers::command::SystemCommandRunner>,
     fixture_mode: bool,
-    confirm: &mut bool,
+    confirmed_ids: &mut Option<Vec<u32>>,
 ) -> Result<(), String> {
     if let MenuAction::Custom { kind, payload } = action {
         if kind == "ask" {
-            *confirm = !snapshot.notifications.is_empty();
+            // Freeze the exact IDs when requesting confirmation. A later
+            // refresh or sender arrival must not widen the destructive action.
+            *confirmed_ids = (!snapshot.notifications.is_empty()).then(|| {
+                snapshot
+                    .notifications
+                    .iter()
+                    .map(|entry| entry.id)
+                    .collect()
+            });
             return Ok(());
         }
         let action = match kind.as_str() {
-            "clear" if *confirm => NotificationAction::Clear,
+            "clear" => match confirmed_ids.as_ref() {
+                Some(ids) => NotificationAction::ClearKnown { ids: ids.clone() },
+                None => return Ok(()),
+            },
             "remove" => NotificationAction::Remove {
                 id: payload.parse().map_err(|e| format!("{e}"))?,
             },
@@ -269,7 +283,11 @@ fn act(
         };
         if fixture_mode {
             match action {
-                NotificationAction::Clear => snapshot.notifications.clear(),
+                NotificationAction::ClearKnown { ids } => {
+                    snapshot
+                        .notifications
+                        .retain(|entry| !ids.contains(&entry.id));
+                }
                 NotificationAction::Remove { id } => snapshot.notifications.retain(|n| n.id != id),
                 _ => {}
             }
@@ -277,7 +295,7 @@ fn act(
             provider.execute(action).map_err(|e| format!("{e:?}"))?;
             *snapshot = provider.snapshot().map_err(|e| format!("{e:?}"))?;
         }
-        *confirm = false;
+        *confirmed_ids = None;
     }
     Ok(())
 }
@@ -289,7 +307,7 @@ fn run(config: ShellConfig, fixture_mode: bool) -> Result<(), String> {
         provider.snapshot().map_err(|e| format!("{e:?}"))?
     };
     let mut query = String::new();
-    let mut confirm = false;
+    let mut confirmed_ids: Option<Vec<u32>> = None;
     let mut backend = WaylandBackend::connect().map_err(|e| e.to_string())?;
     if !backend.capabilities().layer_shell {
         return Err("layer shell unavailable".into());
@@ -320,7 +338,7 @@ fn run(config: ShellConfig, fixture_mode: bool) -> Result<(), String> {
         })
         .map_err(|e| e.to_string())?;
     let renderer = CairoRenderer::default();
-    let mut menu = model(&snapshot, &query, confirm);
+    let mut menu = model(&snapshot, &query, confirmed_ids.as_deref());
     let mut state = MenuState::new(&menu);
     let mut geometry = None;
     let mut scene = None;
@@ -372,8 +390,8 @@ fn run(config: ShellConfig, fixture_mode: bool) -> Result<(), String> {
                 }
                 WaylandEvent::Key { key, pressed: true } => match key {
                     Key::Escape => {
-                        if confirm {
-                            confirm = false;
+                        if confirmed_ids.is_some() {
+                            confirmed_ids = None;
                             redraw = true;
                         } else {
                             close(&mut backend, surface, dismiss)?;
@@ -443,7 +461,13 @@ fn run(config: ShellConfig, fixture_mode: bool) -> Result<(), String> {
                 }
             }
             if let Some(a) = requested {
-                act(a, &mut snapshot, &mut provider, fixture_mode, &mut confirm)?;
+                act(
+                    a,
+                    &mut snapshot,
+                    &mut provider,
+                    fixture_mode,
+                    &mut confirmed_ids,
+                )?;
                 redraw = true;
             }
             if refresh {
@@ -456,7 +480,7 @@ fn run(config: ShellConfig, fixture_mode: bool) -> Result<(), String> {
             }
             if redraw {
                 let selected = state.selected_id.clone();
-                menu = model(&snapshot, &query, confirm);
+                menu = model(&snapshot, &query, confirmed_ids.as_deref());
                 state = MenuState::new(&menu);
                 if let Some(id) = selected {
                     if menu
@@ -504,11 +528,199 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn ui_action(kind: &str) -> MenuAction {
+        MenuAction::Custom {
+            kind: kind.into(),
+            payload: String::new(),
+        }
+    }
+
+    #[test]
+    fn confirmed_clear_preserves_notification_arriving_after_ask() {
+        let mut snapshot = fixture();
+        let mut provider = NotificationProvider::system();
+        let mut confirmed_ids = None;
+
+        act(
+            ui_action("ask"),
+            &mut snapshot,
+            &mut provider,
+            true,
+            &mut confirmed_ids,
+        )
+        .unwrap();
+        assert_eq!(confirmed_ids.as_ref().unwrap().len(), 10);
+        let mut incoming = snapshot.notifications[0].clone();
+        incoming.id = 101;
+        incoming.summary = "Arrived after confirmation".into();
+        snapshot.notifications.push(incoming);
+
+        // The confirmation text reflects the frozen set, not the refreshed
+        // history count. New arrivals cannot be silently added to Clear All.
+        let menu = model(&snapshot, "", confirmed_ids.as_deref());
+        assert!(menu
+            .item_by_id("confirm")
+            .unwrap()
+            .label
+            .contains("10 confirmed"));
+
+        act(
+            ui_action("clear"),
+            &mut snapshot,
+            &mut provider,
+            true,
+            &mut confirmed_ids,
+        )
+        .unwrap();
+        assert_eq!(
+            snapshot
+                .notifications
+                .iter()
+                .map(|item| item.id)
+                .collect::<Vec<_>>(),
+            vec![101],
+        );
+        assert!(confirmed_ids.is_none());
+    }
+
+    #[test]
+    fn clear_requires_confirmation_and_rearming_captures_new_set() {
+        let mut snapshot = fixture();
+        let mut provider = NotificationProvider::system();
+        let mut confirmed_ids = None;
+
+        // Direct clear without an earlier Ask is inert.
+        act(
+            ui_action("clear"),
+            &mut snapshot,
+            &mut provider,
+            true,
+            &mut confirmed_ids,
+        )
+        .unwrap();
+        assert_eq!(snapshot.notifications.len(), 10);
+
+        act(
+            ui_action("ask"),
+            &mut snapshot,
+            &mut provider,
+            true,
+            &mut confirmed_ids,
+        )
+        .unwrap();
+        let mut incoming = snapshot.notifications[0].clone();
+        incoming.id = 102;
+        snapshot.notifications.push(incoming);
+        assert_eq!(confirmed_ids.as_ref().unwrap().len(), 10);
+
+        // Explicitly asking again refreshes the proposed destructive set.
+        act(
+            ui_action("ask"),
+            &mut snapshot,
+            &mut provider,
+            true,
+            &mut confirmed_ids,
+        )
+        .unwrap();
+        assert!(confirmed_ids.as_ref().unwrap().contains(&102));
+        act(
+            ui_action("clear"),
+            &mut snapshot,
+            &mut provider,
+            true,
+            &mut confirmed_ids,
+        )
+        .unwrap();
+        assert!(snapshot.notifications.is_empty());
+        assert!(confirmed_ids.is_none());
+
+        // No confirmation is armed for an empty history.
+        act(
+            ui_action("ask"),
+            &mut snapshot,
+            &mut provider,
+            true,
+            &mut confirmed_ids,
+        )
+        .unwrap();
+        assert!(confirmed_ids.is_none());
+    }
+
+    // A real D-Bus/daemon integration test must never touch the user's live
+    // notification daemon. This runs only when explicitly requested against
+    // a fresh, ephemeral dbus-run-session and dedicated Dunst/Xvfb instance.
+    #[test]
+    #[ignore = "requires isolated dbus-run-session + Dunst/Xvfb"]
+    fn isolated_dbus_ui_confirmation_keeps_new_arrival() {
+        assert_eq!(
+            std::env::var("NURALOUMI_PRIVATE_DUNST_E2E").as_deref(),
+            Ok("isolated"),
+            "explicit isolated-bus opt-in required"
+        );
+        let bus = std::env::var("DBUS_SESSION_BUS_ADDRESS").expect("private D-Bus address");
+        assert!(
+            bus.starts_with("unix:path=/tmp/dbus-"),
+            "refusing to mutate any non-ephemeral D-Bus session"
+        );
+        fn send(summary: &str) -> u32 {
+            let output = std::process::Command::new("notify-send")
+                .args([
+                    "-p",
+                    "-a",
+                    "nuraloumi-private-e2e",
+                    "-t",
+                    "700",
+                    summary,
+                    "one private notification",
+                ])
+                .output()
+                .expect("notify-send is installed");
+            assert!(output.status.success(), "{output:?}");
+            String::from_utf8(output.stdout)
+                .unwrap()
+                .trim()
+                .parse()
+                .expect("notification ID")
+        }
+        let first = send("before-confirmation");
+        std::thread::sleep(std::time::Duration::from_millis(1350));
+        let mut provider = NotificationProvider::system();
+        let mut snapshot = provider.snapshot().expect("private Dunst history");
+        assert_eq!(snapshot.notifications.len(), 1);
+        assert_eq!(snapshot.notifications[0].id, first);
+
+        let mut confirmed_ids = None;
+        act(
+            ui_action("ask"),
+            &mut snapshot,
+            &mut provider,
+            false,
+            &mut confirmed_ids,
+        )
+        .unwrap();
+        assert_eq!(confirmed_ids.as_deref(), Some(&[first][..]));
+
+        let second = send("after-confirmation");
+        std::thread::sleep(std::time::Duration::from_millis(1350));
+        act(
+            ui_action("clear"),
+            &mut snapshot,
+            &mut provider,
+            false,
+            &mut confirmed_ids,
+        )
+        .unwrap();
+        assert!(confirmed_ids.is_none());
+        assert!(snapshot.notifications.iter().all(|n| n.id != first));
+        assert!(snapshot.notifications.iter().any(|n| n.id == second));
+        assert_eq!(snapshot.notifications.len(), 1);
+    }
+
     #[test]
     fn model_and_truncation() {
         let s = fixture();
         assert_eq!(s.notifications.len(), 10);
-        assert!(model(&s, "Chat", false).item_by_id("dismiss-1").is_some());
+        assert!(model(&s, "Chat", None).item_by_id("dismiss-1").is_some());
         assert_eq!(short(&"x".repeat(500)).chars().count(), 240);
     }
 }
