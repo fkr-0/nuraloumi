@@ -30,6 +30,8 @@ pub use keybindings::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use std::{env, fs};
@@ -47,11 +49,87 @@ pub enum PanelEdge {
     Right,
 }
 
+pub fn build_appearance_menu(selected: ThemePalette) -> MenuModel {
+    let mut items = vec![section("appearance.palettes", "Color theme")];
+    for (palette, label, detail) in [
+        (
+            ThemePalette::SlateDark,
+            "Slate Dark",
+            "Muted blue-grey surfaces",
+        ),
+        (
+            ThemePalette::PaperLight,
+            "Paper Light",
+            "Bright and readable",
+        ),
+        (
+            ThemePalette::HighContrast,
+            "High Contrast",
+            "Maximum contrast and focus",
+        ),
+    ] {
+        items.push(custom_action(
+            &format!("appearance.palette.{}", palette.as_str()),
+            label,
+            Some(if palette == selected {
+                "✓ Selected"
+            } else {
+                detail
+            }),
+            "theme.select",
+            palette.as_str(),
+            true,
+        ));
+    }
+    MenuModel {
+        id: "appearance".into(),
+        title: "Appearance".into(),
+        items,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Theme {
     Dark,
     Light,
+}
+
+/// Appearance palettes. Kept separate from the legacy two-value `theme`
+/// field so existing binaries and serialized configs remain compatible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThemePalette {
+    SlateDark,
+    PaperLight,
+    HighContrast,
+}
+
+impl ThemePalette {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SlateDark => "slate_dark",
+            Self::PaperLight => "paper_light",
+            Self::HighContrast => "high_contrast",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "slate_dark" | "dark" => Ok(Self::SlateDark),
+            "paper_light" | "light" => Ok(Self::PaperLight),
+            "high_contrast" => Ok(Self::HighContrast),
+            _ => Err(format!("unknown appearance palette {value:?}")),
+        }
+    }
+
+    pub const fn tokens(self) -> &'static nuraloumi_core::ThemeTokens {
+        match self {
+            Self::SlateDark => &nuraloumi_core::DARK_THEME,
+            Self::PaperLight => &nuraloumi_core::LIGHT_THEME,
+            Self::HighContrast => &nuraloumi_core::theme::HIGH_CONTRAST_THEME,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,6 +172,11 @@ pub struct ShellConfig {
     pub menu_width: u32,
     pub row_height: u32,
     pub theme: Theme,
+    /// Optional explicit palette. `None` preserves old `theme = dark|light`
+    /// configs and guarantees source-compatible initialization.
+    pub palette: Option<ThemePalette>,
+    /// Opt in to the larger launcher overview (off by default).
+    pub launcher_fullscreen: bool,
     pub reduced_motion: bool,
     pub launcher: LauncherPreferences,
     pub menu_dismissal: MenuDismissalConfig,
@@ -240,7 +323,39 @@ pub fn render_menu_with_glyphs<'a>(
     ),
     String,
 > {
-    let adapter = nuraloumi_render_cairo::CoreMenuAdapter::new(menu, state);
+    // Search results are intentionally limited to matching actions, but the
+    // launcher tab strip must remain visible while searching. Build a bounded
+    // presentation-only menu with all five tabs and matching content rows;
+    // the original semantic MenuModel retains authoritative action identity.
+    let searching_launcher = menu.id == "launcher" && !state.query.trim().is_empty();
+    let presentation_menu = searching_launcher.then(|| {
+        let visible_ids = state
+            .visible_items(menu)
+            .into_iter()
+            .map(|item| item.id.as_str())
+            .collect::<BTreeSet<_>>();
+        MenuModel {
+            id: menu.id.clone(),
+            title: menu.title.clone(),
+            items: menu
+                .items
+                .iter()
+                .filter(|item| {
+                    item.id.starts_with("overview.mode.") || visible_ids.contains(item.id.as_str())
+                })
+                .cloned()
+                .collect(),
+        }
+    });
+    let presentation_state = searching_launcher.then(|| {
+        let mut display = state.clone();
+        display.query.clear();
+        display
+    });
+    let adapter = nuraloumi_render_cairo::CoreMenuAdapter::new(
+        presentation_menu.as_ref().unwrap_or(menu),
+        presentation_state.as_ref().unwrap_or(state),
+    );
     let adapter = if let Some(resolver) = glyph_resolver {
         adapter.with_glyph_resolver(resolver)
     } else {
@@ -252,7 +367,11 @@ pub fn render_menu_with_glyphs<'a>(
     let interaction = nuraloumi_render_cairo::InteractionState {
         selected_id: state.selected_id.clone(),
         pressed_id: None,
-        scroll_offset: selection_follow_scroll_offset(menu, state, viewport),
+        scroll_offset: if searching_launcher {
+            0.0
+        } else {
+            selection_follow_scroll_offset(menu, state, viewport)
+        },
     };
     let theme = nuraloumi_render_cairo::Theme::from(tokens);
     let scene = renderer.build_scene(&adapter, &interaction, viewport, &theme, options);
@@ -273,10 +392,12 @@ impl Default for ShellConfig {
             panel: PanelConfig::default(),
             extra: BTreeMap::new(),
             panel_edge: PanelEdge::Top,
-            panel_height: 40,
+            panel_height: 48,
             menu_width: 448,
             row_height: 48,
             theme: Theme::Dark,
+            palette: None,
+            launcher_fullscreen: false,
             reduced_motion: false,
             launcher: LauncherPreferences::default(),
             menu_dismissal: MenuDismissalConfig::default(),
@@ -335,6 +456,33 @@ pub fn successful_action_requests_dismiss(
 }
 
 impl ShellConfig {
+    pub fn active_palette(&self) -> ThemePalette {
+        self.palette.unwrap_or(match self.theme {
+            Theme::Dark => ThemePalette::SlateDark,
+            Theme::Light => ThemePalette::PaperLight,
+        })
+    }
+
+    pub fn active_theme_tokens(&self) -> &'static nuraloumi_core::ThemeTokens {
+        self.active_palette().tokens()
+    }
+
+    pub fn select_palette(&mut self, palette: ThemePalette) {
+        self.palette = Some(palette);
+        // Keep legacy consumers on a palette with the correct luminance.
+        self.theme = if palette == ThemePalette::PaperLight {
+            Theme::Light
+        } else {
+            Theme::Dark
+        };
+    }
+
+    /// Never expose a smaller-than-touch-safe strip on the compositor. Legacy
+    /// configurations specifying 40px stay parseable, but use 48px at runtime.
+    pub fn effective_panel_height(&self) -> u32 {
+        self.panel_height.max(48)
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if self.config_version > 1 {
             return Err(format!(
@@ -463,12 +611,85 @@ pub fn load_config(path: impl AsRef<Path>) -> Result<ShellConfig, String> {
 }
 
 pub fn load_config_or_default(explicit: Option<&Path>) -> Result<ShellConfig, String> {
-    if let Some(path) = explicit {
-        return load_config(path);
-    }
     let xdg = env::var_os("XDG_CONFIG_HOME").map(PathBuf::from);
     let home = env::var_os("HOME").map(PathBuf::from);
-    load_config_from_sources(None, xdg.as_deref(), home.as_deref())
+    let mut config = load_config_from_sources(explicit, xdg.as_deref(), home.as_deref())?;
+    if let Some(root) = config_directory(xdg.as_deref(), home.as_deref()) {
+        match read_palette_override(&root.join("appearance.toml")) {
+            Ok(Some(palette)) => config.select_palette(palette),
+            Ok(None) => {}
+            Err(error) => eprintln!("nuraloumi-appearance-persistence: {error}"),
+        }
+    }
+    Ok(config)
+}
+
+fn config_directory(xdg: Option<&Path>, home: Option<&Path>) -> Option<PathBuf> {
+    xdg.filter(|path| path.is_absolute())
+        .map(Path::to_path_buf)
+        .or_else(|| {
+            home.filter(|path| path.is_absolute())
+                .map(|h| h.join(".config"))
+        })
+        .map(|root| root.join("nuraloumi"))
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AppearanceOverride {
+    palette: ThemePalette,
+}
+
+fn read_palette_override(path: &Path) -> Result<Option<ThemePalette>, String> {
+    match fs::read_to_string(path) {
+        Ok(source) if source.len() <= 1024 => toml::from_str::<AppearanceOverride>(&source)
+            .map(|value| Some(value.palette))
+            .map_err(|error| format!("invalid appearance override {}: {error}", path.display())),
+        Ok(_) => Err("appearance override exceeds 1024 bytes".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!(
+            "cannot read appearance override {}: {error}",
+            path.display()
+        )),
+    }
+}
+
+fn persist_palette_at(path: &Path, palette: ThemePalette) -> Result<(), String> {
+    let dir = path
+        .parent()
+        .ok_or_else(|| "appearance path has no parent".to_owned())?;
+    fs::create_dir_all(dir).map_err(|error| format!("create appearance directory: {error}"))?;
+    let temporary = dir.join(format!(".appearance-{}.tmp", std::process::id()));
+    let source = format!("palette = \"{}\"\n", palette.as_str());
+    let result = (|| -> Result<(), String> {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temporary)
+            .map_err(|error| format!("open appearance temporary: {error}"))?;
+        file.write_all(source.as_bytes())
+            .map_err(|error| format!("write appearance preference: {error}"))?;
+        file.sync_all()
+            .map_err(|error| format!("sync appearance preference: {error}"))?;
+        fs::rename(&temporary, path)
+            .map_err(|error| format!("publish appearance preference: {error}"))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+/// Persist an explicit user-picked palette, leaving their main config,
+/// comments and unrelated settings untouched.
+pub fn persist_palette_override(palette: ThemePalette) -> Result<(), String> {
+    let xdg = env::var_os("XDG_CONFIG_HOME").map(PathBuf::from);
+    let home = env::var_os("HOME").map(PathBuf::from);
+    let root = config_directory(xdg.as_deref(), home.as_deref())
+        .ok_or_else(|| "no absolute XDG_CONFIG_HOME or HOME available".to_owned())?;
+    persist_palette_at(&root.join("appearance.toml"), palette)
 }
 
 fn load_config_from_sources(
@@ -1273,6 +1494,7 @@ pub fn load_fixture_snapshot(path: impl AsRef<Path>) -> Result<FixtureSnapshot, 
 #[serde(rename_all = "snake_case")]
 pub enum MenuFamily {
     Launcher,
+    Appearance,
     ControlCenter,
     Network,
     Bluetooth,
@@ -1321,6 +1543,7 @@ impl ControlCenterTab {
 pub fn build_family(family: MenuFamily, snapshot: &FixtureSnapshot) -> MenuModel {
     match family {
         MenuFamily::Launcher => build_launcher_menu_for(snapshot, OverviewMode::All),
+        MenuFamily::Appearance => build_appearance_menu(ThemePalette::SlateDark),
         MenuFamily::ControlCenter => {
             build_control_center_menu(snapshot, ControlCenterTab::default())
         }
@@ -1389,38 +1612,31 @@ fn build_launcher_menu_for_query(
     let searching = !query.trim().is_empty();
     // The persistent panel offers a real search field. A duplicate,
     // non-interactive pseudo-input obscured the first real menu items.
+    // Renderer positions these five typed actions in a horizontal tab strip.
+    // They remain ordinary semantic menu actions for touch and keyboard parity.
     let mut items = Vec::new();
-
-    if mode != OverviewMode::All {
-        items.push(section("launcher.views", "View"));
-        for candidate in [
-            OverviewMode::All,
-            OverviewMode::Windows,
-            OverviewMode::Apps,
-            OverviewMode::Tasks,
-            OverviewMode::Desktops,
-        ] {
-            let selected = candidate == mode;
-            let label = match candidate {
-                OverviewMode::All => "Launcher",
-                OverviewMode::Windows => "Windows",
-                OverviewMode::Apps => "Applications",
-                OverviewMode::Tasks => "Tasks",
-                OverviewMode::Desktops => "Desktops",
-            };
-            items.push(custom_action(
-                &format!("overview.mode.{}", candidate.as_str()),
-                label,
-                Some(if selected {
-                    "Selected view"
-                } else {
-                    "Switch view"
-                }),
-                "overview.mode",
-                candidate.as_str(),
-                !selected,
-            ));
-        }
+    for candidate in [
+        OverviewMode::All,
+        OverviewMode::Apps,
+        OverviewMode::Windows,
+        OverviewMode::Desktops,
+        OverviewMode::Tasks,
+    ] {
+        let label = match candidate {
+            OverviewMode::All => "Home",
+            OverviewMode::Apps => "Apps",
+            OverviewMode::Windows => "Windows",
+            OverviewMode::Desktops => "Spaces",
+            OverviewMode::Tasks => "Tasks",
+        };
+        items.push(custom_action(
+            &format!("overview.mode.{}", candidate.as_str()),
+            label,
+            None,
+            "overview.mode",
+            candidate.as_str(),
+            candidate != mode,
+        ));
     }
 
     if matches!(mode, OverviewMode::All | OverviewMode::Apps) {
@@ -1703,11 +1919,27 @@ fn build_launcher_menu_for_query(
         items.extend([
             section("launcher.more", "More"),
             custom_action(
+                "launcher.more.layout",
+                "Toggle full-screen overview",
+                Some("Switch between compact and full-screen launcher"),
+                "overview.layout",
+                "toggle",
+                true,
+            ),
+            custom_action(
                 "launcher.more.apps",
                 "All applications",
                 Some("Browse every discovered desktop application"),
                 "overview.mode",
                 OverviewMode::Apps.as_str(),
+                true,
+            ),
+            custom_action(
+                "launcher.more.appearance",
+                "Appearance",
+                Some("Theme and contrast"),
+                "menu.open",
+                "appearance",
                 true,
             ),
             custom_action(
@@ -2939,6 +3171,7 @@ impl ShellState {
             MenuFamily::Launcher => {
                 build_launcher_menu_for_query(snapshot, self.overview_mode, &self.state.query)
             }
+            MenuFamily::Appearance => build_appearance_menu(ThemePalette::SlateDark),
             MenuFamily::ControlCenter => {
                 build_control_center_menu(snapshot, self.control_center_tab)
             }
@@ -2994,6 +3227,42 @@ impl ShellState {
             return ActionReport::Ignored {
                 reason: "search input is not focused".into(),
             };
+        }
+
+        // Treat launcher tab cells as a single horizontal control group.
+        // Down/Up still navigate into and out of the content list.
+        if self.menu.id == "launcher"
+            && matches!(&input, SemanticInput::Left | SemanticInput::Right)
+            && self
+                .state
+                .selected_id
+                .as_deref()
+                .is_some_and(|id| id.starts_with("overview.mode."))
+        {
+            let tabs: Vec<_> = self
+                .menu
+                .items
+                .iter()
+                .filter(|item| item.id.starts_with("overview.mode.") && item.is_actionable())
+                .map(|item| item.id.as_str())
+                .collect();
+            if let Some(index) = tabs
+                .iter()
+                .position(|id| Some(*id) == self.state.selected_id.as_deref())
+            {
+                let offset = if matches!(&input, SemanticInput::Left) {
+                    tabs.len().saturating_sub(1)
+                } else {
+                    1
+                };
+                if !tabs.is_empty() {
+                    self.state.selected_id = Some(tabs[(index + offset) % tabs.len()].to_owned());
+                    self.pending_confirmation = None;
+                    return ActionReport::NavigationChanged {
+                        path: self.state.path.clone(),
+                    };
+                }
+            }
         }
 
         if matches!(&input, SemanticInput::Back | SemanticInput::Escape) {
@@ -3145,6 +3414,28 @@ impl ShellState {
     }
 
     fn activate_item(&mut self, item_id: &str) -> ActionReport {
+        if self.menu.id == "launcher"
+            && !self.state.query.trim().is_empty()
+            && item_id.starts_with("overview.mode.")
+        {
+            // Search filters ordinary actionable rows in the semantic core.
+            // Tabs are persistent navigation chrome, so dispatch only the
+            // exact prevalidated, enabled mode action from the current model.
+            if let Some(item) = self.menu.items.iter().find(|item| item.id == item_id) {
+                if item.is_actionable() {
+                    if let Some(action @ MenuAction::Custom { kind, .. }) = item.action.as_ref() {
+                        if kind == "overview.mode" {
+                            self.pending_confirmation = None;
+                            return ActionReport::Dispatched {
+                                item_id: item_id.to_owned(),
+                                action: action.clone(),
+                                confirmed: false,
+                            };
+                        }
+                    }
+                }
+            }
+        }
         let actionable = self
             .state
             .visible_items(&self.menu)
@@ -3250,6 +3541,7 @@ impl PanelController {
 pub fn parse_family(value: &str) -> Result<MenuFamily, String> {
     match value {
         "launcher" | "apps" | "overview" | "super-menu" => Ok(MenuFamily::Launcher),
+        "appearance" | "themes" | "theme" => Ok(MenuFamily::Appearance),
         "control-center" | "control-center-menu" | "quick-settings" => {
             Ok(MenuFamily::ControlCenter)
         }
@@ -3496,7 +3788,7 @@ mod tests {
     #[test]
     fn config_defaults_match_sl101_class() {
         let config = ShellConfig::default();
-        assert_eq!(config.panel_height, 40);
+        assert_eq!(config.panel_height, 48);
         assert_eq!(config.menu_width, 448);
         assert_eq!(config.row_height, 48);
         assert_eq!(config.panel_edge, PanelEdge::Top);
@@ -3807,6 +4099,70 @@ after_one_shot_action = true
     }
 
     #[test]
+    fn horizontal_arrows_move_launcher_tab_focus_without_dispatching() {
+        let mut shell = shell_with(build_launcher_menu());
+        assert_eq!(
+            shell.state.selected_id.as_deref(),
+            Some("overview.mode.apps")
+        );
+        assert!(matches!(
+            shell.apply_semantic(SemanticInput::Right),
+            ActionReport::NavigationChanged { .. }
+        ));
+        assert_eq!(
+            shell.state.selected_id.as_deref(),
+            Some("overview.mode.windows")
+        );
+        shell.apply_semantic(SemanticInput::Left);
+        assert_eq!(
+            shell.state.selected_id.as_deref(),
+            Some("overview.mode.apps")
+        );
+    }
+
+    #[test]
+    fn launcher_search_keeps_tabs_visible_and_touch_activatable() {
+        let snapshot = FixtureSnapshot::default();
+        let mut shell = shell_with(build_launcher_menu_for(&snapshot, OverviewMode::All));
+        shell.state.query = "terminal".into();
+        shell
+            .refresh_family(MenuFamily::Launcher, &snapshot)
+            .unwrap();
+        let renderer = nuraloumi_render_cairo::CairoRenderer::default();
+        let (scene, _) = render_menu_follow_selection(
+            &renderer,
+            &shell.menu,
+            &shell.state,
+            nuraloumi_render_cairo::Viewport::new(448.0, 700.0, 1.0),
+            &nuraloumi_core::DARK_THEME,
+            nuraloumi_render_cairo::RenderOptions::default(),
+            None,
+        )
+        .unwrap();
+        let tabs = scene
+            .hits
+            .iter()
+            .filter(|hit| hit.item_id.starts_with("overview.mode."))
+            .collect::<Vec<_>>();
+        assert_eq!(tabs.len(), 5);
+        let windows = tabs
+            .iter()
+            .find(|hit| hit.item_id == "overview.mode.windows")
+            .unwrap();
+        assert_eq!(
+            scene.hit_test(windows.rect.x + 12.0, windows.rect.y + 12.0),
+            Some("overview.mode.windows"),
+        );
+        let report = shell.activate_item("overview.mode.windows");
+        assert!(matches!(report,
+            ActionReport::Dispatched {
+                action: MenuAction::Custom { ref kind, ref payload },
+                ..
+            } if kind == "overview.mode" && payload == "windows"
+        ));
+    }
+
+    #[test]
     fn config_rejects_invalid_geometry() {
         let invalid = ShellConfig {
             panel_height: 8,
@@ -3816,11 +4172,68 @@ after_one_shot_action = true
     }
 
     #[test]
+    fn panel_height_migrates_runtime_geometry_without_rejecting_legacy_config() {
+        let default = ShellConfig::default();
+        assert_eq!(default.panel_height, 48);
+        assert_eq!(default.effective_panel_height(), 48);
+        let legacy: ShellConfig = toml::from_str("panel_height = 40").unwrap();
+        legacy.validate().unwrap();
+        assert_eq!(legacy.effective_panel_height(), 48);
+        let tall = ShellConfig {
+            panel_height: 64,
+            ..default
+        };
+        assert_eq!(tall.effective_panel_height(), 64);
+    }
+
+    #[test]
+    fn selectable_palettes_have_stable_ids_and_persist_without_rewriting_config() {
+        let mut config: ShellConfig =
+            toml::from_str("theme = \"light\"\nlauncher_fullscreen = true\n").unwrap();
+        assert_eq!(config.active_palette(), ThemePalette::PaperLight);
+        assert!(config.launcher_fullscreen);
+        for palette in [
+            ThemePalette::SlateDark,
+            ThemePalette::PaperLight,
+            ThemePalette::HighContrast,
+        ] {
+            config.select_palette(palette);
+            assert_eq!(config.active_palette(), palette);
+            assert_eq!(ThemePalette::parse(palette.as_str()).unwrap(), palette);
+            let menu = build_appearance_menu(palette);
+            assert_eq!(
+                menu.items
+                    .iter()
+                    .filter(|item| item.id.starts_with("appearance.palette."))
+                    .count(),
+                3
+            );
+            assert!(menu.items.iter().any(|item| {
+                item.id == format!("appearance.palette.{}", palette.as_str())
+                    && item.subtitle.as_deref() == Some("✓ Selected")
+            }));
+        }
+        let root = test_temp_dir("palette-persist");
+        let path = root.join("appearance.toml");
+        persist_palette_at(&path, ThemePalette::SlateDark).unwrap();
+        persist_palette_at(&path, ThemePalette::HighContrast).unwrap();
+        assert_eq!(
+            read_palette_override(&path).unwrap(),
+            Some(ThemePalette::HighContrast)
+        );
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "palette = \"high_contrast\"\n"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn navigation_skips_status_and_wraps() {
         let mut shell = shell_with(build_launcher_menu());
         assert_eq!(
             shell.state.selected_id.as_deref(),
-            Some("overview.window.terminal")
+            Some("overview.mode.apps")
         );
         shell.apply_semantic(SemanticInput::Up);
         assert_eq!(
@@ -3830,7 +4243,7 @@ after_one_shot_action = true
         shell.apply_semantic(SemanticInput::Down);
         assert_eq!(
             shell.state.selected_id.as_deref(),
-            Some("overview.window.terminal")
+            Some("overview.mode.apps")
         );
     }
 

@@ -49,6 +49,40 @@ composition, and is not a palette problem until verified.
   when the compositor returns an empty list; in the dedicated Windows view,
   show a proper user-facing absence message.
 
+## Implemented follow-up (host implementation, not yet SL101-qualified)
+
+- Default panel height **48 logical px**. Existing `panel_height = 40`
+  configuration remains accepted as a legacy value; its *effective*
+  Wayland height, exclusive zone, menu offset, and dismissal margins are 48.
+  Larger configured heights up to 72 remain unchanged.
+- Launcher emits five typed `Home | Apps | Windows | Spaces | Tasks` tabs.
+  Cairo renders them as a non-scrolling 48px horizontal strip. Selection
+  and activation reuse the existing `overview.mode` actions.
+- `launcher_fullscreen = false` by default. The Home menu's
+  **Toggle full-screen overview** action recreates the panel-owned Wayland
+  menu at almost the output width, preserving selected mode and search
+  query. The renderer switches to a three-column grid above a wide-screen
+  threshold, otherwise a single-column compact list. Standalone
+  `nuraloumi-menu` supports the configured launch layout, not dynamic
+  recreation.
+- **Appearance** is accessible from Launcher → More. Choices are
+  `slate_dark`, `paper_light` and `high_contrast`, rendered using
+  shared core ThemeTokens. A real selection updates the panel/menu
+  immediately and writes a minimal `appearance.toml` owner preference
+  atomically under `$XDG_CONFIG_HOME/nuraloumi/` (fallback
+  `$HOME/.config/nuraloumi/`). Fixture/dry-run sessions do not write
+  preferences. The explicit legacy `theme = "dark"|"light"` config
+  remains supported.
+- IMPORTANT LIMITATIONS: Other dedicated surface binaries currently
+  consume the legacy dark/light config field, and therefore do not yet
+  render the third High Contrast palette; this needs follow-up cross-bin
+  adoption after active notification/task lanes finish. Launcher tabs now
+  remain visible during search through a presentation-only projection;
+  a narrow regression test covers touch navigation on those tabs.
+  Cross-binary appearance parity still requires independent acceptance.
+- No production device deployment, compositor reload or unsafe SL101
+  operation was performed in this implementation task.
+
 ## Follow-up: overview navigation and layout
 
 Design a **two-state launcher** using existing `OverviewMode` values:

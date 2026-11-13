@@ -155,18 +155,65 @@ pub fn layout_menu_scaled<M: MenuSource, T: TextMeasurer>(
         1.0
     };
     let metrics = LayoutMetrics::default().for_text_scale(scale);
-    let width = panel_width(viewport, metrics);
+    let fullscreen_launcher = menu.id() == "launcher" && viewport.width >= 850.0;
+    let width = if fullscreen_launcher {
+        (viewport.width - metrics.outer_margin * 2.0).max(1.0)
+    } else {
+        panel_width(viewport, metrics)
+    };
     let x = ((viewport.width - width) / 2.0).max(0.0);
+    let tab_count = if menu.id() == "launcher" {
+        (0..menu.len())
+            .take_while(|&index| menu.item(index).id.starts_with("overview.mode."))
+            .count()
+    } else {
+        0
+    };
+    let tab_height = if tab_count > 0 { 52.0 } else { 0.0 };
     let max_panel_height =
-        (viewport.height - metrics.outer_margin * 2.0).max(metrics.header_height);
+        (viewport.height - metrics.outer_margin * 2.0).max(metrics.header_height + tab_height);
 
-    let content_height: f64 = (0..menu.len())
-        .map(|index| {
-            let item = menu.item(index);
-            metrics.row_height(item.kind, item.subtitle.is_some(), scale)
-        })
-        .sum();
-    let natural_height = metrics.header_height + content_height;
+    // Responsive overview grid: section/empty rows span the width; actions
+    // become three columns only on the optional wide launcher surface. These
+    // are measured scene rectangles, not a separate GPU or widget hierarchy.
+    let columns = if fullscreen_launcher { 3 } else { 1 };
+    let mut content_rows = Vec::with_capacity(menu.len().saturating_sub(tab_count));
+    let mut content_y = 0.0_f64;
+    let mut group_column = 0_usize;
+    let mut group_height = 0.0_f64;
+    for index in tab_count..menu.len() {
+        let item = menu.item(index);
+        let height = metrics.row_height(item.kind, item.subtitle.is_some(), scale);
+        if columns > 1 && item.kind.actionable() {
+            let column_width = width / columns as f64;
+            content_rows.push((
+                index,
+                Rect::new(
+                    x + group_column as f64 * column_width,
+                    content_y,
+                    column_width,
+                    height,
+                ),
+            ));
+            group_column += 1;
+            group_height = group_height.max(height);
+            if group_column == columns {
+                content_y += group_height;
+                group_column = 0;
+                group_height = 0.0;
+            }
+        } else {
+            if group_column > 0 {
+                content_y += group_height;
+                group_column = 0;
+                group_height = 0.0;
+            }
+            content_rows.push((index, Rect::new(x, content_y, width, height)));
+            content_y += height;
+        }
+    }
+    let content_height = content_y + if group_column > 0 { group_height } else { 0.0 };
+    let natural_height = metrics.header_height + tab_height + content_height;
     let panel_height = natural_height.min(max_panel_height);
     let panel = Rect::new(
         x,
@@ -178,7 +225,7 @@ pub fn layout_menu_scaled<M: MenuSource, T: TextMeasurer>(
     );
     let body = Rect::new(
         panel.x,
-        panel.y + metrics.header_height,
+        panel.y + metrics.header_height + tab_height,
         panel.width,
         (panel.height - metrics.header_height).max(0.0),
     );
@@ -192,10 +239,11 @@ pub fn layout_menu_scaled<M: MenuSource, T: TextMeasurer>(
     // Keep keyboard focus in view, even when a caller supplies a stale
     // scroll offset after navigation or a text-size change.
     if let Some(selected_id) = interaction.selected_id.as_deref() {
-        let mut top = 0.0;
-        for index in 0..menu.len() {
+        for (index, rect) in &content_rows {
+            let index = *index;
             let item = menu.item(index);
-            let height = metrics.row_height(item.kind, item.subtitle.is_some(), scale);
+            let top = rect.y;
+            let height = rect.height;
             if item.id == selected_id && item.kind.actionable() {
                 if top < offset || height > body.height {
                     offset = top;
@@ -205,7 +253,6 @@ pub fn layout_menu_scaled<M: MenuSource, T: TextMeasurer>(
                 offset = offset.clamp(0.0, max_offset);
                 break;
             }
-            top += height;
         }
     }
     let scroll = ScrollWindow {
@@ -260,15 +307,80 @@ pub fn layout_menu_scaled<M: MenuSource, T: TextMeasurer>(
         color: theme.separator,
     });
 
-    paint.push(PaintNode::ClipPush(body));
+    // Visual tab row is outside the scrolling body. The selected tab is
+    // disabled in the semantic model; it remains visibly active but cannot
+    // dispatch redundant navigation actions.
     let mut hits = Vec::with_capacity(menu.len());
-    let mut content_y = body.y - offset;
-
-    for index in 0..menu.len() {
+    if tab_count > 0 {
+        let tab_width = ((panel.width - 16.0) / tab_count as f64).max(1.0);
+        for index in 0..tab_count {
+            let item = menu.item(index);
+            let active = !item.enabled;
+            let focused = interaction.selected_id.as_deref() == Some(item.id);
+            let rect = Rect::new(
+                panel.x + 8.0 + index as f64 * tab_width,
+                panel.y + metrics.header_height + 2.0,
+                tab_width,
+                48.0,
+            );
+            paint.push(PaintNode::RoundedRect {
+                rect: Rect::new(rect.x + 1.0, rect.y, (rect.width - 2.0).max(1.0), 46.0),
+                radius: 0.0,
+                fill: Fill::Solid(if active { theme.selected } else { theme.card }),
+                stroke: if focused {
+                    Some((theme.accent, 2.0))
+                } else {
+                    None
+                },
+            });
+            if active {
+                paint.push(PaintNode::FillRect {
+                    rect: Rect::new(
+                        rect.x + 4.0,
+                        rect.bottom() - 4.0,
+                        (rect.width - 8.0).max(1.0),
+                        3.0,
+                    ),
+                    color: theme.accent,
+                });
+            }
+            let style = TextStyle {
+                size: 12.0 * scale,
+                bold: active,
+            };
+            let label = text.ellipsize(item.label, (rect.width - 10.0).max(1.0), style);
+            let label_width = text.measure(&label, style).width;
+            paint.push(PaintNode::Text {
+                origin: Point::new(
+                    rect.x + (rect.width - label_width).max(0.0) / 2.0,
+                    centered_baseline(rect, text, style),
+                ),
+                text: label,
+                style,
+                color: if active {
+                    theme.primary_text
+                } else {
+                    theme.secondary_text
+                },
+            });
+            hits.push(HitRegion {
+                item_id: item.id.to_owned(),
+                rect,
+                actionable: true,
+                enabled: item.enabled,
+                kind: item.kind,
+            });
+        }
+    }
+    paint.push(PaintNode::ClipPush(body));
+    for (index, geometry) in content_rows {
         let item = menu.item(index);
-        let row_height = metrics.row_height(item.kind, item.subtitle.is_some(), scale);
-        let row = Rect::new(panel.x, content_y, panel.width, row_height);
-        content_y += row_height;
+        let row = Rect::new(
+            geometry.x,
+            body.y + geometry.y - offset,
+            geometry.width,
+            geometry.height,
+        );
 
         let Some(visible) = row.intersection(body) else {
             continue;
@@ -584,5 +696,103 @@ pub fn layout_menu_scaled<M: MenuSource, T: TextMeasurer>(
         paint,
         hits,
         scroll,
+    }
+}
+
+#[cfg(test)]
+mod launcher_tab_tests {
+    use super::*;
+    use crate::{MenuItemView, MenuView, ToyText};
+
+    fn launcher_fixture() -> MenuView {
+        let mut items = Vec::new();
+        for (index, name) in ["Home", "Apps", "Windows", "Spaces", "Tasks"]
+            .iter()
+            .enumerate()
+        {
+            items.push(MenuItemView {
+                id: format!("overview.mode.{name}"),
+                label: (*name).into(),
+                subtitle: None,
+                shortcut: None,
+                glyph: None,
+                kind: RowKind::Action,
+                enabled: index != 0,
+            });
+        }
+        items.push(MenuItemView {
+            id: "section.apps".into(),
+            label: "Applications".into(),
+            subtitle: None,
+            shortcut: None,
+            glyph: None,
+            kind: RowKind::Section,
+            enabled: false,
+        });
+        for index in 0..9 {
+            items.push(MenuItemView::action(
+                format!("application.{index}"),
+                format!("App {index}"),
+            ));
+        }
+        MenuView {
+            id: "launcher".into(),
+            title: "Launcher".into(),
+            items,
+        }
+    }
+
+    #[test]
+    fn tabs_have_persistent_horizontal_hit_regions_and_grid_only_when_wide() {
+        let menu = launcher_fixture();
+        let compact = layout_menu(
+            &menu,
+            &InteractionState::default(),
+            Viewport::new(448.0, 700.0, 1.0),
+            &Theme::dark(),
+            &ToyText,
+            false,
+        );
+        let wide = layout_menu(
+            &menu,
+            &InteractionState::default(),
+            Viewport::new(1264.0, 720.0, 1.0),
+            &Theme::dark(),
+            &ToyText,
+            false,
+        );
+        for scene in [&compact, &wide] {
+            let tabs: Vec<_> = scene
+                .hits
+                .iter()
+                .filter(|hit| hit.item_id.starts_with("overview.mode."))
+                .collect();
+            assert_eq!(tabs.len(), 5);
+            assert!(tabs.iter().all(|hit| hit.rect.height >= 48.0));
+            assert!(tabs.windows(2).all(|pair| {
+                pair[0].rect.y == pair[1].rect.y
+                    && pair[0].rect.right() <= pair[1].rect.x + f64::EPSILON
+            }));
+            assert!(!tabs[0].enabled);
+            assert!(tabs[1].enabled);
+            assert_eq!(
+                scene.hit_test(tabs[1].rect.x + 20.0, tabs[1].rect.y + 20.0),
+                Some("overview.mode.Apps"),
+            );
+        }
+        let app = |scene: &Scene, id: &str| {
+            scene
+                .hits
+                .iter()
+                .find(|hit| hit.item_id == id)
+                .unwrap()
+                .rect
+        };
+        assert!(compact.panel_rect.width < 500.0);
+        assert!(wide.panel_rect.width > 1200.0);
+        assert!(app(&compact, "application.1").y > app(&compact, "application.0").y);
+        assert_eq!(app(&wide, "application.1").y, app(&wide, "application.0").y);
+        assert!(app(&wide, "application.1").x > app(&wide, "application.0").x);
+        assert!(app(&wide, "application.0").height >= 48.0);
     }
 }

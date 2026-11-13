@@ -1,4 +1,3 @@
-use nuraloumi_core::{DARK_THEME, LIGHT_THEME};
 use nuraloumi_providers::session::OwnedDesktopSession;
 use nuraloumi_providers::{
     ActionProvider, ActionResult, ApplicationProvider, AudioAction, AudioProvider, BacklightAction,
@@ -20,9 +19,8 @@ use nuraloumi_shell::{
     MediaPlayerEntry as ShellMediaPlayerEntry, MenuAction, MenuFamily,
     NotificationHistoryEntry as ShellNotificationHistoryEntry, OverviewMode,
     PlatformEvent as ShellPlatformEvent, ProviderValue, SceneTransitionClock, SemanticInput,
-    ShellConfig, ShellInput, ShellState, TaskEntry as ShellTaskEntry, Theme as ShellTheme,
-    ValueState, WifiNetworkEntry, WindowCommand, WindowControlCapabilities, WindowEntry,
-    WindowThumbnailEntry,
+    ShellConfig, ShellInput, ShellState, TaskEntry as ShellTaskEntry, ValueState, WifiNetworkEntry,
+    WindowCommand, WindowControlCapabilities, WindowEntry, WindowThumbnailEntry,
 };
 use nuraloumi_wayland::{
     capture_toplevel_thumbnails_with_timeout, BackendCapabilities as WaylandCapabilities,
@@ -249,6 +247,11 @@ fn run() -> Result<(), String> {
         build_family(family, &snapshot)
     };
     let mut shell = ShellState::new(menu, config.reduced_motion)?;
+    if family == MenuFamily::Appearance && args.fixture.is_none() {
+        shell.refresh_menu(nuraloumi_shell::build_appearance_menu(
+            config.active_palette(),
+        ))?;
+    }
 
     if args.live {
         return run_live(
@@ -333,7 +336,7 @@ fn run_workspace_probe() -> Result<(), String> {
 
 fn run_live(
     mut shell: ShellState,
-    config: ShellConfig,
+    mut config: ShellConfig,
     mut snapshot: FixtureSnapshot,
     keybindings: KeybindingRegistry,
     policy: LivePolicy,
@@ -359,7 +362,7 @@ fn run_live(
                 &mut shell,
                 &mut snapshot,
                 &mut backend,
-                &config,
+                &mut config,
                 policy,
             )? {
                 return Ok(());
@@ -374,7 +377,13 @@ fn run_live(
             let scale = output.scale.max(1) as u32;
             (output.mode_width > 0).then_some(output.mode_width as u32 / scale)
         })
-        .map(|width| config.menu_width.min(width.saturating_sub(16).max(240)))
+        .map(|width| {
+            if config.launcher_fullscreen && shell.menu.id == "launcher" {
+                width.saturating_sub(16).max(240)
+            } else {
+                config.menu_width.min(width.saturating_sub(16).max(240))
+            }
+        })
         .unwrap_or(config.menu_width);
     let requested_height = output
         .as_ref()
@@ -384,7 +393,7 @@ fn run_live(
         })
         .map(|height| {
             height
-                .saturating_sub(config.panel_height.saturating_add(16))
+                .saturating_sub(config.effective_panel_height().saturating_add(16))
                 .clamp(240, 720)
         })
         .unwrap_or(640);
@@ -401,7 +410,7 @@ fn run_live(
     }
     let dismiss_surface = if dismiss_backdrop_enabled {
         let (margin_top, margin_right, margin_bottom, margin_left) =
-            dismiss_backdrop_margins(config.panel_edge, config.panel_height);
+            dismiss_backdrop_margins(config.panel_edge, config.effective_panel_height());
         Some(
             backend
                 .create_dismiss_backdrop(DismissBackdropConfig {
@@ -420,7 +429,7 @@ fn run_live(
     let surface = match backend.create_menu(WaylandMenuConfig {
         width: requested_width,
         height: requested_height,
-        margin_top: config.panel_height as i32,
+        margin_top: config.effective_panel_height() as i32,
         margin_left: 0,
         output: output.as_ref().map(|output| output.id),
         namespace: "nuraloumi-menu".into(),
@@ -435,10 +444,6 @@ fn run_live(
     };
 
     let renderer = CairoRenderer::default();
-    let theme_tokens = match config.theme {
-        ShellTheme::Dark => &DARK_THEME,
-        ShellTheme::Light => &LIGHT_THEME,
-    };
     let mut geometry: Option<(u32, u32, i32)> = None;
     let mut scene: Option<Scene> = None;
     let mut touch_regions: BTreeMap<i32, Option<ShellHitRegion>> = BTreeMap::new();
@@ -507,7 +512,7 @@ fn run_live(
                         &mut backend,
                         surface,
                         &renderer,
-                        theme_tokens,
+                        config.active_theme_tokens(),
                         &shell,
                         &snapshot,
                         (
@@ -675,7 +680,7 @@ fn run_live(
                     &mut shell,
                     &mut snapshot,
                     &mut backend,
-                    &config,
+                    &mut config,
                     policy,
                 )? {
                     close_live_surfaces(&mut backend, surface, dismiss_surface)?;
@@ -698,7 +703,7 @@ fn run_live(
                         &mut backend,
                         surface,
                         &renderer,
-                        theme_tokens,
+                        config.active_theme_tokens(),
                         &shell,
                         &snapshot,
                         (
@@ -717,7 +722,7 @@ fn run_live(
                             &mut backend,
                             surface,
                             &renderer,
-                            theme_tokens,
+                            config.active_theme_tokens(),
                             &shell,
                             &snapshot,
                             (
@@ -736,7 +741,7 @@ fn run_live(
                 &mut backend,
                 surface,
                 &renderer,
-                theme_tokens,
+                config.active_theme_tokens(),
                 &shell,
                 &snapshot,
                 (geometry, Some(sample.transition)),
@@ -763,7 +768,7 @@ fn run_live(
                         &mut backend,
                         surface,
                         &renderer,
-                        theme_tokens,
+                        config.active_theme_tokens(),
                         &shell,
                         &snapshot,
                         (
@@ -893,7 +898,7 @@ fn handle_live_report(
     shell: &mut ShellState,
     snapshot: &mut FixtureSnapshot,
     backend: &mut WaylandBackend,
-    config: &ShellConfig,
+    config: &mut ShellConfig,
     policy: LivePolicy,
 ) -> Result<bool, String> {
     log_live_report(report)?;
@@ -912,8 +917,35 @@ fn handle_live_report(
             if policy.execute_provider_actions && family == MenuFamily::ControlCenter {
                 refresh_control_center_tab_snapshot(snapshot, ControlCenterTab::Media);
             }
+            if family != MenuFamily::Launcher {
+                shell.state.query.clear();
+                let _ = shell.focus_search(false);
+            }
             shell.refresh_family(family, snapshot)?;
+            if family == MenuFamily::Appearance {
+                shell.refresh_menu(nuraloumi_shell::build_appearance_menu(
+                    config.active_palette(),
+                ))?;
+            }
             return Ok(false);
+        }
+        if kind == "theme.select" {
+            let palette = nuraloumi_shell::ThemePalette::parse(payload)?;
+            config.select_palette(palette);
+            if policy.execute_provider_actions {
+                if let Err(error) = nuraloumi_shell::persist_palette_override(palette) {
+                    eprintln!("nuraloumi-appearance-persistence: {error}");
+                }
+            }
+            shell.refresh_menu(nuraloumi_shell::build_appearance_menu(
+                config.active_palette(),
+            ))?;
+            return Ok(false);
+        }
+        if kind == "overview.layout" {
+            // The persistent panel owns live surface re-creation. For the
+            // stand-alone runner, request the layout through config at start.
+            return Err("Full-screen toggle requires nuraloumi-panel; use launcher_fullscreen = true for the standalone menu".into());
         }
         if kind == "overview.mode" {
             shell.set_overview_mode(OverviewMode::parse(payload)?, snapshot)?;
@@ -1750,7 +1782,7 @@ mod tests {
             &model,
             &state,
             Viewport::new(480.0, 640.0, 1.0),
-            &DARK_THEME,
+            &nuraloumi_core::DARK_THEME,
             RenderOptions::default(),
         );
         assert_eq!(scene.menu_id, "display");
