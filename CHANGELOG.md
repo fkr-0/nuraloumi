@@ -4,6 +4,38 @@ All notable user-visible changes to NuraLoumi are recorded here.
 
 ## [Unreleased]
 
+## [0.0.6-dev.1] - 2026-11-13
+
+Development **patch-version increment** to deliver the notification-center
+P2 history-integrity correction on top of `0.0.5-dev.1`. This is a
+source/host-tested prerelease, **not** a production-qualified SL101 build.
+
+### Fixed
+
+- The Dunst history provider no longer silently presents a truncated history
+  as complete: a 65th entry beyond the 64-entry bound yields an explicit
+  `incomplete` issue and `Degraded` health, without allocating extra
+  notification records. Exactly 64 entries, including empty trailing nested
+  groups, remain `Healthy`.
+- Both confirmed `ClearKnown` and legacy `Clear` refuse destructive
+  operations when the history snapshot is incomplete. After a successful
+  deletion command, the notification UI no longer infers success from the
+  absence of an ID in a truncated post-action snapshot.
+- Regression tests cover 0, 63, 64, 65, and 70 history entries, the
+  fail-closed clear variants, and a still-present confirmed ID hidden at
+  position 65. The prior press/release and unavailable-history protections
+  remain unchanged.
+
+### Qualification
+
+- Verified on the host with the complete locked Rust workspace tests, strict
+  Clippy (`-D warnings`), formatting, and a private Xvfb/D-Bus/Dunst
+  integration test; no live desktop notification service was changed.
+- Outstanding gates: independent review, exact-version ARMv7 CI artifacts,
+  on-device SL101 interaction/performance and hardware deployment checks.
+  Dunst numeric notification-ID reuse across daemon restarts remains a
+  separate P2 limitation.
+
 ## [0.0.5-dev.1] - 2026-11-13
 
 Development patch release for SL101 qualification, not a production-qualified image. Integrates the reviewed media-player and ARMv7 CI changes from remote `main` with the newer local notifications, browser, launcher, and appearance-persistence fixes. Hardware deployment remains gated on exact-SHA CI artifacts and device smoke checks.
