@@ -91,6 +91,7 @@ jobs:
         run: |
           set -euo pipefail
           rustup target list --installed | grep -Fx "$TARGET"
+          rustup component list --installed | grep -Fx 'rust-src'
           python3 -m unittest scripts/test_debian_armhf_ci.py -v
           python3 -m unittest scripts/test_native_packages_ci.py -v
           python3 -m unittest scripts/test_verify_ci_artifact.py -v
@@ -99,6 +100,9 @@ jobs:
         shell: bash
         env:
           RUSTFLAGS: -C target-feature=-neon,-d32,-hwdiv,-hwdiv-arm
+          # Keep ARM $a/$t/$d mapping symbols, otherwise the disassembler
+          # can mistake embedded data for D16-D31 instructions.
+          CARGO_PROFILE_RELEASE_STRIP: debuginfo
         run: |
           set -euo pipefail
           rustc -vV
