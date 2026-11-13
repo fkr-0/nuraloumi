@@ -1,7 +1,7 @@
 use crate::command::{CommandLimits, CommandRunner, CommandSpec, SystemCommandRunner};
 use crate::common::{timestamp_ms, ActionProvider, ActionResult, Health, Provider, SnapshotMeta};
 use crate::error::ProviderError;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
 const SNAPSHOT_LIMITS: CommandLimits = CommandLimits::new(Duration::from_secs(2), 256 * 1024);
@@ -46,10 +46,22 @@ impl NotificationSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NotificationAction {
-    Redisplay { id: u32 },
-    Remove { id: u32 },
-    Invoke { id: u32, action: String },
+    Redisplay {
+        id: u32,
+    },
+    Remove {
+        id: u32,
+    },
+    Invoke {
+        id: u32,
+        action: String,
+    },
+    /// Legacy clear: restrict to the history entries observed at execution time.
     Clear,
+    /// Only remove IDs captured by the UI at confirmation time.
+    ClearKnown {
+        ids: Vec<u32>,
+    },
 }
 
 pub struct NotificationProvider<R> {
@@ -142,8 +154,20 @@ impl<R: CommandRunner> ActionProvider<NotificationAction> for NotificationProvid
         let snapshot = self.snapshot()?;
         match action {
             NotificationAction::Clear => {
-                run_action(&mut self.runner, ["history-clear".to_owned()])?;
-                Ok(ActionResult::executed("notification history cleared"))
+                // Legacy callers cannot freeze the UI confirmation set.
+                // At minimum, never call the global history-clear command:
+                // remove only the IDs seen by this snapshot.
+                let ids = snapshot
+                    .notifications
+                    .iter()
+                    .map(|entry| entry.id)
+                    .collect::<Vec<_>>();
+                clear_exact_history(&mut self.runner, &snapshot, &ids)
+            }
+            NotificationAction::ClearKnown { ids } => {
+                // Caller must capture IDs when the user is asked to confirm.
+                // New arrivals cannot be added by the later history read.
+                clear_exact_history(&mut self.runner, &snapshot, &ids)
             }
             NotificationAction::Redisplay { id } => {
                 require_notification(&snapshot, id)?;
@@ -204,6 +228,40 @@ where
         )));
     }
     Ok(())
+}
+
+fn clear_exact_history<R: CommandRunner>(
+    runner: &mut R,
+    snapshot: &NotificationSnapshot,
+    ids: &[u32],
+) -> Result<ActionResult, ProviderError> {
+    if snapshot.meta.health != Health::Healthy {
+        return Err(ProviderError::unavailable(
+            "notification history is not healthy; clear cannot be validated",
+        ));
+    }
+    if ids.len() > MAX_NOTIFICATIONS {
+        return Err(ProviderError::parse("too many notification IDs to clear"));
+    }
+    let mut seen = BTreeSet::new();
+    for id in ids {
+        if !seen.insert(*id) {
+            return Err(ProviderError::parse(
+                "duplicate notification ID in clear request",
+            ));
+        }
+        require_notification(snapshot, *id)?;
+    }
+    // Multiple exact-ID removals are bounded, but not an atomic transaction.
+    // A failed command stops immediately, so failures can produce a partial
+    // clear; importantly, unrelated notifications are not targeted.
+    for id in ids {
+        run_action(runner, ["history-rm".to_owned(), id.to_string()])?;
+    }
+    Ok(ActionResult::executed(format!(
+        "removed {} known notification(s) from history",
+        ids.len()
+    )))
 }
 
 fn require_notification(
@@ -1243,6 +1301,76 @@ mod tests {
         let (entries, issues) = parse_history(&input).unwrap();
         assert!(issues.is_empty());
         assert_eq!(entries[0].actions, vec!["default", "reply"]);
+    }
+
+    fn history_with_two_entries() -> String {
+        let first = r#"{"id":{"data":42},"appname":{"data":"first"},"summary":{"data":"First"},"body":{"data":"old"}}"#;
+        let second = r#"{"id":{"data":77},"appname":{"data":"second"},"summary":{"data":"Second"},"body":{"data":"new"}}"#;
+        format!(r#"{{"data":[[{first},{second}]]}}"#)
+    }
+
+    #[test]
+    fn clear_known_never_erases_new_arrivals_after_confirmation() {
+        let mut runner = FixtureCommandRunner::default();
+        runner.insert(
+            CommandSpec::new("dunstctl").arg("history"),
+            output(&history_with_two_entries()),
+        );
+        runner.insert(
+            CommandSpec::new("dunstctl").args(["history-rm", "42"]),
+            output(""),
+        );
+        // A global history-clear or history-rm 77 has no fixture and would
+        // fail the test. Entry 77 is the arrival after UI confirmation.
+        let result = NotificationProvider::new(runner)
+            .execute(NotificationAction::ClearKnown { ids: vec![42] })
+            .unwrap();
+        assert!(result.executed);
+        assert!(result.message.contains("1 known"));
+    }
+
+    #[test]
+    fn legacy_clear_removes_only_visible_snapshot_ids_not_global_history() {
+        let mut runner = FixtureCommandRunner::default();
+        runner.insert(
+            CommandSpec::new("dunstctl").arg("history"),
+            output(&history_with_two_entries()),
+        );
+        runner.insert(
+            CommandSpec::new("dunstctl").args(["history-rm", "42"]),
+            output(""),
+        );
+        runner.insert(
+            CommandSpec::new("dunstctl").args(["history-rm", "77"]),
+            output(""),
+        );
+        assert!(
+            NotificationProvider::new(runner)
+                .execute(NotificationAction::Clear)
+                .unwrap()
+                .executed
+        );
+    }
+
+    #[test]
+    fn clear_known_rejects_duplicates_missing_ids_and_unhealthy_snapshots() {
+        let mut runner = FixtureCommandRunner::default();
+        runner.insert(
+            CommandSpec::new("dunstctl").arg("history"),
+            output(&history_with_two_entries()),
+        );
+        let mut provider = NotificationProvider::new(runner);
+        let duplicate = provider.execute(NotificationAction::ClearKnown { ids: vec![42, 42] });
+        assert!(duplicate.is_err());
+        let absent = provider.execute(NotificationAction::ClearKnown { ids: vec![42, 99] });
+        assert!(absent.is_err());
+        let oversized = provider.execute(NotificationAction::ClearKnown {
+            ids: vec![42; MAX_NOTIFICATIONS + 1],
+        });
+        assert!(oversized.is_err());
+        let unavailable = NotificationProvider::new(FixtureCommandRunner::default())
+            .execute(NotificationAction::ClearKnown { ids: vec![42] });
+        assert!(unavailable.is_err());
     }
 
     #[test]

@@ -95,6 +95,70 @@ markup/control stripping, forged actions and the fail-closed default.
    unknown amid parallel session work. No further attempt was made to seize,
    restart or alter the production notification service.
 
+## Follow-up: private D-Bus live E2E and scoped Clear race (2026-11-13)
+
+This section supersedes the earlier **NOT PASS** assessment *only* for the
+isolated host-to-backend path. The unsuccessful first attempt above is retained
+as historical diagnostic evidence; the SL101 and UI end-to-end gate remain
+unqualified.
+
+- A fresh, isolated `xvfb-run -a dbus-run-session` started a Dunst instance
+  using an explicit test configuration with `history_length=50` and short
+  timeouts. The process ID obtained for the private
+  `org.freedesktop.Notifications` owner matched the spawned test daemon.
+  No production notification daemon was claimed or controlled.
+- `notify-send -p` returned ID `2`; after natural expiry the real
+  `NotificationProvider::system()` read exactly one notification with the
+  expected application, summary and body. `NotificationDelivery::system().poll()`
+  read the same history. `NotificationAction::Invoke` rejected the unsafe
+  default action, then `NotificationAction::Remove { id: 2 }` removed exactly
+  that entry, confirmed by a second snapshot.
+- A second message with ID `3` entered the history. Legacy
+  `NotificationAction::Clear` cleared the history in the private test.
+  **Result: sender → private D-Bus → Dunst → history → real Rust provider
+  → remove/clear PASS on the host.**
+- A separate test delivered a notification with ID `2`, then another with
+  ID `3` *after the simulated confirmation boundary*. The new
+  `NotificationAction::ClearKnown { ids: vec![2] }` removed only ID `2`,
+  preserving ID `3`, as verified by a fresh provider snapshot.
+  This is a real private-bus, concurrent-arrival boundary regression, not just
+  a mock runner.
+- Backend `Clear` no longer calls Dunst's global `history-clear` and
+  instead issues bounded exact-ID `history-rm` requests for entries present
+  when execution begins. `ClearKnown` accepts explicitly confirmed IDs,
+  validates their existence and uniqueness before any mutations, and refuses
+  degraded/unavailable history or oversized sets. A partial clear remains
+  possible if Dunst fails mid-sequence. Calls are bounded to 64 IDs.
+- The 3 added deterministic tests cover confirmed-ID preservation, legacy
+  scoped clear, and duplicate/unknown/oversized/unavailable rejection.
+  Notification tests: **15/15 PASS**.
+
+**Important residual UI TOCTOU:** the existing Notification Center still
+dispatches legacy `NotificationAction::Clear` after confirmation, so arrivals
+between the UI's *ask* and the provider's snapshot may still be cleared.
+The UI owner must capture IDs when the confirmation screen is created and
+pass precisely those IDs via `ClearKnown`. This backend-only follow-up did
+**not** modify `crates/nuraloumi-shell/src/bin/notifications.rs`, `panel.rs`
+or `lib.rs`. Production acceptance must not claim that this UI race has
+been fully closed until that integration and its tests are complete.
+
+The private test establishes functional host transport and action plumbing,
+**not** immediate D-Bus event subscriptions, complete GUI/touch end-to-end,
+hardware SL101 .106 CPU/RSS, or human-observed notification toasts.
+
+Host worktree verification at base `0a821ac` with this follow-up applied:
+
+- `cargo test -p nuraloumi-providers --lib notifications --locked`: **15/15 PASS**.
+- `cargo test --workspace --locked`: **PASS**, all unit and doc tests.
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`: **PASS**.
+- `rustfmt --edition 2021 --check crates/nuraloumi-providers/src/notifications.rs`: **PASS**.
+- `cargo fmt --check`: **FAIL**, unrelated pre-existing module declaration
+  order in `crates/nuraloumi-shell/src/lib.rs` (moving `pub mod browser;`
+  above `config_migration`). This backend-only lane did not edit the
+  shell's lib.rs. Assign to shell/UI owner for final all-green fmt gate.
+
+---
+
 ## Remaining external qualification gates
 
 - In a controlled test bus with explicit Dunst config and lifecycle, prove
