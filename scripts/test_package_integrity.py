@@ -69,6 +69,7 @@ class PackageIntegrityTests(unittest.TestCase):
         for name in self.names:
             self.payloads[f"bin/{name}"] = b"\x7fELFtest-fixture-not-executable"
         for name in ["README.md", "LICENSE", "config/nuraloumi.toml.example",
+                     "share/applications/nuraloumi-player.desktop",
                      "share/nuraloumi/qualification/README.md"]:
             self.payloads[name] = b"fixture"
         for name, content in self.payloads.items():

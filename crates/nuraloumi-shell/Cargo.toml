@@ -46,6 +46,14 @@ name = "nuraloumi-music"
 path = "src/bin/music.rs"
 
 [[bin]]
+name = "nuraloumi-player"
+path = "src/bin/player.rs"
+
+[[bin]]
+name = "nuraloumi-playerd"
+path = "src/bin/playerd.rs"
+
+[[bin]]
 name = "nuraloumi-notifications"
 path = "src/bin/notifications.rs"
 

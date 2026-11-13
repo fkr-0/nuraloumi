@@ -51,7 +51,7 @@ class DebianArmhfCiTests(unittest.TestCase):
 
     def test_packaging_all_declared_runtime_surfaces(self):
         for part in (
-            "cargo build --locked --release --workspace --bins",
+            "cargo -Z build-std=std,panic_abort build --locked --release --workspace --bins",
             "cargo xtask package --target",
             "cargo xtask package-check --dir",
             "python3 scripts/package-binaries.py",
@@ -66,6 +66,12 @@ class DebianArmhfCiTests(unittest.TestCase):
             'export GIT_WORK_TREE="$PWD"',
         ):
             self.assertIn(part, self.ci)
+
+    def test_armv7_std_is_built_with_d16_feature_flags(self):
+        self.assertIn("toolchain: nightly-2026-11-12", self.ci)
+        self.assertIn("components: rust-src", self.ci)
+        self.assertIn("-Z build-std=std,panic_abort", self.ci)
+        self.assertIn("-C target-feature=-neon,-d32,-hwdiv,-hwdiv-arm", self.ci)
 
     def test_disassembly_gate_is_enforced_for_sized_neon_and_upper_d(self):
         import re
