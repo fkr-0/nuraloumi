@@ -219,8 +219,12 @@ pub fn stage_package(
         }
         for (relative, expected) in [
             (
+                "lib/libnuraloumi-video.so",
+                "848386bbbd2042c7a881a079368a5368e85a2040d8a3b847abba3d557c19add6",
+            ),
+            (
                 "lib/libgallium-25.0.7.so",
-                "3745960c85ab21ecc33c40496995a01f806d27293c59cce711b3e38c6eef5977",
+                "84af7822128f8a08a03c460164b00cd92b9058f22fdbe094f2811119d1d13cf8",
             ),
             (
                 "gst/libgstv4l2codecs.so",
