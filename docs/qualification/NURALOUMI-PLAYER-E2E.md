@@ -1,5 +1,30 @@
 # NuraLoumi native media player: qualification (2026-11-12 through 2026-11-14)
 
+## 2026-11-14 — qualified 0.0.7-dev.1 three-pass integration
+
+The existing NuraLoumi player and playerd use the private SHA-pinned
+Grate 0092 Y+U/V/RGB three-internal-draw variant. The two opt-ins
+GRATE_I420_YU_PAIR and GRATE_I420_YU_FP_SCHEDULE are passed only to the
+playerd child process; there is no second player or system Mesa upgrade.
+
+Physical ARMv7 private-stage E2E from the actual NuraLoumi player:
+414 frames, 414 compositor callbacks, 414 releases, 23.590 presented
+fps, video/audio/pipeline EOS, zero PTS gaps and no error. Integrated
+controls PASS: paused position delta 0 ms, paused seek 5000 ms,
+resume at 5166 ms, volume/mute and Stop 245.6 ms; all 147 buffer
+leases returned. The full suite cross build has 27/27 ELF audit PASS
+(VFPv3-D16, no NEON or ARM hardware division).
+
+A separate Grate 0093 trace probe verifies three real draws/frame,
+and qualifies the PCM observation sink pause fix. That observer fix
+does not modify the shipping NuraLoumi playerd. Browser isolation and
+a separate WPE renderer boundary are documented in
+NURALOUMI-VIDEO-BROWSER-ISOLATION-20261114.md.
+
+These are private, no-install tests. Production deployment, full
+nonuniform RGB oracles, four-buffer pressure, live WPE page rendering
+and physical acoustic/optical sync are not yet qualified.
+
 ## 2026-11-14 — single-player VDE/Grate four-pass integration
 
 The original source-only renderer and its 414-frame hardware

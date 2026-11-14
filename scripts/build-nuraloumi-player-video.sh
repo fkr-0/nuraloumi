@@ -8,9 +8,11 @@ sl101="$root/../sl101_linux"
 src="$root/components/nura-media-engine/src"
 out="$root/target/nuraloumi-video-armv7"
 cc="$sl101/work/sl101-gstgl-gles-20261113/gst-build/cc"
-mesa="$sl101/work/sl101-vde-dmabuf-20261114/mesa-i420-r8/stage/opt/grate-mesa25-musl-docker-20261113/lib"
+# Exact-match, hardware-proven Grate 0092 three-draw library. Never accept
+# an unpinned local Mesa or implicitly install system libraries.
+mesa="$sl101/work/sl101-grate-0092-hardening-20261114/stage/opt/grate-mesa25-musl-docker-20261113/lib"
 gst="$sl101/work/sl101-vde-dmabuf-20261114/capture-clean/libgstv4l2codecs.so"
-mesa_sha=3745960c85ab21ecc33c40496995a01f806d27293c59cce711b3e38c6eef5977
+mesa_sha=84af7822128f8a08a03c460164b00cd92b9058f22fdbe094f2811119d1d13cf8
 gst_sha=79ee247faf6397829d908136ad16e04dc936437a1c71b6d49120e470ec452608
 [ -x "$cc" ] || { echo 'missing pinned ARMv7 native GStreamer cross compiler' >&2; exit 82; }
 [ "$(sha256sum "$mesa/libgallium-25.0.7.so" | cut -d' ' -f1)" = "$mesa_sha" ] || exit 82

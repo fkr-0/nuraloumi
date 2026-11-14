@@ -1,0 +1,84 @@
+schema: nuraloumi-video-release-evidence-v1
+release:
+  version: 0.0.7-dev.1
+  date: 2026-11-14
+  status: source-development-prerelease
+  production_install_authorized: false
+  live_device_default_changed: false
+  external_ci_completed: false
+video_bundle:
+  target: armv7-unknown-linux-musleabihf
+  private_bundle_opt_in_only: true
+  internal_renderer: grate-i420-three-exact-0092
+  sha256:
+    libgallium_25_0_7: 84af7822128f8a08a03c460164b00cd92b9058f22fdbe094f2811119d1d13cf8
+    libnuraloumi_video: 848386bbbd2042c7a881a079368a5368e85a2040d8a3b847abba3d557c19add6
+    libgstv4l2codecs: 79ee247faf6397829d908136ad16e04dc936437a1c71b6d49120e470ec452608
+  gpu_options:
+    - GRATE_I420_YU_PAIR=1
+    - GRATE_I420_YU_FP_SCHEDULE=1
+  env_scope: child-playerd-only
+device_e2e:
+  mode: temporary-sha-pinned-private-staging
+  video_frames_presented: 414
+  wayland_callbacks: 414
+  wayland_releases: 414
+  outstanding_buffers: 0
+  pts_errors: 0
+  pts_gaps: 0
+  pipeline_eos: true
+  audio_eos: true
+  video_eos: true
+  fps_presented: 23.590
+  exit_code: 0
+controls_e2e:
+  pause_stable_delta_ms: 0
+  paused_seek_ms: 5000
+  resumed_ms: 5166
+  stop_reply_ms: 245.6
+  volume: pass
+  mute: pass
+  buffer_releases: 147
+  buffer_callbacks: 147
+  exit_code: 0
+independent_grate_three_hw:
+  observed_render_events_per_414_frames: 1242
+  pause_resume_after_pcm_observer_fix:
+    frames: 120
+    draw_events: 360
+    pcm_chunks: 228
+    paused_confirmed: true
+    trace_verdict: PASS_TRACE_STRUCTURE_ONLY
+  observer_fix_is_not_product_player_patch: true
+browser:
+  native_engine_host_meson_tests: 7
+  native_engine_host_meson_failures: 0
+  browser_rust_interaction_tests: 2
+  browser_rust_interaction_failures: 0
+  target_browser_fixture: PASS
+  video_flags_in_browser_launcher: explicitly_unset
+  renderer_upgraded: false
+  actual_wpe_page_gpu_regression_executed: false
+armv7_suite:
+  elf_audited_programs: 27
+  elf_audit_passed: 27
+  vfp_arch: VFPv3-D16
+  neon: forbidden
+  hardware_division: forbidden
+host_checks:
+  cargo_check_locked: PASS
+  cargo_test_locked: PASS
+  clippy_deny_warnings: PASS
+  cargo_fmt_check: PASS
+unqualified:
+  - full-independent-three-pass-production-release-gate
+  - full-four-buffer-saturation
+  - nonuniform-spatial-chroma-edge-rgb-oracles
+  - physical-dac-and-optical-lipsync
+  - live-browser-wpe-page-rendering-concurrent-with-video
+package_integrity:
+  target: armv7-unknown-linux-musleabihf
+  files: 77
+  binary_count: 27
+  hash_and_armv7_checks: PASS
+  production_device_install: PENDING

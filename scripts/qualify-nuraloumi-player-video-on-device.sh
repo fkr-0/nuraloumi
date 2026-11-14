@@ -24,7 +24,7 @@ rust_sha=$(sha256sum "$dir/nuraloumi-playerd" | cut -d' ' -f1)
 native_sha=$(sha256sum "$dir/lib/libnuraloumi-video.so" | cut -d' ' -f1)
 [ "$rust_sha" = "$4" ] || blocked playerd-sha
 [ "$native_sha" = "$5" ] || blocked native-sha
-[ "$(sha256sum "$dir/lib/libgallium-25.0.7.so"|cut -d' ' -f1)" = 3745960c85ab21ecc33c40496995a01f806d27293c59cce711b3e38c6eef5977 ] || blocked mesa-sha
+[ "$(sha256sum "$dir/lib/libgallium-25.0.7.so"|cut -d' ' -f1)" = 84af7822128f8a08a03c460164b00cd92b9058f22fdbe094f2811119d1d13cf8 ] || blocked mesa-sha
 [ "$(sha256sum "$dir/gst/libgstv4l2codecs.so"|cut -d' ' -f1)" = 79ee247faf6397829d908136ad16e04dc936437a1c71b6d49120e470ec452608 ] || blocked gst-sha
 [ -f /usr/local/lib/gr3d_serialize.so ] &&
  [ -d /usr/local/lib/sl101-libdrm-import-lists-5b06215a2876fec6 ] || blocked runtime-prerequisites
@@ -33,7 +33,7 @@ native_sha=$(sha256sum "$dir/lib/libnuraloumi-video.so" | cut -d' ' -f1)
 mkdir -p "$dir/runtime" "$dir/state"
 chown -R user:user "$dir"
 chmod 700 "$dir" "$dir/runtime" "$dir/state"
-printf 'GATE_PASS nuraloumi-one-playerd-VDE-4pass-internal\n'
+printf 'GATE_PASS nuraloumi-one-playerd-VDE-3pass-internal\n'
 sudo -n -u user env \
   QUAL_DIR="$dir" QUAL_MODE="$6" XDG_RUNTIME_DIR="$dir/runtime" XDG_STATE_HOME="$dir/state" \
   WAYLAND_DISPLAY=/run/sl101-desktop-user/wayland-1 \
@@ -43,6 +43,7 @@ sudo -n -u user env \
   GST_PLUGIN_PATH_1_0="$dir/gst" SL101_PRIVATE_GST_DIR="$dir/gst" \
   GST_REGISTRY="$dir/registry.bin" \
   MESA_LOADER_DRIVER_OVERRIDE=grate LIBGL_DRIVERS_PATH="$dir/lib" \
+  GRATE_I420_YU_PAIR=1 GRATE_I420_YU_FP_SCHEDULE=1 \
   GBM_BACKENDS_PATH="$dir/lib/gbm" \
   sh -eu -c '
     "$QUAL_DIR/nuraloumi-playerd" >"$QUAL_DIR/playerd.log" 2>&1 &

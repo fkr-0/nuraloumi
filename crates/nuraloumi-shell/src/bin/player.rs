@@ -34,7 +34,7 @@ struct Args {
     fixture: bool,
 }
 
-/// Configure the sole playback daemon for the native four-pass renderer,
+/// Configure the sole playback daemon for the SHA-pinned three-pass renderer,
 /// when the private engine was bundled by the ARM release. Never launch an
 /// alternate player or change EGL requirements of the Cairo menu itself.
 fn configure_single_player_daemon(daemon: &mut ProcCommand) {
@@ -78,6 +78,11 @@ fn configure_single_player_daemon(daemon: &mut ProcCommand) {
     daemon.env("LIBGL_DRIVERS_PATH", &lib);
     daemon.env("GBM_BACKENDS_PATH", lib.join("gbm"));
     daemon.env("MESA_LOADER_DRIVER_OVERRIDE", "grate");
+    // Opt in to the exact-TGSI I420 Y+U specialization. The pinned Grate
+    // library checks both options and rejects any unsupported shader; no
+    // silent external player or CPU YUV conversion may be selected here.
+    daemon.env("GRATE_I420_YU_PAIR", "1");
+    daemon.env("GRATE_I420_YU_FP_SCHEDULE", "1");
     daemon.env("GST_PLUGIN_PATH_1_0", &gst);
     daemon.env("SL101_PRIVATE_GST_DIR", &gst);
     // No system installation, no KMS/DRM-master access, no software upload.

@@ -24,7 +24,7 @@ class VideoBundleStageTests(unittest.TestCase):
     def test_mesa_and_gstreamer_exact_binary_hashes(self):
         sources = (
             ("lib/libgallium-25.0.7.so",
-             "3745960c85ab21ecc33c40496995a01f806d27293c59cce711b3e38c6eef5977"),
+             "84af7822128f8a08a03c460164b00cd92b9058f22fdbe094f2811119d1d13cf8"),
             ("gst/libgstv4l2codecs.so",
              "79ee247faf6397829d908136ad16e04dc936437a1c71b6d49120e470ec452608"),
         )
@@ -46,6 +46,21 @@ class VideoBundleStageTests(unittest.TestCase):
         self.assertNotIn("libc.so.6", result.stdout)
         self.assertNotIn("(RPATH)", result.stdout)
         self.assertNotIn("(RUNPATH)", result.stdout)
+
+    def test_opt_in_three_pass_uses_same_playerd_and_pinned_library(self):
+        build = (ROOT / "scripts/build-nuraloumi-player-video.sh").read_text()
+        launch = (ROOT / "crates/nuraloumi-shell/src/bin/player.rs").read_text()
+        on_device = (ROOT / "scripts/qualify-nuraloumi-player-video-on-device.sh").read_text()
+        pinned = "84af7822128f8a08a03c460164b00cd92b9058f22fdbe094f2811119d1d13cf8"
+        self.assertIn(pinned, build)
+        self.assertIn(pinned, on_device)
+        packager = (ROOT / "crates/nuraloumi-xtask/src/package.rs").read_text()
+        self.assertIn(pinned, packager)
+        self.assertIn("848386bbbd2042c7a881a079368a5368e85a2040d8a3b847abba3d557c19add6", packager)
+        self.assertIn("GRATE_I420_YU_PAIR", launch)
+        self.assertIn("GRATE_I420_YU_FP_SCHEDULE", launch)
+        self.assertIn("GRATE_I420_YU_PAIR=1 GRATE_I420_YU_FP_SCHEDULE=1", on_device)
+        self.assertNotIn("nuraloumi-vde-player", launch)
 
     def test_alpine_package_installs_internal_library_not_second_executable(self):
         apk = (ROOT / "packaging/alpine/APKBUILD.in").read_text()

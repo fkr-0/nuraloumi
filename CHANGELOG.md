@@ -4,6 +4,40 @@ All notable user-visible changes to NuraLoumi are recorded here.
 
 ## [Unreleased]
 
+## [0.0.7-dev.1] - 2026-11-14
+
+### Changed
+
+- The same NuraLoumi player and player daemon now use the SHA-pinned
+  exact-match Grate 0092 Y+U/V/RGB three-internal-draw GPU renderer
+  for the explicitly supplied private ARMv7 video bundle.
+  Compiler optimization flags are child-process-only, not ambient.
+- The separate NuraBrowser WPE launcher now discards player-specific
+  Grate compiler/trace flags before choosing its renderer.
+  The browser contract reflects removal of its historical public alias.
+- Browser/GPU isolation regression tests run in the public host CI.
+
+### Qualification
+
+- Actual ARMv7 NuraLoumi player E2E: 414 frames, video/audio/pipeline
+  EOS, zero PTS gaps or bus errors, 414 Wayland releases,
+  23.590 fps, no installed device components changed.
+- Integrated playback control E2E: pause drift 0 ms, seek paused to
+  5000 ms, volume/mute, resume, Stop 245.6 ms, 147 buffer releases.
+- Independent Grate evidence: 414 frames and 1242 physical GPU draws;
+  a separate PCM observer Pause/Resume failure was fixed, with a
+  120-frame test and 360 draws. It does not patch the shipping playerd.
+- Browser Rust headless fixture unchanged with/without compiler flags.
+  Native WPE engine host Meson tests 7/7; target fixture works.
+
+### Release boundaries
+
+- Development prerelease, not a production authorization. Actual WPE
+  page rendering concurrently with video, four-buffer saturation,
+  nonuniform chroma-edge RGB oracles and physical acoustic/optical
+  lip-sync remain unproven. Public CI bundles no private Grate runtime.
+
+
 ## [0.0.6-dev.2] - 2026-11-14
 
 ### Added
