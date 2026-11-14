@@ -1,6 +1,8 @@
-//! Native, stateful GStreamer 1.x audio engine with a deliberately fail-closed video gate.
-//! Runtime dlopen keeps GStreamer optional for Cairo-only shells and both CI ABIs.
-//! There is NO gst-launch or shell command, CPU video renderer, or silent GL fallback.
+//! One stateful media player daemon, with in-process GStreamer audio and VDE/GPU
+//! video. Dynamic libraries keep EGL optional for Cairo-only menu surfaces.
+//! No spawned player, CPU video conversion or silent GPU fallback.
+#[path = "video_engine.rs"]
+mod video_engine;
 use serde::{Deserialize, Serialize};
 use std::{
     ffi::{c_char, c_int, c_void, CStr, CString},
@@ -10,6 +12,7 @@ use std::{
     path::{Path, PathBuf},
     ptr,
 };
+use video_engine::{VideoEngine, VideoPoll};
 
 const MAX_TRACKS: usize = 256;
 const MAX_PATH_BYTES: usize = 4096;
@@ -22,8 +25,57 @@ const GST_MESSAGE_EOS: u32 = 1;
 const GST_MESSAGE_ERROR: u32 = 2;
 const GST_SEEK_FLAG_FLUSH: c_int = 1;
 const GST_SEEK_FLAG_ACCURATE: c_int = 2;
-// GstPlayFlags: VIDEO=1, AUDIO=2. Video is *always* disabled until qualified.
+// GstPlayFlags: VIDEO=1, AUDIO=2. Video is rendered by the native
+// in-process renderer, never by an unqualified GstGL playbin sink.
 const GST_PLAY_FLAG_AUDIO: c_int = 2;
+
+/// The source renderer has a 414-frame VDE/GPU/Sway/AAC hardware
+/// qualification. Integration into playerd has separate release gates.
+pub const VDE_GPU_STREAMING_STATUS: &str =
+    "VDE/Grate 4-pass: 414-frame source PASS; playerd hardware gate pending";
+pub const DRM_FORMAT_YU12: u32 = u32::from_le_bytes(*b"YU12");
+pub const DRM_FORMAT_XR24: u32 = u32::from_le_bytes(*b"XR24");
+
+/// Metadata expected at the experimental DMA-BUF boundary. All planes are
+/// independent FDs and CPU mapping must not become a conversion fallback.
+/// Dimensions/strides here are specific to the 854×480 Tegra20 prototype;
+/// a future backend must negotiate instead of silently assuming them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VdeGpuFrameContract {
+    pub drm_format: u32,
+    pub modifier: u64,
+    pub display_width: u32,
+    pub display_height: u32,
+    pub capture_width: u32,
+    pub strides: [u32; 3],
+    pub dmabuf_planes: usize,
+}
+
+fn is_video_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|x| x.to_str())
+        .is_some_and(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "mp4" | "m4v" | "mov" | "mkv"
+            )
+        })
+}
+
+impl VdeGpuFrameContract {
+    pub fn validate_854x480(&self) -> Result<(), &'static str> {
+        if self.drm_format != DRM_FORMAT_YU12 || self.modifier != 0 {
+            return Err("VDE must output linear YU12; no silent format conversion");
+        }
+        if (self.display_width, self.display_height) != (854, 480) || self.capture_width != 896 {
+            return Err("VDE capture needs separately negotiated 896-wide storage");
+        }
+        if self.strides != [896, 448, 448] || self.dmabuf_planes != 3 {
+            return Err("three distinct DMA-BUF planes with 64-byte-aligned strides required");
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -251,6 +303,7 @@ pub struct Player {
     pub playlist: Playlist,
     save_to: PathBuf,
     gst: Option<GstAudio>,
+    video: Option<VideoEngine>,
     status: String,
     last_error: Option<String>,
     position_ms: u64,
@@ -263,6 +316,7 @@ impl Player {
             playlist,
             save_to,
             gst: None,
+            video: None,
             status: "Stopped".into(),
             last_error: None,
             position_ms: 0,
@@ -276,7 +330,9 @@ impl Player {
             position_ms: self.position_ms,
             duration_ms: self.duration_ms,
             error: self.last_error.clone(),
-            audio_backend: if self.gst.is_some() {
+            audio_backend: if self.video.is_some() {
+                "GStreamer AAC/PulseAudio (integrated VDE/GPU session)".into()
+            } else if self.gst.is_some() {
                 if cfg!(debug_assertions)
                     && std::env::var("NURALOUMI_PLAYER_TEST_FAKESINK").as_deref() == Ok("1")
                 {
@@ -287,7 +343,11 @@ impl Player {
             } else {
                 "GStreamer (not initialized)".into()
             },
-            gpu_status: "UNSUPPORTED_GPU: no qualified Grate GLES2/VDE video renderer".into(),
+            gpu_status: if self.video.is_some() {
+                "VDE/Grate 4-pass video session (one playerd)".into()
+            } else {
+                VDE_GPU_STREAMING_STATUS.into()
+            },
         }
     }
     fn gst(&mut self) -> Result<&mut GstAudio, String> {
@@ -309,11 +369,28 @@ impl Player {
         }
         let volume = self.playlist.volume;
         let muted = self.playlist.muted;
-        if let Err(error) = self.gst()?.open(&path, volume, muted) {
-            // open() may already have set the prior pipeline to NULL; do not
-            // report Playing if a new URI or state transition was rejected.
-            self.stop();
-            return Err(error);
+        if is_video_path(Path::new(&path)) {
+            // ONE player daemon with two ordinary media *formats*: files
+            // containing video use the native private in-process renderer.
+            // No second player executable, IPC endpoint or audio instance.
+            if let Some(gst) = &mut self.gst {
+                gst.set_state(GST_STATE_NULL)?;
+            }
+            self.video.take();
+            match VideoEngine::open(&path, volume, muted) {
+                Ok(video) => self.video = Some(video),
+                Err(error) => {
+                    self.stop();
+                    return Err(error);
+                }
+            }
+        } else {
+            self.video.take();
+            if let Err(error) = self.gst()?.open(&path, volume, muted) {
+                // open() may have set the previous pipeline to NULL.
+                self.stop();
+                return Err(error);
+            }
         }
         self.position_ms = 0;
         self.duration_ms = 0;
@@ -379,7 +456,11 @@ impl Player {
             }
             Command::Play => {
                 if self.status == "Paused" {
-                    self.gst()?.set_state(GST_STATE_PLAYING)?;
+                    if let Some(video) = &mut self.video {
+                        video.play()?;
+                    } else {
+                        self.gst()?.set_state(GST_STATE_PLAYING)?;
+                    }
                     self.status = "Playing".into();
                     Ok(())
                 } else {
@@ -388,7 +469,11 @@ impl Player {
             }
             Command::Pause => {
                 if self.status == "Playing" {
-                    self.gst()?.set_state(GST_STATE_PAUSED)?;
+                    if let Some(video) = &mut self.video {
+                        video.pause()?;
+                    } else {
+                        self.gst()?.set_state(GST_STATE_PAUSED)?;
+                    }
                     self.status = "Paused".into();
                 }
                 Ok(())
@@ -408,13 +493,17 @@ impl Player {
             Command::Previous => self.advance(false),
             Command::Seek { position_ms } => {
                 let duration = self.duration_ms;
-                if self.gst.is_none() {
+                if self.gst.is_none() && self.video.is_none() {
                     return Err("no media loaded".into());
                 }
                 if duration > 0 && position_ms > duration {
                     return Err("seek beyond duration".into());
                 }
-                self.gst()?.seek(position_ms)?;
+                if let Some(video) = &mut self.video {
+                    video.seek(position_ms)?;
+                } else {
+                    self.gst()?.seek(position_ms)?;
+                }
                 self.position_ms = position_ms;
                 Ok(())
             }
@@ -423,6 +512,9 @@ impl Player {
                     return Err("volume must be in [0,1]".into());
                 }
                 self.playlist.volume = level;
+                if let Some(video) = &mut self.video {
+                    video.set_volume(level)?;
+                }
                 if let Some(gst) = &mut self.gst {
                     gst.set_volume(level)?;
                 }
@@ -430,6 +522,9 @@ impl Player {
             }
             Command::Mute { muted } => {
                 self.playlist.muted = muted;
+                if let Some(video) = &mut self.video {
+                    video.set_mute(muted)?;
+                }
                 if let Some(gst) = &mut self.gst {
                     gst.set_mute(muted)?;
                 }
@@ -452,6 +547,7 @@ impl Player {
         self.select_and_play()
     }
     fn stop(&mut self) {
+        self.video.take();
         if let Some(gst) = &mut self.gst {
             let _ = gst.set_state(GST_STATE_NULL);
         }
@@ -460,6 +556,54 @@ impl Player {
         self.duration_ms = 0;
     }
     pub fn tick(&mut self) {
+        if let Some(video) = &self.video {
+            match video.poll() {
+                Ok(VideoPoll::Starting) => return,
+                Ok(VideoPoll::Playing {
+                    position_ms,
+                    duration_ms,
+                }) => {
+                    self.position_ms = position_ms;
+                    self.duration_ms = duration_ms;
+                    if self.status != "Playing" {
+                        self.status = "Playing".into();
+                    }
+                    return;
+                }
+                Ok(VideoPoll::Paused {
+                    position_ms,
+                    duration_ms,
+                }) => {
+                    self.position_ms = position_ms;
+                    self.duration_ms = duration_ms;
+                    self.status = "Paused".into();
+                    return;
+                }
+                Ok(VideoPoll::Eos) => {
+                    let has_next = self
+                        .playlist
+                        .current
+                        .is_some_and(|i| i + 1 < self.playlist.tracks.len());
+                    if has_next {
+                        if self.advance(true).is_err() {
+                            self.stop();
+                            self.last_error =
+                                Some("could not advance playlist after video EOS".into());
+                        }
+                    } else {
+                        self.stop();
+                    }
+                    let _ = save_playlist(&self.save_to, &self.playlist);
+                    return;
+                }
+                Err(e) => {
+                    self.stop();
+                    self.last_error = Some(e);
+                    self.status = "Error".into();
+                    return;
+                }
+            }
+        }
         let Some(gst) = &mut self.gst else {
             return;
         };
@@ -902,5 +1046,47 @@ mod tests {
     fn gst_minobject_header_matches_host_if_available() {
         // Runtime ABI layout is reviewed against the exported GStreamer 1.x headers.
         assert!(std::mem::size_of::<GstMessageHeader>() > std::mem::size_of::<GstMiniObject>());
+    }
+    #[test]
+    fn native_vde_gpu_contract_is_strict_and_does_not_enable_playbin_video() {
+        let known = VdeGpuFrameContract {
+            drm_format: DRM_FORMAT_YU12,
+            modifier: 0,
+            display_width: 854,
+            display_height: 480,
+            capture_width: 896,
+            strides: [896, 448, 448],
+            dmabuf_planes: 3,
+        };
+        assert_eq!(known.validate_854x480(), Ok(()));
+        assert!(VdeGpuFrameContract {
+            drm_format: DRM_FORMAT_XR24,
+            ..known
+        }
+        .validate_854x480()
+        .is_err());
+        assert!(VdeGpuFrameContract {
+            modifier: u64::MAX,
+            ..known
+        }
+        .validate_854x480()
+        .is_err());
+        assert!(VdeGpuFrameContract {
+            strides: [864, 432, 432],
+            ..known
+        }
+        .validate_854x480()
+        .is_err());
+        assert!(VdeGpuFrameContract {
+            dmabuf_planes: 1,
+            ..known
+        }
+        .validate_854x480()
+        .is_err());
+        assert_eq!(GST_PLAY_FLAG_AUDIO, 2); // VIDEO bit MUST remain unset.
+        assert!(VDE_GPU_STREAMING_STATUS.contains("414-frame source PASS"));
+        assert!(is_video_path(Path::new("/media/example.MP4")));
+        assert!(is_video_path(Path::new("/media/example.mkv")));
+        assert!(!is_video_path(Path::new("/media/track.mp3")));
     }
 }

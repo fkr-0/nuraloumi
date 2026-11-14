@@ -27,6 +27,14 @@ package() {
     done
     [ "$count" -ge 4 ] || return 1
     install -m644 "$builddir/share/applications/nuraloumi-player.desktop" "$pkgdir/usr/share/applications/nuraloumi-player.desktop"
+    # One media player process. Optional, separately qualified native
+    # video plugin lives inside playerd, never as an extra executable.
+    if [ -d "$builddir/lib/nuraloumi/video" ]; then
+        install -d "$pkgdir/usr/lib/nuraloumi/video"
+        cp -R "$builddir/lib/nuraloumi/video/." "$pkgdir/usr/lib/nuraloumi/video/"
+        test -s "$pkgdir/usr/lib/nuraloumi/video/lib/libnuraloumi-video.so" || return 1
+        test -s "$pkgdir/usr/lib/nuraloumi/video/gst/libgstv4l2codecs.so" || return 1
+    fi
     install -m644 "$builddir/config/nuraloumi.toml.example" "$pkgdir/usr/share/nuraloumi/nuraloumi.toml.example"
     install -m644 "$builddir/share/nuraloumi/qualification/README.md" "$pkgdir/usr/share/nuraloumi/qualification/README.md"
     install -m644 "$builddir/MANIFEST.txt" "$pkgdir/usr/share/nuraloumi/CI-MANIFEST.txt"

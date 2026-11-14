@@ -1,5 +1,5 @@
 //! First-class NuraLoumi media UI. Cairo/wl_shm works without GStreamer/EGL.
-//! Video is explicitly unsupported until a hardware GLES2 pixel qualification.
+//! Hardware VDE/Grate video is an optional, in-process playerd engine.
 #![allow(dead_code)]
 #[path = "../player_engine.rs"]
 mod player_engine;
@@ -32,6 +32,55 @@ struct Args {
     status: bool,
     config: Option<PathBuf>,
     fixture: bool,
+}
+
+/// Configure the sole playback daemon for the native four-pass renderer,
+/// when the private engine was bundled by the ARM release. Never launch an
+/// alternate player or change EGL requirements of the Cairo menu itself.
+fn configure_single_player_daemon(daemon: &mut ProcCommand) {
+    // A versioned /opt/nuraloumi/releases/<commit>/bin/player uses the
+    // sibling release library. This ensures one atomic 'current' switch
+    // updates ALL tools and the exact Grate/GStreamer backend together.
+    // Ordinary APK installations use /usr/lib instead.
+    let private = env::current_exe()
+        .ok()
+        .and_then(|executable| executable.parent()?.parent().map(Path::to_path_buf))
+        .map(|release| release.join("lib/nuraloumi/video"));
+    let system = PathBuf::from("/usr/lib/nuraloumi/video");
+    let root = private
+        .filter(|path| path.join("lib/libnuraloumi-video.so").is_file())
+        .unwrap_or(system);
+    let lib = root.join("lib");
+    let gst = root.join("gst");
+    if !lib.join("libnuraloumi-video.so").is_file()
+        || !lib.join("libgallium-25.0.7.so").is_file()
+        || !gst.join("libgstv4l2codecs.so").is_file()
+    {
+        return;
+    }
+    let system_drm = Path::new("/usr/local/lib/sl101-libdrm-import-lists-5b06215a2876fec6");
+    let serializer = Path::new("/usr/local/lib/gr3d_serialize.so");
+    // This strictly qualified private stack must not be replaced with
+    // unpinned system Mesa or a CPU video fallback.
+    if !system_drm.is_dir() || !serializer.is_file() {
+        return;
+    }
+    let old = std::env::var_os("LD_LIBRARY_PATH").unwrap_or_default();
+    let mut ld = std::ffi::OsString::from(system_drm.as_os_str());
+    ld.push(":");
+    ld.push(&lib);
+    if !old.is_empty() {
+        ld.push(":");
+        ld.push(old);
+    }
+    daemon.env("LD_LIBRARY_PATH", ld);
+    daemon.env("LD_PRELOAD", serializer);
+    daemon.env("LIBGL_DRIVERS_PATH", &lib);
+    daemon.env("GBM_BACKENDS_PATH", lib.join("gbm"));
+    daemon.env("MESA_LOADER_DRIVER_OVERRIDE", "grate");
+    daemon.env("GST_PLUGIN_PATH_1_0", &gst);
+    daemon.env("SL101_PRIVATE_GST_DIR", &gst);
+    // No system installation, no KMS/DRM-master access, no software upload.
 }
 fn args() -> Result<Args, String> {
     let mut out = Args::default();
@@ -98,7 +147,9 @@ fn send(cmd: &Command, spawn_daemon: bool) -> Result<Reply, String> {
         let sibling = env::current_exe()
             .map_err(|e| e.to_string())?
             .with_file_name("nuraloumi-playerd");
-        ProcCommand::new(sibling)
+        let mut daemon = ProcCommand::new(sibling);
+        configure_single_player_daemon(&mut daemon);
+        daemon
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -132,7 +183,7 @@ fn offline(error: Option<String>) -> Snapshot {
         duration_ms: 0,
         error,
         audio_backend: "GStreamer service offline".into(),
-        gpu_status: "UNSUPPORTED_GPU: no qualified Grate renderer".into(),
+        gpu_status: "VDE/Grate source qualified; playerd unavailable".into(),
     }
 }
 fn fixture() -> Snapshot {
@@ -343,8 +394,8 @@ fn model(s: &Snapshot, page: &Page, files: &[FileEntry]) -> MenuModel {
             ));
             items.push(action("open", "Open media file…", "files", ""));
             items.push(
-                MenuItem::status("gpu", "Video: UNSUPPORTED_GPU")
-                    .with_subtitle("Audio only. GPU video is not yet pixel-qualified."),
+                MenuItem::status("gpu", "Video: experimental VDE/GPU")
+                    .with_subtitle(s.gpu_status.clone()),
             );
         }
         Page::Queue { start, selected } => {

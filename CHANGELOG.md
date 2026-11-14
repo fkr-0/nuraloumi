@@ -4,6 +4,62 @@ All notable user-visible changes to NuraLoumi are recorded here.
 
 ## [Unreleased]
 
+## [0.0.6-dev.2] - 2026-11-14
+
+### Added
+
+- NuraLoumi now has one integrated native **audio/video player**:
+  the existing `nuraloumi-player` menu and owner-only
+  `nuraloumi-playerd` socket manage playback, playlist, navigation,
+  pause, seek, stop, mute, volume and EOS. No additional standalone
+  video player, daemon, socket, or user-facing backend selector was added.
+- Integrated the physically tested four-internal-draw Tegra20 Grate
+  I420 Y/U/V-to-BT.709 renderer as a private, in-process C library,
+  including true three-plane VDE DMA-BUF imports, an XR24+LINEAR
+  persistent Sway surface, compositor-acknowledged buffer lifetime,
+  and AAC/PulseAudio against one GStreamer pipeline clock.
+- Added a bounded C ABI with thread-safe playback controls and a
+  Rust dynamic loader. Playback of H.264 videos remains fail-closed
+  without the exact private Grate 0088 and GStreamer capture libraries;
+  Cairo menus remain GPU independent and audio files continue through
+  the same daemon's native playbin.
+- Added an explicit ARMv7/musl private crossbuild and opt-in
+  SHA-pinned release-staging bundle. The Alpine package includes the
+  video library under /usr/lib/nuraloumi/video **only when the
+  separately qualified native bundle is supplied**.
+- Updated the single existing XDG player desktop handler to accept
+  supported video extensions, without registering a competing app.
+
+### Hardware qualification
+
+- Exact, no-install ARMv7/musl device run on SL101 .106 using
+  **the real NuraLoumi player UI command and playerd**:
+  414/414 video frames, 414 Sway callbacks, 414 buffer releases,
+  no outstanding output BOs or PTS gaps, shared-clock AAC/video EOS,
+  **23.591 fps** across the clip. Mean post-presentation clock
+  difference ~28ms; this is *not* a physical PCM lip-sync measurement.
+- Real owner-only playerd IPC tested for paused position stability
+  (0ms drift), seek while paused to 5 seconds, volume/mute,
+  resume and Stop in 225ms. All 147 committed buffers were released
+  before exit. No installed Mesa, NuraLoumi, compositor, kernel,
+  boot image, or system service was replaced.
+- Host and ARM native libraries were built successfully; both
+  NuraLoumi player binaries passed ARMv7/VFPv3-D16/no-NEON ELF audits.
+
+### Limitations / release boundary
+
+- GPU video currently supports only the physically qualified
+  854x480, 24fps BT.709, hardware-decoded linear YU12 format with
+  896/448/448 capture pitches. Other resolutions/codec profiles
+  are not yet hardware qualified and should yield an explicit error.
+- Continuous source video and the integrated player IPC are proven
+  on Alpine SL101; arbitrary files, overloaded desktops, fault
+  injection, Debian/glibc and analog/PCM audio phase remain open.
+- Normal CI packages **without** the explicitly provided private
+  ARM video bundle do not contain a GPU video runtime. This
+  development tag is local source/qualification provenance, not
+  authorization to deploy the experimental stack system-wide.
+
 ## [0.0.6-dev.1] - 2026-11-13
 
 Development **patch-version increment** to deliver the notification-center

@@ -1,4 +1,51 @@
-# NuraLoumi native media player: prerelease qualification (2026-11-12)
+# NuraLoumi native media player: qualification (2026-11-12 through 2026-11-14)
+
+## 2026-11-14 — single-player VDE/Grate four-pass integration
+
+The original source-only renderer and its 414-frame hardware
+qualification are now integrated **inside the existing
+nuraloumi-playerd** as one dynamically loaded native shared library.
+The single nuraloumi-player Cairo menu and existing JSON Unix socket
+remain the only UI and control API. There are no additional media
+player executables, fallback selectors or new sockets.
+
+The physically executed no-install Alpine ARMv7 integration test
+used the actual nuraloumi-player --open CLI to play the known
+854×480 H.264/BT.709 video with AAC audio. All 414 frames were
+GPU-rendered, committed to Sway, received compositor frame callbacks
+and released their GBM BOs; both video and shared-clock audio pipeline
+reached EOS. Observed rate 23.591 fps, PTS gaps/errors zero, no
+CPU YUV color conversion. The audio branch was drained on EOS;
+physical acoustic/PCM lip sync was not measured.
+
+The separate owner-socket control test on the real SL101 measured
+pause stability 0ms, paused seek to 5000ms, volume set to 0.35,
+mute/unmute, resume at 5208ms, and Stop reply at 225ms. All 147
+Wayland buffers involved in that run were released.
+
+Reproducer (staging only, never installs components or replaces Sway):
+
+    sh scripts/build-nuraloumi-player-video.sh
+    sh scripts/qualify-nuraloumi-player-video.sh eos
+    sh scripts/qualify-nuraloumi-player-video.sh controls
+
+The above scripts require the sibling sl101_linux private Grate 0088
+and source-patched GStreamer SHA-pinned build artifacts, as well as
+the exact-device root-held flock, card identity, AC and battery gates.
+Only the original media player daemon starts and stops; the installed
+desktop/player remain untouched.
+
+Package staging supports an **explicit** native ARM/musl bundle
+parameter NURALOUMI_VIDEO_BUNDLE_DIR. The build-only CI path without
+that environment variable continues to produce a software-only
+package with no GPU-video runtime promise. Runtime video remains
+strictly constrained to the tested 854×480 24fps I420 shape;
+different codecs/profiles/resolutions fail closed, not via CPU video.
+
+The following historical prerelease section reflects earlier
+audio-only status and is retained for release provenance.
+
+---
 
 ## Provenance and scope
 

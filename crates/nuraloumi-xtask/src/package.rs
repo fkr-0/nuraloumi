@@ -204,6 +204,49 @@ pub fn stage_package(
         &share_dir.join("qualification"),
     )?;
 
+    // NuraLoumi has exactly ONE media player. The private ARMv7 VDE/Grate
+    // engine is an internal shared library of that playerd, not a second
+    // executable. The normal CI package is software-only unless a separate
+    // pinned, target-qualified native bundle was explicitly provided.
+    // Never silently package host/glibc or unpinned system Mesa here.
+    if let Some(bundle) = env::var_os("NURALOUMI_VIDEO_BUNDLE_DIR") {
+        if resolved_target != "armv7-unknown-linux-musleabihf" {
+            return Err("NURALOUMI_VIDEO_BUNDLE_DIR requires armv7/musl target".into());
+        }
+        let bundle = PathBuf::from(bundle);
+        if !bundle.is_absolute() || !bundle.is_dir() {
+            return Err("video bundle must be an existing absolute directory".into());
+        }
+        for (relative, expected) in [
+            (
+                "lib/libgallium-25.0.7.so",
+                "3745960c85ab21ecc33c40496995a01f806d27293c59cce711b3e38c6eef5977",
+            ),
+            (
+                "gst/libgstv4l2codecs.so",
+                "79ee247faf6397829d908136ad16e04dc936437a1c71b6d49120e470ec452608",
+            ),
+        ] {
+            let actual = sha256(root, &bundle.join(relative))?;
+            if actual != expected {
+                return Err(format!("native video bundle SHA mismatch: {relative}"));
+            }
+        }
+        let engine = bundle.join("lib/libnuraloumi-video.so");
+        let elf = fs::read(&engine).map_err(|e| format!("read native video ELF: {e}"))?;
+        if elf.get(0..5) != Some(&b"\x7fELF\x01"[..]) || elf.get(18..20) != Some(&[40, 0][..]) {
+            return Err("native video engine must be ELF32 ARM".into());
+        }
+        // Only known output subdirectories are included in the manifest and
+        // tar archive, with the same hash verification as every other file.
+        let dest = stage.join("lib/nuraloumi/video");
+        copy_tree(&bundle.join("lib"), &dest.join("lib"))?;
+        copy_required(
+            &bundle.join("gst/libgstv4l2codecs.so"),
+            &dest.join("gst/libgstv4l2codecs.so"),
+        )?;
+    }
+
     let commit = git_commit(root)?;
     let build_command = match target {
         Some(target) => format!("cargo build --release --workspace --bins --target {target}"),

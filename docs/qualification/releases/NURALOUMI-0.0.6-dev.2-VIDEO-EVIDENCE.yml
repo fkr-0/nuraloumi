@@ -1,0 +1,74 @@
+# Local-only development prerelease, 2026-11-14. No publish/deploy authority.
+schema: nuraloumi-local-release-evidence-v1
+release:
+  unit: nuraloumi
+  previous: 0.0.6-dev.1
+  candidate: 0.0.6-dev.2
+  tag: 0.0.6-dev.2
+  intended_scope: unified-single-player-vde-grate-four-pass
+  commit: local-ref-0.0.6-dev.2
+  local_tag_created: true
+  pushed: false
+  deployed: false
+source:
+  gpu_base: sl101_linux/private-mesa-0088
+  shader: R8 I420 three contributions + one RGB resolve
+  fps_nominal: 24
+  source_dimensions: 854x480
+  capture_dimensions: 896x480
+  yuv_pitches: [896, 448, 448]
+  audio: AAC_to_PulseAudio_same_GStreamer_clock
+  single_player:
+    frontend: nuraloumi-player
+    daemon: nuraloumi-playerd
+    native_module: libnuraloumi-video.so
+    added_player_processes: 0
+    added_ipc_endpoints: 0
+hardware_evidence:
+  target: isolated-Alpine-armv7-musl-SL101
+  system_modified: false
+  video_frames: 414
+  wayland_callbacks: 414
+  released_buffers: 414
+  outstanding_buffers: 0
+  presented_fps: 23.591
+  pts_errors: 0
+  pts_gaps: 0
+  audio_pipeline_eos: true
+  decoded_yuv_cpu_conversion: false
+  physical_pcm_lip_sync_measured: false
+  controls:
+    paused_position_delta_ms: 0
+    paused_seek_ms: 5000
+    resumed_position_ms: 5208
+    volume: 0.35
+    mute_and_unmute: pass
+    stop_reply_ms: 225.1
+    wayland_releases_after_stop: 147
+artifacts:
+  armv7_player_sha256: d95b56a4a5342a0628535c32507bdc24e6fc779b6477a60e633b0ac0cadf669a
+  armv7_playerd_sha256: 09fa3c2892d38b9a19bf6452964fe3e90a1520d9c2df8aed2666e97905c3540f
+  armv7_internal_video_sha256: 848386bbbd2042c7a881a079368a5368e85a2040d8a3b847abba3d557c19add6
+  private_gallium_sha256: 3745960c85ab21ecc33c40496995a01f806d27293c59cce711b3e38c6eef5977
+  private_gst_plugin_sha256: 79ee247faf6397829d908136ad16e04dc936437a1c71b6d49120e470ec452608
+  precommit_local_bundle_tar_sha256: 6044632d962bcf8bfe47f26dabeef056be17cf3736069979d5c5509dafcb660f
+  package_manifest_dirty: true
+  package_manifest_note: generated before local commit while unrelated source worktree changes coexist
+verification:
+  host_native_shared_library_compile: pass
+  armv7_private_shared_library_compile: pass
+  armv7_full_workspace_binary_build_and_no_neon_audit: pass
+  cargo_fmt_workspace: pass
+  cargo_test_workspace_locked_offline: pass
+  cargo_clippy_workspace_all_targets_deny_warnings: pass
+  package_integrity_and_new_staging_tests: 23_pass
+  package_stage_with_private_bundle: pass
+  package_check_with_private_bundle: pass
+  package_check_report: 74_manifested_regular_files_27_audited_armv7_binaries
+limitations:
+  - Only tested VDE 854x480/24fps BT709 YU12 hardware input is qualified
+  - Host packaging needs explicit native-bundle opt-in; default CI artifacts are software-only
+  - Full-frame arbitrary-source pixels and acoustic PCM lip-sync not established
+  - Debian/glibc video runtime not physically qualified
+  - No production installation or automatic device deployment
+  - A separate experimental Grate 0089 three-pass candidate remains compiler-blocked
