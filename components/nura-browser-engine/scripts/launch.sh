@@ -161,6 +161,12 @@ case "$platform" in
 esac
 export WPE_PLATFORM=$platform
 
+# The video player's opt-in I420 Y+U compiler specialization is qualified
+# only for its private GStreamer/Grate pipeline. Never inherit those toggles
+# into unrelated WPE/WebKit shaders, even if the shell caller exported them.
+unset GRATE_I420_YU_PAIR GRATE_I420_YU_FP_SCHEDULE GRATE_THREE_TRACE_FRAME
+unset SL101_THREE_STRESS_MODE SL101_PRIVATE_GST_DIR
+
 case "$renderer" in
     software)
         export LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=softpipe

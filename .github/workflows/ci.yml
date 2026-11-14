@@ -25,6 +25,11 @@ jobs:
         run: cargo check --workspace --locked
       - name: Native package and GitHub artifact provenance contracts
         run: python3 -m unittest scripts/test_native_packages_ci.py scripts/test_verify_ci_artifact.py scripts/test_musl_ci.py scripts/test_debian_armhf_ci.py -v
+      - name: Browser/video GPU isolation and native ownership contracts
+        run: |
+          python3 -m unittest scripts/test_nuraloumi_video_browser_isolation_20261114.py -v
+          python3 -m unittest discover -s components/nura-browser-engine/tests -p 'test_integration_contract.py' -v
+          python3 -m unittest discover -s components/nura-browser-engine/tests -p 'test_migration_contract.py' -v
       - name: Test
         run: cargo test --workspace --locked
       - name: Clippy

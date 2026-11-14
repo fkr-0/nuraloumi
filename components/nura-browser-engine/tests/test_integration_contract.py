@@ -63,7 +63,12 @@ class IntegrationContractTests(unittest.TestCase):
     def test_no_public_alias_and_no_sandbox_disable(self):
         meson = self.text("meson.build")
         launcher = self.text("scripts/launch.sh")
-        self.assertIn("rename: ',browse'", meson)
+        # Historical ',browse' alias was deliberately removed in the
+        # NuraLoumi migration: the engine is libexec-only, not a second app.
+        self.assertIn("executable('nurabrowser-core'", meson)
+        self.assertIn("get_option('libexecdir') / 'nuraloumi' / 'browser'", meson)
+        self.assertNotIn("rename: ',browse'", meson)
+        self.assertEqual(meson.count("executable("), 1)
         self.assertNotIn("sl101-browse", launcher)
         self.assertIn("WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS", launcher)
         self.assertIn("bubblewrap missing", launcher)
