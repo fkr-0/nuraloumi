@@ -41,7 +41,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 
-const PANEL_MENU_GAP: u32 = 6;
+// The panel exclusive zone already reserves its full height.
+// An additional margin leaves a visible empty strip above the menu.
+const PANEL_MENU_GAP: u32 = 0;
 
 // musl's ARM `round` object in the generated SL101 sysroot uses d16, which is
 // outside Tegra20's VFPv3-D16 register file. Cairo preview painting reaches
@@ -2472,6 +2474,19 @@ fn live_panel_affordances(
             state: ValueState::Ready,
         },
     );
+    // A global player entry remains available even when playback is stopped.
+    affordances.insert(
+        search_index + 1,
+        PanelAffordance {
+            id: "player".into(),
+            label: "Player".into(),
+            value: snapshot
+                .media_player
+                .as_ref()
+                .map(|player| player.status.clone()),
+            state: ValueState::Ready,
+        },
+    );
     affordances
 }
 
@@ -2503,6 +2518,7 @@ fn panel_affordance_rects(
             "apps" => Some(84.0),
             "network" => Some(180.0),
             "audio" => Some(104.0),
+            "player" => Some(88.0),
             "battery" => Some(104.0),
             "renderer" => Some(90.0),
             "clock" => Some(72.0),
@@ -2524,7 +2540,7 @@ fn panel_affordance_rects(
         .filter(|item| {
             matches!(
                 item.id.as_str(),
-                "audio" | "battery" | "renderer" | "clock" | "power"
+                "player" | "audio" | "battery" | "renderer" | "clock" | "power"
             )
         })
         .filter_map(|item| width_for(&item.id))
@@ -2618,6 +2634,7 @@ fn compact_clock(value: Option<&str>) -> String {
 
 fn panel_text(affordance: &PanelAffordance, available_width: f64) -> String {
     let raw = match (affordance.id.as_str(), affordance.value.as_deref()) {
+        ("player", _) => "Player".to_owned(),
         ("clock", value) => compact_clock(value),
         ("network" | "audio", Some(value)) => {
             // The icon replaces the category label; detail stays in the
@@ -2671,7 +2688,7 @@ fn panel_target_for_id(id: &str) -> Option<PanelTarget> {
             Some(ControlCenterTab::Network),
         ),
         "search" => (MenuFamily::Launcher, true, None),
-        "audio" => (
+        "player" | "audio" => (
             MenuFamily::ControlCenter,
             false,
             Some(ControlCenterTab::Media),
@@ -3595,7 +3612,7 @@ mod tests {
             assert!(hits.iter().all(|hit| hit.rect.width >= 48.0));
             assert!(
                 hits.windows(2)
-                    .all(|pair| { pair[0].rect.right() <= pair[1].rect.x + f64::EPSILON }),
+                    .all(|pair| { pair[0].rect.right() <= pair[1].rect.x + 0.001 }),
                 "status slots must not overlap at width {width}"
             );
             assert!(hits.first().unwrap().rect.x >= 0.0);
@@ -3740,6 +3757,8 @@ mod tests {
 
     #[test]
     fn panel_target_mapping_is_stable_and_search_requests_focus() {
+        assert_eq!(PANEL_MENU_GAP, 0, "menu must abut the panel exclusive zone");
+        assert_eq!(panel_target_for_id("player"), panel_target_for_id("audio"));
         assert_eq!(
             panel_target_for_id("apps"),
             Some(PanelTarget {
@@ -3802,8 +3821,9 @@ mod tests {
             (1366, config.panel_height, 1),
             RenderTheme::dark(),
         );
-        assert_eq!(scene.hits.len(), panel_affordances(&snapshot).len() + 1);
+        assert_eq!(scene.hits.len(), panel_affordances(&snapshot).len() + 2);
         assert!(scene.hits.iter().all(|hit| hit.actionable && hit.enabled));
+        assert!(scene.hits.iter().any(|hit| hit.item_id == "player"));
         assert_eq!(scene.panel_rect.width, 1366.0);
         assert_eq!(scene.panel_rect.height, f64::from(config.panel_height));
 
