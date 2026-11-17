@@ -1057,7 +1057,14 @@ fn run_live(
                         // any live provider result is applied.
                         panel_first_frame_presented = true;
                     }
-                    WaylandEvent::PointerButton { x, y, pressed, .. } => {
+                    // Only the primary pointer button is an activation/press gesture.
+                    // Secondary and middle buttons must not steal or release its state.
+                    WaylandEvent::PointerButton {
+                        x,
+                        y,
+                        pressed,
+                        button: 0x110,
+                    } => {
                         let hit = panel_scene
                             .as_ref()
                             .and_then(|scene| scene.hit_test(x, y))
