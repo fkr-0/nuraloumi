@@ -25,7 +25,7 @@ class PackageIntegrityTests(unittest.TestCase):
         )
         names = {
             "nuraloumi-shell": ["nuraloumi-menu", "nuraloumi-panel", "nuraloumi-feeds",
-                                "nuraloumi-notificationd", "nuraloumi-file-manager"],
+                                "nuraloumi-notificationd"],
             "nuraloumi-providers": ["nuraloumi-probe"],
             "nuraloumi-wayland": ["nuraloumi-thumbnail-helper"],
         }
@@ -75,7 +75,6 @@ class PackageIntegrityTests(unittest.TestCase):
         for desktop, binary in {
             "nuraloumi-player.desktop": "nuraloumi-feeds",
             "nuraloumi-files.desktop": "nuraloumi-feeds",
-            "nuraloumi-file-manager.desktop": "nuraloumi-file-manager",
             "nuraloumi-notifications.desktop": "nuraloumi-feeds",
         }.items():
             self.payloads[f"share/applications/{desktop}"] = (

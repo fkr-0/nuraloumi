@@ -34,7 +34,7 @@ for executable in "$stage"/bin/nuraloumi-*; do
 done
 test "$count" -ge 4
 # Every packaged QoL launcher must already be an audited staging input.
-for required in nuraloumi-player.desktop nuraloumi-files.desktop nuraloumi-file-manager.desktop nuraloumi-notifications.desktop; do
+for required in nuraloumi-player.desktop nuraloumi-files.desktop nuraloumi-notifications.desktop; do
   test -f "$stage/share/applications/$required" && test ! -L "$stage/share/applications/$required" || {
     echo "missing or unsafe required desktop entry: $required" >&2
     exit 1
@@ -46,7 +46,7 @@ for desktop in "$stage"/share/applications/*.desktop; do
   install -m 0644 "$desktop" "$pkg/usr/share/applications/${desktop##*/}"
   desktop_count=$((desktop_count+1))
 done
-test "$desktop_count" -ge 4
+test "$desktop_count" -ge 3
 service="$stage/share/dbus-1/services/org.freedesktop.Notifications.service"
 test -f "$service" && test ! -L "$service" || {
   echo "missing or unsafe D-Bus activation descriptor" >&2

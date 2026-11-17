@@ -198,7 +198,6 @@ pub fn stage_package(
     for desktop in [
         "nuraloumi-player.desktop",
         "nuraloumi-files.desktop",
-        "nuraloumi-file-manager.desktop",
         "nuraloumi-notifications.desktop",
     ] {
         copy_required(
@@ -389,7 +388,6 @@ pub fn check_package(root: &Path, stage: &Path) -> Result<(), String> {
         "config/nuraloumi.toml.example",
         "share/applications/nuraloumi-player.desktop",
         "share/applications/nuraloumi-files.desktop",
-        "share/applications/nuraloumi-file-manager.desktop",
         "share/applications/nuraloumi-notifications.desktop",
         "share/dbus-1/services/org.freedesktop.Notifications.service",
         "share/nuraloumi/qualification/README.md",
@@ -422,7 +420,6 @@ pub fn check_package(root: &Path, stage: &Path) -> Result<(), String> {
     for desktop in [
         "nuraloumi-player.desktop",
         "nuraloumi-files.desktop",
-        "nuraloumi-file-manager.desktop",
         "nuraloumi-notifications.desktop",
     ] {
         let contents = fs::read_to_string(stage.join("share/applications").join(desktop))

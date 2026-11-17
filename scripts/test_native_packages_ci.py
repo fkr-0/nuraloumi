@@ -27,7 +27,6 @@ class NativePackageCiContract(unittest.TestCase):
                     ("*.desktop" in script)
                     or all(desktop in script for desktop in (
                         "nuraloumi-files.desktop",
-                        "nuraloumi-file-manager.desktop",
                         "nuraloumi-notifications.desktop",
                     )),
                     "QoL launchers omitted from native package")
@@ -37,7 +36,6 @@ class NativePackageCiContract(unittest.TestCase):
         for required in (
             "nuraloumi-player.desktop",
             "nuraloumi-files.desktop",
-            "nuraloumi-file-manager.desktop",
             "nuraloumi-notifications.desktop",
         ):
             self.assertIn(required, DEB_SCRIPT)

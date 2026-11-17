@@ -78,7 +78,7 @@ class DebianPackagePayloadSmoke(unittest.TestCase):
             binary = self.stage / "bin" / f"nuraloumi-{name}"
             binary.write_text("#!/bin/sh\nexit 0\n")
             binary.chmod(0o755)
-        for name in ("player", "files", "file-manager", "notifications"):
+        for name in ("player", "files", "notifications"):
             desktop = self.stage / "share/applications" / f"nuraloumi-{name}.desktop"
             desktop.write_text(
                 f"[Desktop Entry]\nType=Application\nName={name}\n"
@@ -152,7 +152,7 @@ class DebianPackagePayloadSmoke(unittest.TestCase):
             *sorted((self.stage / "share/applications").glob("*.desktop")),
             self.service,
         ]
-        self.assertEqual(len(inputs), 9)
+        self.assertEqual(len(inputs), 8)
         for original in inputs:
             relative = original.relative_to(self.stage)
             installed = self.output / "extracted/usr" / relative
