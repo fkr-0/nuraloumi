@@ -1,6 +1,7 @@
 use crate::command::{CommandLimits, CommandRunner, CommandSpec, SystemCommandRunner};
 use crate::common::{timestamp_ms, Health, Provider, SnapshotMeta};
 use crate::error::ProviderError;
+use serde_json::Value;
 use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,89 +25,25 @@ pub struct WeatherSnapshot {
     pub location: Option<String>,
     pub issues: Vec<String>,
 }
-fn extract<'a>(input: &'a str, key: &str) -> Option<&'a str> {
-    let needle = format!(r#""{key}""#);
-    let pos = input.find(&needle)? + needle.len();
-    let tail = input[pos..].trim_start();
-    let tail = tail.strip_prefix(':')?.trim_start();
-    if tail.starts_with('"') {
-        let bytes = tail.as_bytes();
-        let mut escape = false;
-        for i in 1..bytes.len() {
-            if escape {
-                escape = false;
-                continue;
-            }
-            if bytes[i] == b'\\' {
-                escape = true;
-                continue;
-            }
-            if bytes[i] == b'"' {
-                return Some(&tail[1..i]);
-            }
-        }
-        None
-    } else {
-        let end = tail.find([',', '}', ']'])?;
-        Some(tail[..end].trim())
+fn number<T: std::str::FromStr>(object: &Value, field: &str) -> Option<T> {
+    match object.get(field)? {
+        Value::String(raw) => raw.parse().ok(),
+        Value::Number(raw) => raw.to_string().parse().ok(),
+        _ => None,
     }
 }
-fn objects<'a>(input: &'a str, key: &str) -> Vec<&'a str> {
-    let needle = format!(r#""{key}""#);
-    let Some(pos) = input.find(&needle) else {
-        return Vec::new();
-    };
-    let Some(array) = input[pos + needle.len()..]
-        .find('[')
-        .map(|i| pos + needle.len() + i + 1)
-    else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    let mut depth = 0;
-    let mut begin = 0;
-    let mut quoted = false;
-    let mut escaped = false;
-    for (i, c) in input[array..].char_indices() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        if c == '\\' && quoted {
-            escaped = true;
-            continue;
-        }
-        if c == '"' {
-            quoted = !quoted;
-            continue;
-        }
-        if quoted {
-            continue;
-        }
-        match c {
-            '{' => {
-                if depth == 0 {
-                    begin = i;
-                }
-                depth += 1;
-            }
-            '}' => {
-                if depth > 0 {
-                    depth -= 1;
-                    if depth == 0 {
-                        out.push(&input[array + begin..array + i + 1]);
-                    }
-                }
-            }
-            ']' if depth == 0 => break,
-            _ => {}
-        }
-    }
-    out
+
+fn description(object: &Value) -> String {
+    object
+        .get("weatherDesc")
+        .and_then(Value::as_array)
+        .and_then(|descriptions| descriptions.first())
+        .and_then(|description| description.get("value"))
+        .and_then(Value::as_str)
+        .unwrap_or("Unknown")
+        .to_owned()
 }
-fn num<T: std::str::FromStr>(s: &str, k: &str) -> Option<T> {
-    extract(s, k)?.parse().ok()
-}
+
 fn glyph(code: u16) -> &'static str {
     match code {
         113 => "☀",
@@ -119,57 +56,80 @@ fn glyph(code: u16) -> &'static str {
         _ => "🌧",
     }
 }
-fn description(s: &str) -> String {
-    extract(s, "value").unwrap_or("Unknown").to_owned()
-}
 pub fn parse_wttr(body: &str, now: u64) -> Result<WeatherSnapshot, ProviderError> {
-    let current = objects(body, "current_condition")
+    // The command runner already caps stdout; preserve that same bound for
+    // public parser callers and adversarial fixtures.
+    if body.len() > 64 * 1024 {
+        return Err(ProviderError::parse("weather response exceeds 64 KiB"));
+    }
+    let document: Value = serde_json::from_str(body)
+        .map_err(|error| ProviderError::parse(format!("invalid weather JSON: {error}")))?;
+    // Resolve fields from the root JSON object. Searching the raw body for
+    // matching key substrings accepted nested spoofing and malformed JSON.
+    let current = document
+        .get("current_condition")
+        .and_then(Value::as_array)
+        .and_then(|conditions| conditions.first())
+        .filter(|condition| condition.is_object())
+        .ok_or_else(|| ProviderError::parse("missing current_condition object"))?;
+    let temperature_c: i8 = number(current, "temp_C")
+        .ok_or_else(|| ProviderError::parse("missing or invalid current temperature"))?;
+
+    let forecast = document
+        .get("weather")
+        .and_then(Value::as_array)
         .into_iter()
-        .next()
-        .ok_or_else(|| ProviderError::parse("missing current_condition"))?;
-    let forecast = objects(body, "weather")
-        .into_iter()
+        .flat_map(|days| days.iter())
         .take(3)
         .enumerate()
-        .map(|(i, day)| {
-            let hourly = objects(day, "hourly");
-            let details = hourly
-                .get(4)
-                .or_else(|| hourly.first())
-                .copied()
+        .filter_map(|(index, day)| {
+            // Do not fabricate a 0 °C forecast from missing or bad data.
+            let high_c = number(day, "maxtempC")?;
+            let low_c = number(day, "mintempC")?;
+            let details = day
+                .get("hourly")
+                .and_then(Value::as_array)
+                .and_then(|hours| hours.get(4).or_else(|| hours.first()))
                 .unwrap_or(current);
-            ForecastDay {
-                label: match i {
+            Some(ForecastDay {
+                label: match index {
                     0 => "Today",
                     1 => "Tomorrow",
                     _ => "Day 3",
                 }
                 .into(),
-                high_c: num(day, "maxtempC").unwrap_or(0),
-                low_c: num(day, "mintempC").unwrap_or(0),
+                high_c,
+                low_c,
                 condition: description(details),
-                glyph: glyph(num(details, "weatherCode").unwrap_or(119)).into(),
-            }
+                glyph: glyph(number(details, "weatherCode").unwrap_or(119)).into(),
+            })
         })
         .collect();
-    let location = objects(body, "nearest_area")
-        .into_iter()
-        .next()
-        .and_then(|a| extract(a, "value"))
+
+    let location = document
+        .get("nearest_area")
+        .and_then(Value::as_array)
+        .and_then(|areas| areas.first())
+        .and_then(|area| area.get("areaName"))
+        .and_then(Value::as_array)
+        .and_then(|names| names.first())
+        .and_then(|name| name.get("value"))
+        .and_then(Value::as_str)
         .map(str::to_owned);
     Ok(WeatherSnapshot {
         meta: SnapshotMeta::new(now, Health::Healthy, false, "wttr.in"),
         backend: "wttr.in".into(),
-        temperature_c: num(current, "temp_C"),
+        temperature_c: Some(temperature_c),
         condition: Some(description(current)),
-        condition_glyph: Some(glyph(num(current, "weatherCode").unwrap_or(119)).into()),
-        humidity_percent: num(current, "humidity"),
-        wind_kmh: num(current, "windspeedKmph"),
+        condition_glyph: Some(glyph(number(current, "weatherCode").unwrap_or(119)).into()),
+        humidity_percent: number(current, "humidity"),
+        wind_kmh: number(current, "windspeedKmph"),
         forecast,
         location,
         issues: Vec::new(),
     })
 }
+
 pub struct WeatherProvider<R: CommandRunner = SystemCommandRunner> {
     pub runner: R,
     pub url: String,
@@ -210,7 +170,7 @@ impl<R: CommandRunner> WeatherProvider<R> {
         let result = self
             .runner
             .run(
-                &CommandSpec::new("curl").args(["-fsS", "--max-time", "5", &url]),
+                &CommandSpec::new("curl").args(["-fsS", "--max-time", "5", "--", &url]),
                 CommandLimits::new(Duration::from_secs(5), 65536),
             )
             .and_then(|out| {
