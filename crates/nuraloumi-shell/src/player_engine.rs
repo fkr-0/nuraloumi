@@ -140,6 +140,17 @@ pub fn parse_m3u(path: &Path) -> Result<Vec<String>, String> {
         };
         let full = canonical_media_path(resolved.to_str().ok_or("non-UTF8 media path")?)
             .map_err(|e| format!("M3U line {}: {e}", line_number + 1))?;
+        // A symlink can disguise a nested playlist as a media extension.
+        if Path::new(&full)
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("m3u") || e.eq_ignore_ascii_case("m3u8"))
+        {
+            return Err(format!(
+                "M3U line {}: nested playlists not supported",
+                line_number + 1
+            ));
+        }
         if full.eq_ignore_ascii_case(&path.to_string_lossy()) {
             return Err("M3U cannot reference itself".into());
         }
@@ -542,7 +553,7 @@ impl Player {
         let previous_playlist = self.playlist.clone();
         let result = self.apply(command);
         if let Err(e) = &result {
-            self.playlist = previous_playlist;
+            self.playlist = previous_playlist.clone();
             self.last_error = Some(e.clone());
             if self.status != "Playing" && self.status != "Paused" {
                 self.status = "Error".into();
@@ -555,6 +566,11 @@ impl Player {
         } else {
             Ok(())
         };
+        // A persistence failure must never advertise an uncommitted playlist
+        // snapshot as successful. Runtime backend side effects are not undone.
+        if persistence.is_err() {
+            self.playlist = previous_playlist;
+        }
         let error = result.err().or_else(|| persistence.err());
         Reply {
             ok: error.is_none(),
@@ -654,7 +670,9 @@ impl Player {
             Command::Next => self.advance(true),
             Command::Previous => self.advance(false),
             Command::SeekRelative { delta_ms } => {
-                if self.gst.is_none() && self.video.is_none() {
+                if !matches!(self.status.as_str(), "Playing" | "Paused")
+                    || (self.gst.is_none() && self.video.is_none())
+                {
                     return Err("no media loaded".into());
                 }
                 let target = if delta_ms < 0 {
@@ -673,7 +691,9 @@ impl Player {
             }
             Command::Seek { position_ms } => {
                 let duration = self.duration_ms;
-                if self.gst.is_none() && self.video.is_none() {
+                if !matches!(self.status.as_str(), "Playing" | "Paused")
+                    || (self.gst.is_none() && self.video.is_none())
+                {
                     return Err("no media loaded".into());
                 }
                 if duration > 0 && position_ms > duration {
@@ -1309,6 +1329,50 @@ mod tests {
         fs::write(&list, vec![b'a'; MAX_M3U_BYTES as usize + 1]).unwrap();
         assert!(parse_m3u(&list).unwrap_err().contains("size limit"));
         fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn m3u_rejects_symlink_disguised_nested_playlist() {
+        use std::os::unix::fs::symlink;
+        let dir = temp_file("nested-symlink");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("nested.m3u8"), "#EXTM3U\n").unwrap();
+        symlink("nested.m3u8", dir.join("alias.ogg")).unwrap();
+        let list = dir.join("list.m3u");
+        fs::write(&list, "#EXTM3U\nalias.ogg\n").unwrap();
+        assert!(parse_m3u(&list).unwrap_err().contains("nested playlists"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn persistence_failure_restores_playlist_snapshot() {
+        let dir = temp_file("failed-save-dir");
+        fs::create_dir_all(&dir).unwrap();
+        let state = dir.join("state.json");
+        let mut player = Player::open(state).unwrap();
+        let previous = player.playlist.clone();
+        fs::remove_dir(&dir).unwrap();
+        fs::write(&dir, b"not a directory").unwrap();
+        let reply = player.command(Command::LoopMode {
+            mode: LoopMode::All,
+        });
+        assert!(!reply.ok);
+        assert_eq!(reply.state.playlist, previous);
+        assert_eq!(player.playlist, previous);
+        fs::remove_file(dir).unwrap();
+    }
+    #[test]
+    fn stopped_player_rejects_seek_and_relative_seek() {
+        let mut player = Player::open(temp_file("seek-stop-state.json")).unwrap();
+        player.stop();
+        assert!(player
+            .command(Command::Seek { position_ms: 0 })
+            .error
+            .unwrap()
+            .contains("no media loaded"));
+        assert!(player
+            .command(Command::SeekRelative { delta_ms: -15_000 })
+            .error
+            .unwrap()
+            .contains("no media loaded"));
     }
     #[test]
     fn loop_defaults_off_end_state_and_repeated_stop() {
