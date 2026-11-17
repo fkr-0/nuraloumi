@@ -16,6 +16,7 @@ use video_engine::{VideoEngine, VideoPoll};
 
 const MAX_TRACKS: usize = 256;
 const MAX_PATH_BYTES: usize = 4096;
+const MAX_M3U_BYTES: u64 = 256 * 1024;
 const MAX_STATE_BYTES: u64 = 256 * 1024;
 const GST_FORMAT_TIME: c_int = 3;
 const GST_STATE_NULL: c_int = 1;
@@ -49,6 +50,102 @@ pub struct VdeGpuFrameContract {
     pub capture_width: u32,
     pub strides: [u32; 3],
     pub dmabuf_planes: usize,
+}
+/// Parse local M3U/M3U8 without recursively loading referenced playlists.
+/// EXTINF is accepted as metadata but is not trusted as a media path.
+pub fn parse_m3u(path: &Path) -> Result<Vec<String>, String> {
+    let file = fs::File::open(path).map_err(|e| format!("open M3U: {e}"))?;
+    if file.metadata().map_err(|e| e.to_string())?.len() > MAX_M3U_BYTES {
+        return Err("M3U exceeds size limit".into());
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_M3U_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("read M3U: {e}"))?;
+    if bytes.len() as u64 > MAX_M3U_BYTES {
+        return Err("M3U exceeds size limit".into());
+    }
+    let source = std::str::from_utf8(&bytes).map_err(|_| "M3U requires UTF-8")?;
+    let source = source.strip_prefix('\u{feff}').unwrap_or(source);
+    let parent = path.parent().ok_or("M3U has no parent")?;
+    let mut tracks = Vec::new();
+    for (line_number, line) in source.lines().enumerate() {
+        let entry = line.trim();
+        if entry.is_empty() || entry.starts_with('#') {
+            continue;
+        }
+        if tracks.len() >= MAX_TRACKS {
+            return Err("M3U track count exceeds limit".into());
+        }
+        if entry.len() > MAX_PATH_BYTES {
+            return Err(format!("M3U line {} too long", line_number + 1));
+        }
+        let decoded;
+        let local = if let Some(uri) = entry.strip_prefix("file://") {
+            let uri = uri
+                .strip_prefix("localhost/")
+                .map(|p| format!("/{p}"))
+                .unwrap_or_else(|| uri.to_owned());
+            if !uri.starts_with('/') {
+                return Err(format!("M3U line {}: nonlocal file URI", line_number + 1));
+            }
+            let raw = uri.as_bytes();
+            let mut out = Vec::with_capacity(raw.len());
+            let mut i = 0;
+            while i < raw.len() {
+                if raw[i] == b'%' {
+                    if i + 2 >= raw.len() {
+                        return Err("invalid URI escape".into());
+                    }
+                    let hex = |c: u8| (c as char).to_digit(16);
+                    let hi = hex(raw[i + 1]).ok_or("invalid URI escape")?;
+                    let lo = hex(raw[i + 2]).ok_or("invalid URI escape")?;
+                    out.push(((hi << 4) | lo) as u8);
+                    i += 3;
+                } else {
+                    out.push(raw[i]);
+                    i += 1;
+                }
+            }
+            decoded = String::from_utf8(out).map_err(|_| "non-UTF8 file URI")?;
+            decoded.as_str()
+        } else {
+            if entry
+                .split('/')
+                .next()
+                .is_some_and(|first| first.contains(':'))
+            {
+                return Err(format!(
+                    "M3U line {}: unsupported URI scheme",
+                    line_number + 1
+                ));
+            }
+            entry
+        };
+        let media = Path::new(local);
+        if media
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("m3u") || e.eq_ignore_ascii_case("m3u8"))
+        {
+            return Err(format!(
+                "M3U line {}: nested playlists not supported",
+                line_number + 1
+            ));
+        }
+        let resolved = if media.is_absolute() {
+            media.to_path_buf()
+        } else {
+            parent.join(media)
+        };
+        let full = canonical_media_path(resolved.to_str().ok_or("non-UTF8 media path")?)
+            .map_err(|e| format!("M3U line {}: {e}", line_number + 1))?;
+        if full.eq_ignore_ascii_case(&path.to_string_lossy()) {
+            return Err("M3U cannot reference itself".into());
+        }
+        tracks.push(full);
+    }
+    Ok(tracks)
 }
 
 fn is_video_path(path: &Path) -> bool {
@@ -84,6 +181,16 @@ pub struct Playlist {
     pub current: Option<usize>,
     pub volume: f64,
     pub muted: bool,
+    #[serde(default)]
+    pub loop_mode: LoopMode,
+}
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LoopMode {
+    #[default]
+    Off,
+    One,
+    All,
 }
 impl Default for Playlist {
     fn default() -> Self {
@@ -92,6 +199,7 @@ impl Default for Playlist {
             current: None,
             volume: 0.8,
             muted: false,
+            loop_mode: LoopMode::Off,
         }
     }
 }
@@ -266,19 +374,48 @@ pub fn save_playlist(path: &Path, state: &Playlist) -> Result<(), String> {
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Command {
     Status,
-    Add { path: String },
-    Remove { index: usize },
-    Move { from: usize, to: usize },
-    Select { index: usize },
+    Add {
+        path: String,
+    },
+    #[serde(rename = "import_m3u_v1", alias = "import_m3u")]
+    ImportM3u {
+        path: String,
+    },
+    Remove {
+        index: usize,
+    },
+    Move {
+        from: usize,
+        to: usize,
+    },
+    Select {
+        index: usize,
+    },
     Play,
     Pause,
     Toggle,
     Stop,
     Next,
     Previous,
-    Seek { position_ms: u64 },
-    Volume { level: f64 },
-    Mute { muted: bool },
+    Seek {
+        position_ms: u64,
+    },
+    #[serde(rename = "seek_relative_v1", alias = "seek_relative")]
+    SeekRelative {
+        delta_ms: i64,
+    },
+    #[serde(rename = "jump_to_start_v1", alias = "jump_to_start")]
+    JumpToStart,
+    #[serde(rename = "loop_mode_v1", alias = "loop_mode")]
+    LoopMode {
+        mode: LoopMode,
+    },
+    Volume {
+        level: f64,
+    },
+    Mute {
+        muted: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -436,6 +573,20 @@ impl Player {
                 self.playlist.current = Some(index);
                 self.select_and_play()
             }
+            Command::ImportM3u { path } => {
+                let canonical = canonical_media_path(&path)?;
+                let tracks = parse_m3u(Path::new(&canonical))?;
+                if tracks.is_empty() {
+                    return Err("M3U contains no tracks".into());
+                }
+                if self.playlist.tracks.len() + tracks.len() > MAX_TRACKS {
+                    return Err("playlist full".into());
+                }
+                let index = self.playlist.tracks.len();
+                self.playlist.tracks.extend(tracks);
+                self.playlist.current = Some(index);
+                self.select_and_play()
+            }
             Command::Remove { index } => {
                 let active = self.playlist.remove(index)?;
                 if active {
@@ -489,8 +640,37 @@ impl Player {
                 self.stop();
                 Ok(())
             }
+            Command::JumpToStart => {
+                if self.playlist.tracks.is_empty() {
+                    return Ok(());
+                }
+                self.playlist.current = Some(0);
+                self.select_and_play()
+            }
+            Command::LoopMode { mode } => {
+                self.playlist.loop_mode = mode;
+                Ok(())
+            }
             Command::Next => self.advance(true),
             Command::Previous => self.advance(false),
+            Command::SeekRelative { delta_ms } => {
+                if self.gst.is_none() && self.video.is_none() {
+                    return Err("no media loaded".into());
+                }
+                let target = if delta_ms < 0 {
+                    self.position_ms.saturating_sub(delta_ms.unsigned_abs())
+                } else {
+                    self.position_ms.saturating_add(delta_ms as u64)
+                };
+                let target = if self.duration_ms > 0 {
+                    target.min(self.duration_ms)
+                } else {
+                    target
+                };
+                self.apply(Command::Seek {
+                    position_ms: target,
+                })
+            }
             Command::Seek { position_ms } => {
                 let duration = self.duration_ms;
                 if self.gst.is_none() && self.video.is_none() {
@@ -546,6 +726,31 @@ impl Player {
         });
         self.select_and_play()
     }
+    fn on_eos(&mut self) {
+        let advance = match self.playlist.loop_mode {
+            LoopMode::One => self.select_and_play(),
+            LoopMode::All => self.advance(true),
+            LoopMode::Off => {
+                if self
+                    .playlist
+                    .current
+                    .is_some_and(|i| i + 1 < self.playlist.tracks.len())
+                {
+                    self.advance(true)
+                } else {
+                    self.stop();
+                    self.status = "Ended".into();
+                    Ok(())
+                }
+            }
+        };
+        if let Err(e) = advance {
+            self.stop();
+            self.status = "Error".into();
+            self.last_error = Some(format!("playlist EOS advance: {e}"));
+        }
+        let _ = save_playlist(&self.save_to, &self.playlist);
+    }
     fn stop(&mut self) {
         self.video.take();
         if let Some(gst) = &mut self.gst {
@@ -556,6 +761,9 @@ impl Player {
         self.duration_ms = 0;
     }
     pub fn tick(&mut self) {
+        if self.status != "Playing" && self.status != "Paused" {
+            return;
+        }
         if let Some(video) = &self.video {
             match video.poll() {
                 Ok(VideoPoll::Starting) => return,
@@ -580,20 +788,7 @@ impl Player {
                     return;
                 }
                 Ok(VideoPoll::Eos) => {
-                    let has_next = self
-                        .playlist
-                        .current
-                        .is_some_and(|i| i + 1 < self.playlist.tracks.len());
-                    if has_next {
-                        if self.advance(true).is_err() {
-                            self.stop();
-                            self.last_error =
-                                Some("could not advance playlist after video EOS".into());
-                        }
-                    } else {
-                        self.stop();
-                    }
-                    let _ = save_playlist(&self.save_to, &self.playlist);
+                    self.on_eos();
                     return;
                 }
                 Err(e) => {
@@ -616,19 +811,7 @@ impl Player {
                 self.duration_ms = duration_ms;
             }
             Ok(GstPoll::Eos) => {
-                let has_next = self
-                    .playlist
-                    .current
-                    .is_some_and(|i| i + 1 < self.playlist.tracks.len());
-                if has_next {
-                    if self.advance(true).is_err() {
-                        self.stop();
-                        self.last_error = Some("could not advance playlist after EOS".into());
-                    }
-                } else {
-                    self.stop();
-                }
-                let _ = save_playlist(&self.save_to, &self.playlist);
+                self.on_eos();
             }
             Err(e) => {
                 self.stop();
@@ -987,6 +1170,7 @@ mod tests {
             current: Some(0),
             volume: 0.42,
             muted: true,
+            loop_mode: LoopMode::Off,
         };
         save_playlist(&pth, &p).unwrap();
         assert_eq!(load_playlist(&pth).unwrap(), p);
@@ -1088,5 +1272,93 @@ mod tests {
         assert!(is_video_path(Path::new("/media/example.MP4")));
         assert!(is_video_path(Path::new("/media/example.mkv")));
         assert!(!is_video_path(Path::new("/media/track.mp3")));
+    }
+    #[test]
+    fn m3u_bom_extinf_unicode_relative_and_local_file_uri() {
+        let dir = temp_file("m3u-valid");
+        fs::create_dir_all(&dir).unwrap();
+        let first = dir.join("Ä space.ogg");
+        let second = dir.join("other.mp3");
+        fs::write(&first, []).unwrap();
+        fs::write(&second, []).unwrap();
+        let list = dir.join("playlist.m3u8");
+        fs::write(&list, format!("\u{feff}#EXTM3U\n#EXTINF:123,Artist - Song\nÄ space.ogg\n# ignored\nfile://localhost{}\n", second.display())).unwrap();
+        let tracks = parse_m3u(&list).unwrap();
+        assert_eq!(
+            tracks,
+            vec![first.to_str().unwrap(), second.to_str().unwrap()]
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn m3u_rejects_unsafe_schemes_nested_missing_and_oversized() {
+        let dir = temp_file("m3u-invalid");
+        fs::create_dir_all(&dir).unwrap();
+        let list = dir.join("list.m3u");
+        for entry in [
+            "https://example.org/song.mp3",
+            "http:song.mp3",
+            "data:x",
+            "file://remotehost/tmp/audio.ogg",
+            "other.m3u",
+            "missing.ogg",
+        ] {
+            fs::write(&list, format!("#EXTM3U\n{entry}\n")).unwrap();
+            assert!(parse_m3u(&list).is_err(), "accepted {entry}");
+        }
+        fs::write(&list, vec![b'a'; MAX_M3U_BYTES as usize + 1]).unwrap();
+        assert!(parse_m3u(&list).unwrap_err().contains("size limit"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn loop_defaults_off_end_state_and_repeated_stop() {
+        let path = temp_file("loop-state.json");
+        let playlist = Playlist {
+            tracks: vec!["/nonexistent-player-test.ogg".into()],
+            current: Some(0),
+            ..Playlist::default()
+        };
+        save_playlist(&path, &playlist).unwrap();
+        let mut player = Player::open(path.clone()).unwrap();
+        assert_eq!(player.playlist.loop_mode, LoopMode::Off);
+        player.on_eos();
+        assert_eq!(player.status, "Ended");
+        assert_eq!(player.playlist.current, Some(0));
+        assert!(player.command(Command::Stop).ok);
+        assert!(player.command(Command::Stop).ok);
+        assert_eq!(player.snapshot().position_ms, 0);
+        assert_eq!(player.snapshot().status, "Stopped");
+        assert!(
+            player
+                .command(Command::LoopMode {
+                    mode: LoopMode::All
+                })
+                .ok
+        );
+        assert_eq!(load_playlist(&path).unwrap().loop_mode, LoopMode::All);
+        let _ = fs::remove_file(path);
+    }
+    #[test]
+    fn versioned_transport_commands_preserve_legacy_aliases() {
+        let encoded = serde_json::to_value(Command::SeekRelative { delta_ms: -15_000 }).unwrap();
+        assert_eq!(encoded["op"], "seek_relative_v1");
+        assert_eq!(encoded["delta_ms"], -15_000);
+        let old: Command =
+            serde_json::from_str(r#"{"op":"seek_relative","delta_ms":15000}"#).unwrap();
+        assert!(matches!(old, Command::SeekRelative { delta_ms: 15000 }));
+        for (old, new) in [
+            ("loop_mode", "loop_mode_v1"),
+            ("jump_to_start", "jump_to_start_v1"),
+            ("import_m3u", "import_m3u_v1"),
+        ] {
+            let cmd = match old {
+                "loop_mode" => format!(r#"{{"op":"{old}","mode":"all"}}"#),
+                "import_m3u" => format!(r#"{{"op":"{old}","path":"/tmp/list.m3u"}}"#),
+                _ => format!(r#"{{"op":"{old}"}}"#),
+            };
+            let parsed: Command = serde_json::from_str(&cmd).unwrap();
+            assert_eq!(serde_json::to_value(parsed).unwrap()["op"], new);
+        }
+        assert_eq!(serde_json::to_value(Command::Stop).unwrap()["op"], "stop");
     }
 }
