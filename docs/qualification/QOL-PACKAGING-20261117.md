@@ -33,7 +33,7 @@ Canonical task: `NURALOUMI-20261117-QOL-R1-14-PACKAGING-CI-20261117-9B5DBC`
 | ARMv7 ELF/NEON audit | NOT RUN | No new native ELF was produced; existing audit script and private video contract were not changed |
 | Actual APK and DEB content | NOT VERIFIED | No native container build or remote CI run permitted |
 | Real notification bus / SL101 deployment | NOT VERIFIED | Local-only boundary |
-| Re-run tests after final desktop and D-Bus strictness | PENDING | Workspace execution rejected again: 4 active process sessions, capacity reached; earlier isolated 8/8 and xtask 12/12 green do not prove the final edit |
+| Final isolated package-integrity fixtures | PASS, 10 tests | `python3 -m unittest scripts.test_package_integrity` after final descriptor/desktop strictness and correcting fixture Type=Application |
 
 The test source-only fixture models an available full file manager, but current repository Cargo metadata does not yet provide it. Thus the final release gate is **blocked**, not implicitly qualified. The per-file hash-integrity check and ELF-header check remain in place; no private Grate/GStreamer ABI paths were altered.
 

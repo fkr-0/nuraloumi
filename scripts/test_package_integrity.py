@@ -131,7 +131,7 @@ class PackageIntegrityTests(unittest.TestCase):
 
     def test_desktop_exec_not_in_bundle_rejected(self):
         key = "share/applications/nuraloumi-files.desktop"
-        self.payloads[key] = (b"[Desktop Entry]\nExec=missing-helper\n"
+        self.payloads[key] = (b"[Desktop Entry]\nType=Application\nExec=missing-helper\n"
                               b"TryExec=missing-helper\n")
         (self.stage / key).write_bytes(self.payloads[key])
         self.manifest()
