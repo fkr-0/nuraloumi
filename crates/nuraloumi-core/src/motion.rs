@@ -25,6 +25,70 @@ pub enum MotionMode {
     Reduced,
 }
 
+/// Ephemeral visual phase, independent of selection, toggling and activation.
+/// Shells retain the stable control ID separately and only enter Released after
+/// a matching actionable down/up; cancellation must never dispatch an action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PressPhase {
+    Idle,
+    Held,
+    Released,
+    Cancelled,
+}
+
+/// Paint-only feedback. Hit regions and layout must use their original geometry.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PressTransition {
+    /// Muted-steel accent overlay fraction, always in 0..=0.12.
+    pub accent_mix: f32,
+    /// Visual inset in logical pixels, never changes hit testing.
+    pub translate_y: f32,
+    /// Whether a release animation still needs another frame.
+    pub animating: bool,
+}
+
+/// Deterministic pressed treatment. For Released, progress is elapsed/Fast
+/// (120 ms), with zero being just released and one being fully settled.
+/// Held is immediate regardless of progress; Cancelled and Idle are clear.
+/// Reduced motion never requests a follow-up paint frame.
+pub fn press_transition(progress: f32, phase: PressPhase, mode: MotionMode) -> PressTransition {
+    let progress = if progress.is_finite() {
+        progress.clamp(0.0, 1.0)
+    } else {
+        // A corrupt timestamp must never poison Cairo coordinates.
+        1.0
+    };
+    let amount = match phase {
+        PressPhase::Held => 1.0,
+        PressPhase::Released if mode == MotionMode::Full => 1.0 - ease_out_cubic(progress),
+        PressPhase::Idle | PressPhase::Cancelled | PressPhase::Released => 0.0,
+    };
+    PressTransition {
+        accent_mix: 0.12 * amount,
+        translate_y: if mode == MotionMode::Reduced {
+            0.0
+        } else {
+            amount
+        },
+        animating: matches!(phase, PressPhase::Released)
+            && mode == MotionMode::Full
+            && progress < 1.0,
+    }
+}
+
+/// Convenience for shells with a monotonic millisecond clock.
+pub fn press_transition_ms(
+    elapsed_ms: u32,
+    phase: PressPhase,
+    mode: MotionMode,
+) -> PressTransition {
+    press_transition(
+        normalized_progress(elapsed_ms, MotionClass::Fast),
+        phase,
+        mode,
+    )
+}
+
 /// Renderer-neutral finite transition.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Transition {
@@ -105,6 +169,54 @@ pub const fn reduced_motion(visible: bool) -> Transition {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pressed_down_release_and_settle() {
+        let held = press_transition_ms(0, PressPhase::Held, MotionMode::Full);
+        assert_eq!(held.translate_y, 1.0);
+        assert_eq!(held.accent_mix, 0.12);
+        assert!(!held.animating);
+        assert_eq!(
+            press_transition_ms(999, PressPhase::Held, MotionMode::Full),
+            held
+        );
+        let start = press_transition_ms(0, PressPhase::Released, MotionMode::Full);
+        let middle = press_transition_ms(60, PressPhase::Released, MotionMode::Full);
+        let end = press_transition_ms(120, PressPhase::Released, MotionMode::Full);
+        assert_eq!(start.translate_y, 1.0);
+        assert!(start.animating);
+        assert!(middle.translate_y > 0.0 && middle.translate_y < 1.0);
+        assert!(middle.animating);
+        assert_eq!(end.translate_y, 0.0);
+        assert_eq!(end.accent_mix, 0.0);
+        assert!(!end.animating);
+    }
+
+    #[test]
+    fn pressed_cancellation_reduced_and_nonfinite_are_safe() {
+        for phase in [PressPhase::Idle, PressPhase::Cancelled] {
+            assert_eq!(
+                press_transition(0.0, phase, MotionMode::Full).translate_y,
+                0.0
+            );
+            assert!(!press_transition(0.0, phase, MotionMode::Full).animating);
+        }
+        for progress in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -100.0, 100.0] {
+            let result = press_transition(progress, PressPhase::Released, MotionMode::Full);
+            assert!(result.translate_y.is_finite());
+            assert!((0.0..=1.0).contains(&result.translate_y));
+            assert!((0.0..=0.12).contains(&result.accent_mix));
+        }
+        assert_eq!(
+            press_transition_ms(0, PressPhase::Released, MotionMode::Reduced).translate_y,
+            0.0
+        );
+        assert!(!press_transition_ms(0, PressPhase::Released, MotionMode::Reduced).animating);
+        assert_eq!(
+            press_transition_ms(0, PressPhase::Held, MotionMode::Reduced).translate_y,
+            0.0
+        );
+    }
 
     #[test]
     fn duration_classes_match_contract() {
