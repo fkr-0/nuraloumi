@@ -164,6 +164,9 @@ fn audio_stale_expiry_recovery_and_successful_action_invalidation() {
             (volume.clone(), failed()),
             (volume.clone(), ok("Volume: 0.14\n")),
             (mute, ok("")),
+            // SetMute consumes its verification readback. CachedProvider
+            // then performs an independent snapshot after invalidation.
+            (volume.clone(), ok("Volume: 0.14 [MUTED]\n")),
             (volume, ok("Volume: 0.14 [MUTED]\n")),
         ],
         calls.clone(),
@@ -191,7 +194,7 @@ fn audio_stale_expiry_recovery_and_successful_action_invalidation() {
     let refreshed = cache.snapshot_at(11_001).unwrap();
     assert_eq!(refreshed.volume_percent, Some(14));
     assert_eq!(refreshed.muted, Some(true));
-    assert_eq!(calls.get(), 6);
+    assert_eq!(calls.get(), 7);
 }
 
 #[test]
