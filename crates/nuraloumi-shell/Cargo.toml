@@ -17,6 +17,7 @@ toml = "0.8"
 png = { version = "0.17", default-features = false }
 jpeg-decoder = { version = "0.3", default-features = false }
 libc = "0.2"
+zbus = "4.4"
 
 [dev-dependencies]
 jpeg-encoder = { version = "0.6", default-features = false }
@@ -56,6 +57,10 @@ path = "src/bin/playerd.rs"
 [[bin]]
 name = "nuraloumi-notifications"
 path = "src/bin/notifications.rs"
+
+[[bin]]
+name = "nuraloumi-notificationd"
+path = "src/bin/notification_daemon.rs"
 
 [[bin]]
 name = "nuraloumi-terminal"

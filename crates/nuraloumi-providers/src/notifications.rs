@@ -27,6 +27,139 @@ pub struct NotificationEntry {
     pub default_action: Option<String>,
 }
 
+/// The system provider prefers our single-owner D-Bus history. Mocked providers
+/// remain Dunst-only so existing deterministic command fixtures do not touch
+/// the host session bus. A foreign notification daemon keeps its own adapter.
+fn native_proxy<'a>(
+    connection: &'a zbus::blocking::Connection,
+) -> Result<zbus::blocking::Proxy<'a>, zbus::Error> {
+    zbus::blocking::Proxy::new(
+        connection,
+        "org.freedesktop.Notifications",
+        "/org/freedesktop/Notifications",
+        "org.freedesktop.Notifications",
+    )
+}
+
+#[derive(serde::Deserialize)]
+struct NativeEntry {
+    id: u32,
+    app: String,
+    summary: String,
+    body: String,
+    actions: Vec<String>,
+    default_action: Option<String>,
+}
+
+fn native_snapshot(timestamp: u64) -> Result<Option<NotificationSnapshot>, String> {
+    let connection = match zbus::blocking::Connection::session() {
+        Ok(connection) => connection,
+        Err(_) => return Ok(None),
+    };
+    let proxy = match native_proxy(&connection) {
+        Ok(proxy) => proxy,
+        Err(_) => return Ok(None),
+    };
+    let info: (String, String, String, String) = match proxy.call("GetServerInformation", &()) {
+        Ok(info) => info,
+        Err(_) => return Ok(None),
+    };
+    if info.0 != "NuraLoumi" || info.1 != "NuraLoumi" {
+        return Ok(None);
+    }
+    let raw: String = proxy
+        .call("GetHistory", &())
+        .map_err(|error| format!("NuraLoumi history unavailable: {error}"))?;
+    if raw.len() > MAX_HISTORY_BYTES {
+        return Err("NuraLoumi history exceeds size limit".into());
+    }
+    let entries: Vec<NativeEntry> = serde_json::from_str(&raw)
+        .map_err(|error| format!("invalid NuraLoumi history: {error}"))?;
+    if entries.len() > MAX_NOTIFICATIONS {
+        return Err("NuraLoumi history exceeds entry limit".into());
+    }
+    Ok(Some(NotificationSnapshot {
+        meta: SnapshotMeta::new(timestamp, Health::Healthy, false, "nuraloumi-dbus"),
+        backend: "nuraloumi-dbus".into(),
+        notifications: entries
+            .into_iter()
+            .map(|e| NotificationEntry {
+                id: e.id,
+                app: e.app,
+                summary: e.summary,
+                body: e.body,
+                actions: e.actions,
+                default_action: e.default_action,
+            })
+            .collect(),
+        issues: Vec::new(),
+    }))
+}
+
+fn native_action(
+    snapshot: &NotificationSnapshot,
+    action: NotificationAction,
+) -> Result<ActionResult, ProviderError> {
+    if snapshot.meta.health != Health::Healthy {
+        return Err(ProviderError::unavailable(
+            "NuraLoumi notification service unavailable",
+        ));
+    }
+    let connection = zbus::blocking::Connection::session().map_err(|error| {
+        ProviderError::unavailable(format!("notification session bus: {error}"))
+    })?;
+    let proxy = native_proxy(&connection)
+        .map_err(|error| ProviderError::unavailable(format!("notification service: {error}")))?;
+    let ids = match action {
+        NotificationAction::Clear => snapshot.notifications.iter().map(|i| i.id).collect(),
+        NotificationAction::ClearKnown { ids } => ids,
+        NotificationAction::Remove { id } => vec![id],
+        NotificationAction::Invoke { id, action } => {
+            let entry = require_notification(snapshot, id)?;
+            validate_action_name(&action)?;
+            if !entry.actions.iter().any(|a| a == &action) {
+                return Err(ProviderError::unavailable(
+                    "action not present in notification",
+                ));
+            }
+            let ok: bool = proxy
+                .call("InvokeAction", &(id, action))
+                .map_err(|error| ProviderError::backend(format!("D-Bus action failed: {error}")))?;
+            if !ok {
+                return Err(ProviderError::unavailable("notification already dismissed"));
+            }
+            return Ok(ActionResult::executed(format!(
+                "notification {id} action invoked"
+            )));
+        }
+        NotificationAction::Redisplay { .. } => {
+            return Err(ProviderError::unavailable("native redisplay unsupported"));
+        }
+    };
+    if ids.len() > MAX_NOTIFICATIONS
+        || ids.iter().copied().collect::<BTreeSet<_>>().len() != ids.len()
+    {
+        return Err(ProviderError::parse("duplicate or excess clear IDs"));
+    }
+    for id in &ids {
+        require_notification(snapshot, *id)?;
+    }
+    for id in &ids {
+        let removed: bool = proxy
+            .call("DismissHistory", &(*id,))
+            .map_err(|error| ProviderError::backend(format!("D-Bus dismiss failed: {error}")))?;
+        if !removed {
+            return Err(ProviderError::unavailable(format!(
+                "notification {id} already gone; clear partially completed"
+            )));
+        }
+    }
+    Ok(ActionResult::executed(format!(
+        "removed {} known notification(s)",
+        ids.len()
+    )))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NotificationSnapshot {
     pub meta: SnapshotMeta,
@@ -70,11 +203,14 @@ pub struct NotificationProvider<R> {
     runner: R,
     timestamp_override: Option<u64>,
     unsafe_best_effort_actions: bool,
+    native: bool,
 }
 
 impl NotificationProvider<SystemCommandRunner> {
     pub fn system() -> Self {
-        Self::new(SystemCommandRunner)
+        let mut provider = Self::new(SystemCommandRunner);
+        provider.native = true;
+        provider
     }
 }
 
@@ -84,6 +220,7 @@ impl<R> NotificationProvider<R> {
             runner,
             timestamp_override: None,
             unsafe_best_effort_actions: false,
+            native: false,
         }
     }
 
@@ -110,6 +247,25 @@ impl<R: CommandRunner> Provider for NotificationProvider<R> {
 
     fn snapshot(&mut self) -> Result<Self::Snapshot, ProviderError> {
         let timestamp = timestamp_ms(self.timestamp_override);
+        if self.native {
+            match native_snapshot(timestamp) {
+                Ok(Some(snapshot)) => return Ok(snapshot),
+                Ok(None) => {}
+                Err(issue) => {
+                    return Ok(NotificationSnapshot {
+                        meta: SnapshotMeta::new(
+                            timestamp,
+                            Health::Unavailable,
+                            false,
+                            "nuraloumi-dbus",
+                        ),
+                        backend: "nuraloumi-dbus".into(),
+                        notifications: Vec::new(),
+                        issues: vec![issue],
+                    })
+                }
+            }
+        }
         let output = match self.runner.run(
             &CommandSpec::new("dunstctl").arg("history"),
             SNAPSHOT_LIMITS,
@@ -154,6 +310,9 @@ impl<R: CommandRunner> Provider for NotificationProvider<R> {
 impl<R: CommandRunner> ActionProvider<NotificationAction> for NotificationProvider<R> {
     fn execute(&mut self, action: NotificationAction) -> Result<ActionResult, ProviderError> {
         let snapshot = self.snapshot()?;
+        if snapshot.backend == "nuraloumi-dbus" {
+            return native_action(&snapshot, action);
+        }
         match action {
             NotificationAction::Clear => {
                 // Legacy callers cannot freeze the UI confirmation set.
