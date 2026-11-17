@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 pub struct BacklightDevice {
     pub name: String,
     pub brightness: u64,
+    /// Minimum exposed by the driver, or zero if no minimum is exposed.
+    pub min_brightness: u64,
     pub max_brightness: u64,
     pub percent: u8,
     pub writable: bool,
@@ -115,10 +117,24 @@ impl Provider for BacklightProvider {
                     continue;
                 }
             };
+            let min_brightness = match read_optional_min(&path) {
+                Ok(min) if min < max_brightness => min,
+                Ok(_) => {
+                    issues.push(format!("{name}: minimum is not below maximum"));
+                    continue;
+                }
+                Err(error) => {
+                    issues.push(format!("{name}: {}", error.diagnostic()));
+                    continue;
+                }
+            };
+            let range = max_brightness - min_brightness;
             let percent_u64 = brightness
+                .clamp(min_brightness, max_brightness)
+                .saturating_sub(min_brightness)
                 .saturating_mul(100)
-                .saturating_add(max_brightness / 2)
-                / max_brightness;
+                .saturating_add(range / 2)
+                / range;
             let percent = u8::try_from(percent_u64.min(100)).unwrap_or(100);
             let writable = fs::metadata(path.join("brightness"))
                 .map(|metadata| !metadata.permissions().readonly())
@@ -126,6 +142,7 @@ impl Provider for BacklightProvider {
             devices.push(BacklightDevice {
                 name: name.to_owned(),
                 brightness,
+                min_brightness,
                 max_brightness,
                 percent,
                 writable,
@@ -154,11 +171,11 @@ impl ActionProvider<BacklightAction> for BacklightProvider {
     fn execute(&mut self, action: BacklightAction) -> Result<ActionResult, ProviderError> {
         let (device, raw_value) = match action {
             BacklightAction::SetRaw { device, value } => {
-                let max = self.max_for(&device)?;
-                if value > max {
+                let (min, max) = self.bounds_for(&device)?;
+                if value < min || value > max {
                     return Err(ProviderError::new(
                         ProviderErrorCategory::Backend,
-                        format!("brightness {value} exceeds device maximum {max}"),
+                        format!("brightness {value} outside device range {min}..={max}"),
                     ));
                 }
                 (device, value)
@@ -169,8 +186,9 @@ impl ActionProvider<BacklightAction> for BacklightProvider {
                         "brightness percentage must be in 0..=100",
                     ));
                 }
-                let max = self.max_for(&device)?;
-                let raw = max.saturating_mul(u64::from(percent)).saturating_add(50) / 100;
+                let (min, max) = self.bounds_for(&device)?;
+                let range = max - min;
+                let raw = min + range.saturating_mul(u64::from(percent)).saturating_add(50) / 100;
                 (device, raw)
             }
         };
@@ -184,14 +202,38 @@ impl ActionProvider<BacklightAction> for BacklightProvider {
                 ProviderError::from_io("writing backlight brightness", &error)
             }
         })?;
+        // A successful write alone is not proof the driver applied the value.
+        let actual = read_u64(&path)?;
+        if actual != raw_value {
+            return Err(ProviderError::backend(format!(
+                "backlight readback {actual} differs from requested {raw_value}"
+            )));
+        }
         Ok(ActionResult::executed("backlight brightness updated"))
     }
 }
 
 impl BacklightProvider {
-    fn max_for(&self, device: &str) -> Result<u64, ProviderError> {
+    fn bounds_for(&self, device: &str) -> Result<(u64, u64), ProviderError> {
         validate_component(device)?;
-        read_u64(&self.root.join(device).join("max_brightness"))
+        let path = self.root.join(device);
+        let max = read_u64(&path.join("max_brightness"))?;
+        let min = read_optional_min(&path)?;
+        if max == 0 || min >= max {
+            return Err(ProviderError::backend("invalid backlight minimum/maximum"));
+        }
+        Ok((min, max))
+    }
+}
+
+fn read_optional_min(device_path: &Path) -> Result<u64, ProviderError> {
+    match fs::read_to_string(device_path.join("min_brightness")) {
+        Ok(value) => value
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| ProviderError::parse("backlight minimum is not an integer")),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(0),
+        Err(error) => Err(ProviderError::from_io("reading backlight minimum", &error)),
     }
 }
 
@@ -282,5 +324,34 @@ mod tests {
             .unwrap();
         assert_eq!(snapshot.meta.health, Health::Unavailable);
         assert!(snapshot.devices.is_empty());
+    }
+    #[test]
+    fn nonzero_minimum_is_normalized_and_percent_set_respects_bounds() {
+        let (root, device) = fixture();
+        fs::write(device.join("min_brightness"), "20").unwrap();
+        fs::write(device.join("brightness"), "20").unwrap();
+        let mut provider = BacklightProvider::new(&root);
+        assert_eq!(provider.snapshot().unwrap().devices[0].percent, 0);
+        provider
+            .execute(BacklightAction::SetPercent {
+                device: "panel".into(),
+                percent: 50,
+            })
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(device.join("brightness")).unwrap(),
+            "110"
+        );
+        provider
+            .execute(BacklightAction::SetPercent {
+                device: "panel".into(),
+                percent: 100,
+            })
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(device.join("brightness")).unwrap(),
+            "200"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 }

@@ -1,10 +1,12 @@
 use crate::command::{CommandLimits, CommandRunner, CommandSpec};
 use crate::common::{timestamp_ms, ActionProvider, ActionResult, Health, Provider, SnapshotMeta};
 use crate::error::ProviderError;
+use std::thread;
 use std::time::Duration;
 
 const SNAPSHOT_LIMITS: CommandLimits = CommandLimits::new(Duration::from_secs(3), 16 * 1024);
 const ACTION_LIMITS: CommandLimits = CommandLimits::new(Duration::from_secs(5), 16 * 1024);
+const READBACK_LIMITS: CommandLimits = CommandLimits::new(Duration::from_millis(400), 1024);
 const SINK: &str = "@DEFAULT_AUDIO_SINK@";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,6 +61,34 @@ impl<R> AudioProvider<R> {
     }
 }
 
+impl<R: CommandRunner> AudioProvider<R> {
+    /// Per-observation deadline prevents ordinary 3s snapshots multiplying
+    /// into a long acknowledgement delay.
+    fn mute_readback(&mut self) -> Result<Option<bool>, ProviderError> {
+        let output = self.runner.run(
+            &CommandSpec::new("wpctl").args(["get-volume", SINK]),
+            READBACK_LIMITS,
+        )?;
+        if output.status != 0 {
+            return Err(ProviderError::backend(format!(
+                "wpctl readback exited with status {}",
+                output.status
+            )));
+        }
+        let mut tokens = output.stdout.split_whitespace();
+        while let Some(token) = tokens.next() {
+            if token == "Volume:" {
+                return Ok(tokens
+                    .next()
+                    .and_then(|value| value.parse::<f64>().ok())
+                    .filter(|value| value.is_finite() && *value >= 0.0)
+                    .map(|_| output.stdout.contains("[MUTED]")));
+            }
+        }
+        Ok(None)
+    }
+}
+
 impl<R: CommandRunner> Provider for AudioProvider<R> {
     type Snapshot = AudioSnapshot;
 
@@ -96,7 +126,7 @@ impl<R: CommandRunner> Provider for AudioProvider<R> {
         if volume_percent.is_none() && issues.is_empty() {
             issues.push("wpctl volume field missing".to_owned());
         }
-        let muted = Some(output.stdout.contains("[MUTED]"));
+        let muted = volume_percent.map(|_| output.stdout.contains("[MUTED]"));
         let health = if issues.is_empty() {
             Health::Healthy
         } else {
@@ -114,6 +144,16 @@ impl<R: CommandRunner> Provider for AudioProvider<R> {
 
 impl<R: CommandRunner> ActionProvider<AudioAction> for AudioProvider<R> {
     fn execute(&mut self, action: AudioAction) -> Result<ActionResult, ProviderError> {
+        // An explicit mute request has a measurable postcondition. In particular,
+        // volume == 0 does NOT imply mute. Capture toggle's initial state before
+        // issuing the action, so stale or out-of-order replies cannot be accepted.
+        let expected_mute = match &action {
+            AudioAction::SetMute(value) => Some(*value),
+            AudioAction::ToggleMute => Some(!self.mute_readback()?.ok_or_else(|| {
+                ProviderError::backend("cannot toggle mute without a valid current mute state")
+            })?),
+            _ => None,
+        };
         let spec = match action {
             AudioAction::SetVolume(percent) => {
                 if percent > 150 {
@@ -158,6 +198,21 @@ impl<R: CommandRunner> ActionProvider<AudioAction> for AudioProvider<R> {
                 output.status
             )));
         }
+        if let Some(expected) = expected_mute {
+            // Only acknowledge an observed state, not a successful command exit.
+            // The short bounded retries accommodate asynchronous PipeWire changes.
+            for attempt in 0..4 {
+                if self.mute_readback()? == Some(expected) {
+                    return Ok(ActionResult::executed("audio mute state verified"));
+                }
+                if attempt != 3 {
+                    thread::sleep(Duration::from_millis(40));
+                }
+            }
+            return Err(ProviderError::backend(
+                "wpctl accepted mute command but readback did not confirm requested state",
+            ));
+        }
         Ok(ActionResult::executed("audio action completed"))
     }
 }
@@ -166,6 +221,92 @@ impl<R: CommandRunner> ActionProvider<AudioAction> for AudioProvider<R> {
 mod tests {
     use super::*;
     use crate::command::{CommandOutput, FixtureCommandRunner};
+    use std::collections::VecDeque;
+
+    struct ScriptedRunner {
+        steps: VecDeque<(CommandSpec, Result<CommandOutput, ProviderError>)>,
+    }
+    impl CommandRunner for ScriptedRunner {
+        fn run(
+            &mut self,
+            spec: &CommandSpec,
+            _limits: CommandLimits,
+        ) -> Result<CommandOutput, ProviderError> {
+            let (expected, result) = self.steps.pop_front().expect("unexpected backend call");
+            assert_eq!(&expected, spec, "out-of-order backend command");
+            result
+        }
+    }
+    fn get() -> CommandSpec {
+        CommandSpec::new("wpctl").args(["get-volume", SINK])
+    }
+    fn mute(on: bool) -> CommandSpec {
+        CommandSpec::new("wpctl").args(["set-mute", SINK, if on { "1" } else { "0" }])
+    }
+    fn ok(output: &str) -> Result<CommandOutput, ProviderError> {
+        Ok(CommandOutput {
+            status: 0,
+            stdout: output.into(),
+            stderr: String::new(),
+        })
+    }
+    fn scripted(
+        steps: Vec<(CommandSpec, Result<CommandOutput, ProviderError>)>,
+    ) -> AudioProvider<ScriptedRunner> {
+        AudioProvider::new(ScriptedRunner {
+            steps: steps.into(),
+        })
+    }
+
+    #[test]
+    fn mute_waits_for_delayed_readback_and_preserves_volume() {
+        let mut provider = scripted(vec![
+            (mute(true), ok("")),
+            (get(), ok("Volume: 0.35\n")),
+            (get(), ok("Volume: 0.35 [MUTED]\n")),
+        ]);
+        assert!(
+            provider
+                .execute(AudioAction::SetMute(true))
+                .unwrap()
+                .executed
+        );
+    }
+
+    #[test]
+    fn mute_rejects_stale_readback() {
+        let mut steps = vec![(mute(true), ok(""))];
+        for _ in 0..4 {
+            steps.push((get(), ok("Volume: 0.35\n")));
+        }
+        let error = scripted(steps)
+            .execute(AudioAction::SetMute(true))
+            .unwrap_err();
+        assert!(error.diagnostic().contains("readback"));
+    }
+
+    #[test]
+    fn mute_rejects_backend_failure() {
+        let error = scripted(vec![(
+            mute(true),
+            Ok(CommandOutput {
+                status: 1,
+                stdout: String::new(),
+                stderr: "failure".into(),
+            }),
+        )])
+        .execute(AudioAction::SetMute(true))
+        .unwrap_err();
+        assert!(error.diagnostic().contains("status 1"));
+    }
+
+    #[test]
+    fn zero_volume_is_not_muted() {
+        let mut provider = scripted(vec![(get(), ok("Volume: 0.00\n"))]);
+        let snapshot = provider.snapshot().unwrap();
+        assert_eq!(snapshot.volume_percent, Some(0));
+        assert_eq!(snapshot.muted, Some(false));
+    }
 
     #[test]
     fn missing_wpctl_is_unavailable_not_fatal() {
