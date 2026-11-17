@@ -305,6 +305,7 @@ fn run(options: Options) -> Result<(), String> {
     let mut scene = None;
     let mut geometry = None;
     let mut pressed = None::<String>;
+    let mut touch_id = None::<i32>;
     loop {
         backend.blocking_dispatch().map_err(|e| e.to_string())?;
         for event in backend.drain_events().collect::<Vec<_>>() {
@@ -368,12 +369,22 @@ fn run(options: Options) -> Result<(), String> {
                     y,
                     pressed: true,
                     ..
-                }
-                | PlatformEvent::TouchDown { x, y, .. } => {
+                } => {
+                    touch_id = None;
                     pressed = scene
                         .as_ref()
                         .and_then(|s: &Scene| s.hit_test(x, y))
                         .map(str::to_owned);
+                }
+                PlatformEvent::TouchDown { id, x, y } => {
+                    // A second finger cannot steal an armed copy/save action.
+                    if touch_id.is_none() {
+                        pressed = scene
+                            .as_ref()
+                            .and_then(|s: &Scene| s.hit_test(x, y))
+                            .map(str::to_owned);
+                        touch_id = pressed.as_ref().map(|_| id);
+                    }
                 }
                 PlatformEvent::PointerButton {
                     x,
@@ -390,21 +401,23 @@ fn run(options: Options) -> Result<(), String> {
                     }
                     pressed = None;
                 }
-                PlatformEvent::TouchMotion { x, y, .. } => {
-                    // A touch dragged outside its initial row cannot activate it.
+                PlatformEvent::TouchMotion { id, x, y } if touch_id == Some(id) => {
                     if scene.as_ref().and_then(|s: &Scene| s.hit_test(x, y)) != pressed.as_deref() {
                         pressed = None;
                     }
                 }
-                PlatformEvent::TouchUp { .. } => {
-                    // TouchUp has no coordinates; touch cancellation clears selection.
+                PlatformEvent::TouchUp { id } if touch_id == Some(id) => {
+                    touch_id = None;
                     action = pressed
                         .take()
                         .as_deref()
-                        .and_then(|id| menu.item_by_id(id))
+                        .and_then(|row| menu.item_by_id(row))
                         .and_then(|item| item.action.clone());
                 }
-                PlatformEvent::TouchCancel { .. } => pressed = None,
+                PlatformEvent::TouchCancel { .. } => {
+                    pressed = None;
+                    touch_id = None;
+                }
                 _ => {}
             }
             if let Some(action) = action {

@@ -48,9 +48,12 @@ use nuraloumi_providers::{
     CpuUsage, DiskIoStats, FilesystemStats, Health, MemoryStats, NetworkIoStats, ResourceProcess,
     ResourceProvider, ResourceSnapshot, SnapshotMeta, TemperatureReading,
 };
-#[derive(Clone, Copy)]
-enum SortMode {
-    Cpu,
+/// Only actions, never status readings, may produce an activation.
+fn release_action(pressed: Option<MenuAction>, current: Option<MenuAction>) -> Option<MenuAction> {
+    match (pressed, current) {
+        (Some(a), Some(b)) if a == b => Some(a),
+        _ => None,
+    }
 }
 fn demo() -> ResourceSnapshot {
     let mut s = ResourceSnapshot {
@@ -149,30 +152,14 @@ fn rate(n: Option<u64>) -> String {
         None => "n/a".into(),
     }
 }
-fn build_model(
-    data: &ResourceSnapshot,
-    query: &str,
-    _sort: SortMode,
-    _confirmation: Option<u32>,
-    _message: &str,
-) -> MenuModel {
+fn build_model(data: &ResourceSnapshot, query: &str, message: &str) -> MenuModel {
     let mut items = Vec::new();
     let mut add = |id: String, label: String, subtitle: String| {
         if query.is_empty()
             || label.to_lowercase().contains(&query.to_lowercase())
             || subtitle.to_lowercase().contains(&query.to_lowercase())
         {
-            items.push(
-                MenuItem::action(
-                    id,
-                    label,
-                    MenuAction::Custom {
-                        kind: "noop".into(),
-                        payload: String::new(),
-                    },
-                )
-                .with_subtitle(subtitle),
-            );
+            items.push(MenuItem::status(id, label).with_subtitle(subtitle));
         }
     };
     add(
@@ -265,10 +252,32 @@ fn build_model(
     if items.is_empty() {
         items.push(MenuItem::status("empty", "No readings match filter"));
     }
+    items.insert(0, MenuItem::status("header", "Resources · live readings"));
     items.insert(
-        0,
-        MenuItem::status("header", "Resources · r refresh · q quit"),
+        1,
+        MenuItem::action(
+            "refresh",
+            "↻ Refresh [F5]",
+            MenuAction::Custom {
+                kind: "refresh".into(),
+                payload: String::new(),
+            },
+        ),
     );
+    if !query.is_empty() {
+        items.insert(2, MenuItem::status("filter", format!("Filter: {query}")));
+    }
+    items.push(MenuItem::status(
+        "footer",
+        if message.is_empty() {
+            format!(
+                "{} readings · F5 refresh · Backspace filter · Esc close",
+                data.cpu_cores.len()
+            )
+        } else {
+            message.to_owned()
+        },
+    ));
     MenuModel::new("resources", "Resources", items)
 }
 fn run_live(config: ShellConfig, args: Args) -> Result<(), String> {
@@ -278,12 +287,12 @@ fn run_live(config: ShellConfig, args: Args) -> Result<(), String> {
     }
     let mut provider = ResourceProvider::system();
     let mut data = load_data(&mut provider, args.fixture)?;
-    let sort = SortMode::Cpu;
     let mut query = String::new();
-    let mut confirmation: Option<u32> = None;
-    let message = String::new();
-    let mut model = build_model(&data, &query, sort, confirmation, &message);
+    let mut message = String::new();
+    let mut model = build_model(&data, &query, &message);
     let mut state = MenuState::new(&model);
+    let mut pressed: Option<MenuAction> = None;
+    let mut touch: Option<(i32, MenuAction)> = None;
     let output = backend.outputs().into_iter().next();
     let width = output
         .as_ref()
@@ -361,12 +370,8 @@ fn run_live(config: ShellConfig, args: Args) -> Result<(), String> {
                 }
                 WaylandEvent::Key { key, pressed: true } => match key {
                     Key::Escape => {
-                        if confirmation.take().is_some() {
-                            redraw = true
-                        } else {
-                            close_surfaces(&mut backend, surface, dismiss)?;
-                            return Ok(());
-                        }
+                        close_surfaces(&mut backend, surface, dismiss)?;
+                        return Ok(());
                     }
                     Key::Up => {
                         state.handle(&model, SemanticInput::Up);
@@ -379,25 +384,25 @@ fn run_live(config: ShellConfig, args: Args) -> Result<(), String> {
                     Key::Enter => action = selected_action(&model, &state),
                     Key::Backspace => {
                         query.pop();
-                        confirmation = None;
                         redraw = true
                     }
-                    Key::Text(ref t) if t == "q" && query.is_empty() && confirmation.is_none() => {
+                    Key::Text(ref t) if t == "q" && query.is_empty() => {
                         close_surfaces(&mut backend, surface, dismiss)?;
                         return Ok(());
                     }
                     Key::Function(5) => {
-                        data = load_data(&mut provider, args.fixture)?;
-                        redraw = true
-                    }
-                    Key::Text(ref t) if t == "r" && confirmation.is_none() => {
-                        data = load_data(&mut provider, args.fixture)?;
+                        message = match load_data(&mut provider, args.fixture) {
+                            Ok(snapshot) => {
+                                data = snapshot;
+                                "Readings updated".to_owned()
+                            }
+                            Err(e) => format!("Refresh failed; previous readings retained: {e}"),
+                        };
                         redraw = true
                     }
 
                     Key::Text(ref t) if !t.is_empty() && t.chars().all(|c| !c.is_control()) => {
                         query.push_str(t);
-                        confirmation = None;
                         redraw = true
                     }
                     _ => {}
@@ -407,19 +412,53 @@ fn run_live(config: ShellConfig, args: Args) -> Result<(), String> {
                     y,
                     pressed: true,
                     ..
+                } => {
+                    pressed = hit_action(&scene, &model, x, y);
                 }
-                | WaylandEvent::TouchDown { x, y, .. } => action = hit_action(&scene, &model, x, y),
+                WaylandEvent::PointerButton {
+                    x,
+                    y,
+                    pressed: false,
+                    ..
+                } => {
+                    action = release_action(pressed.take(), hit_action(&scene, &model, x, y));
+                }
+                WaylandEvent::TouchDown { id, x, y } => {
+                    touch = hit_action(&scene, &model, x, y).map(|a| (id, a));
+                }
+                WaylandEvent::TouchMotion { id, x, y } => {
+                    if touch.as_ref().is_some_and(|(tid, a)| {
+                        *tid == id && hit_action(&scene, &model, x, y).as_ref() != Some(a)
+                    }) {
+                        touch = None;
+                    }
+                }
+                WaylandEvent::TouchUp { id } => {
+                    if touch.as_ref().is_some_and(|(tid, _)| *tid == id) {
+                        action = touch.take().map(|(_, a)| a);
+                    }
+                }
+                WaylandEvent::TouchCancel { .. } => touch = None,
                 WaylandEvent::Close => {
                     close_surfaces(&mut backend, surface, dismiss)?;
                     return Ok(());
                 }
                 _ => {}
             }
-            if action.is_some() {
+            if let Some(MenuAction::Custom { kind, .. }) = action {
+                if kind == "refresh" {
+                    message = match load_data(&mut provider, args.fixture) {
+                        Ok(snapshot) => {
+                            data = snapshot;
+                            "Readings updated".to_owned()
+                        }
+                        Err(e) => format!("Refresh failed; previous readings retained: {e}"),
+                    };
+                }
                 redraw = true;
             }
             if redraw {
-                model = build_model(&data, &query, sort, confirmation, &message);
+                model = build_model(&data, &query, &message);
                 let previous = state.selected_id.clone();
                 state = MenuState::new(&model);
                 if let Some(id) = previous {
@@ -564,9 +603,30 @@ mod tests {
         let d = demo();
         assert_eq!(d.cpu_percent, Some(42));
         assert_eq!(d.cpu_cores.len(), 2);
-        assert!(build_model(&d, "thermal", SortMode::Cpu, None, "")
+        assert!(build_model(&d, "thermal", "")
             .item_by_id("thermal-0")
             .is_some());
+        assert!(build_model(&d, "", "")
+            .item_by_id("memory")
+            .unwrap()
+            .action
+            .is_none());
+        assert!(build_model(&d, "", "")
+            .item_by_id("refresh")
+            .unwrap()
+            .action
+            .is_some());
+    }
+    #[test]
+    fn release_requires_same_action() {
+        let action = build_model(&demo(), "", "")
+            .item_by_id("refresh")
+            .unwrap()
+            .action
+            .clone();
+        assert_eq!(release_action(action.clone(), None), None);
+        assert_eq!(release_action(None, action.clone()), None);
+        assert_eq!(release_action(action.clone(), action.clone()), action);
     }
     #[test]
     fn bars_and_rates_are_bounded() {
