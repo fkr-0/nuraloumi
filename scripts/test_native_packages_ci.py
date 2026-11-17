@@ -13,6 +13,25 @@ DEB_SCRIPT = (ROOT / "scripts/build-ci-debian-deb.sh").read_text()
 
 
 class NativePackageCiContract(unittest.TestCase):
+    def test_native_packages_ship_qol_launchers_and_user_bus_activation(self):
+        # Do not let an audited staging tar conceal missing native-package
+        # integration: both package constructors must install all launchers.
+        for script, label in ((ALPINE, "apk"), (DEB_SCRIPT, "deb")):
+            with self.subTest(package=label):
+                self.assertTrue(
+                    "share/dbus-1/services/org.freedesktop.Notifications.service" in script,
+                    "user-bus activation missing from native package",
+                )
+                self.assertIn("share/applications", script)
+                self.assertTrue(
+                    ("*.desktop" in script)
+                    or all(desktop in script for desktop in (
+                        "nuraloumi-files.desktop",
+                        "nuraloumi-file-manager.desktop",
+                        "nuraloumi-notifications.desktop",
+                    )),
+                    "QoL launchers omitted from native package")
+
     def test_alpine_prerelease_versions_use_abuild_valid_suffixes(self):
         # Exercise the exact sed conversion used by the CI packaging script,
         # not a separately reimplemented Python version mapper.

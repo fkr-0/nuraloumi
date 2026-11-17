@@ -17,6 +17,7 @@ Canonical task: `NURALOUMI-20261117-QOL-R1-14-PACKAGING-CI-20261117-9B5DBC`
 - Require their presence and validate `Exec` and `TryExec` binaries against the declared Cargo runtime bin list during `package-check`. Validate D-Bus service name, daemon path and included daemon binary.
 - Alpine APK copy recipe installs staged desktop entries and user-bus activation descriptor; no post-install service startup.
 - Isolated manifest fixture tests add missing-activation and broken-Exec failure injections, with an explicit daemon and file-manager model binary.
+- Native-package CI fixture now explicitly checks both APK and DEB install every QoL launcher and the notification activation descriptor. This deliberately fails for Debian until its separately owned script is patched.
 
 ## Verification matrix
 
@@ -25,6 +26,8 @@ Canonical task: `NURALOUMI-20261117-QOL-R1-14-PACKAGING-CI-20261117-9B5DBC`
 | Python packaging integrity + native CI fixtures | PASS, 13 tests (prior to final desktop name tightening) | `python3 -m unittest scripts.test_package_integrity scripts.test_native_packages_ci` |
 | Python packaging integrity + manifest + native CI | 17 PASS, 1 FAIL | `python3 -m unittest scripts.test_package_integrity scripts.test_package_binaries scripts.test_native_packages_ci`: parallel Lane03 untracked `notification_daemon.rs` is declared in Cargo but not tracked by Git |
 | Rust formatter | PASS at inspected state | `cargo fmt --all -- --check` |
+| Isolated xtask Rust unit tests | PASS, 12 tests | `cargo test -p nuraloumi-xtask` |
+| Strict native package CI gate | EXPECTED FAIL, Debian missing user-bus service | `python3 -m unittest scripts.test_package_integrity scripts.test_native_packages_ci`: 13 pass, 1 fail; explicit reproduction of out-of-scope DEB installation gap |
 | Workspace Cargo tests | FAIL, unrelated concurrent Lane08 | `Playlist` gained `loop_mode` while `player.rs:196` still constructs the old initializer |
 | Strict clippy | FAIL, concurrent Lane01 | `crates/nuraloumi-render-cairo/src/layout.rs:1065,1082` manual div-ceil |
 | ARMv7 ELF/NEON audit | NOT RUN | No new native ELF was produced; existing audit script and private video contract were not changed |
@@ -44,7 +47,7 @@ All three were sent through `chatgpt-ops run ... --project nuraloumi`; sending i
 
 ## Handoffs / release blockers
 
-1. Lane07: produce and register an actual full-window `nuraloumi-file-manager`, or explicitly negotiate another truthful executable/argument contract. Never substitute the compact menu silently.
+1. Lane07: produce and register an actual full-window `nuraloumi-file-manager`, or explicitly negotiate another truthful executable/argument contract. A newly observed `src/bin/file_manager_window.rs` currently exits failure when xdg_toplevel is unavailable, so registering the name alone is not sufficient. Never substitute the compact menu silently.
 2. Lane15: own the out-of-scope Debian script seam and ensure the same desktop/service paths in native DEB and APK content tests. Ensure icon assets or document a deliberate theme dependency.
 3. Lane03: confirm `nuraloumi-notificationd` name and single-owner behavior in final merged source.
 4. Rebuild and retest once concurrent source changes settle; validate true ARMv7 VFPv3-D16/no NEON on both musl and glibc artifacts, and inspect native archives rather than equating metadata with installed contents.
