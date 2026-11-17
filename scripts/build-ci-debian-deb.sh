@@ -25,7 +25,10 @@ pkg="$tmp/pkg"
 install -d "$pkg/DEBIAN" "$pkg/usr/bin" "$pkg/usr/share/applications" "$pkg/usr/share/dbus-1/services" "$pkg/usr/share/nuraloumi" "$pkg/usr/share/doc/nuraloumi"
 count=0
 for executable in "$stage"/bin/nuraloumi-*; do
-  test -f "$executable" && test -x "$executable"
+  test -f "$executable" && test -x "$executable" && test ! -L "$executable" || {
+    echo "missing or unsafe staged executable: ${executable##*/}" >&2
+    exit 1
+  }
   install -m 0755 "$executable" "$pkg/usr/bin/${executable##*/}"
   count=$((count+1))
 done

@@ -199,5 +199,18 @@ class DebianPackagePayloadSmoke(unittest.TestCase):
                     path.write_bytes(original)
 
 
+    def test_symlinked_staged_executable_fails_closed(self):
+        # -f/-x follow links; a present executable symlink is not safe input.
+        # Use an existing in-stage target so this is not a dangling-link test.
+        panel = self.stage / "bin/nuraloumi-panel"
+        panel.unlink()
+        panel.symlink_to("nuraloumi-files")
+        result = self.build()
+        self.assertNotEqual(
+            result.returncode, 0,
+            "symlinked executable was accepted into native package",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
