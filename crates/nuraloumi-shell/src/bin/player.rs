@@ -3,19 +3,17 @@
 #![allow(dead_code)]
 #[path = "../player_engine.rs"]
 mod player_engine;
-use nuraloumi_core::{
-    MenuAction, MenuItem, MenuModel, MenuState, SemanticInput, DARK_THEME, LIGHT_THEME,
+use nuraloumi_core::{MenuAction, MenuItem, MenuModel, MenuState, SemanticInput};
+use nuraloumi_render_cairo::{
+    CairoRenderer, Color, Fill, HitRegion, PaintNode, Point, Rect, RowKind, Scene, TextStyle,
+    Viewport,
 };
-use nuraloumi_render_cairo::{CairoRenderer, RenderOptions, Scene, Viewport};
-use nuraloumi_shell::{
-    dismiss_backdrop_margins, load_config_or_default, render_menu_with_glyphs, ShellConfig,
-    Theme as ShellTheme,
-};
+use nuraloumi_shell::{dismiss_backdrop_margins, load_config_or_default, ShellConfig};
 use nuraloumi_wayland::{
     BackendError, DismissBackdropConfig, Frame, Key, MenuConfig as WaylandMenuConfig, PixelFormat,
     PlatformEvent as WaylandEvent, SurfaceId, WaylandBackend,
 };
-use player_engine::{Command, Playlist, Reply, Snapshot};
+use player_engine::{Command, LoopMode, Playlist, Reply, Snapshot};
 use std::{
     collections::HashSet,
     env, fs,
@@ -32,6 +30,414 @@ struct Args {
     status: bool,
     config: Option<PathBuf>,
     fixture: bool,
+}
+// Compact player geometry is independent of the menu-row renderer. Hit
+// rectangles are the full 48px touch targets, not the smaller icon glyphs.
+fn compact_scene(viewport: Viewport, snapshot: &Snapshot, focused: Option<&str>) -> Scene {
+    let width = viewport.width;
+    let panel = Rect::new(0.0, 0.0, width, viewport.height);
+    let background = Color::rgb(24, 28, 35);
+    let raised = Color::rgb(42, 48, 60);
+    let accent = Color::rgb(108, 173, 235);
+    let foreground = Color::rgb(234, 240, 249);
+    let muted = Color::rgb(167, 178, 193);
+    let mut scene = Scene {
+        viewport,
+        menu_id: "player".into(),
+        panel_rect: panel,
+        paint: vec![PaintNode::FillRect {
+            rect: panel,
+            color: background,
+        }],
+        hits: vec![],
+        scroll: nuraloumi_render_cairo::ScrollWindow {
+            viewport: panel,
+            content_height: viewport.height,
+            offset: 0.0,
+            max_offset: 0.0,
+            clipped: false,
+        },
+    };
+    let label = |scene: &mut Scene, x: f64, y: f64, text: String, size: f64, color| {
+        scene.paint.push(PaintNode::Text {
+            origin: Point::new(x, y),
+            text,
+            style: TextStyle { size, bold: false },
+            color,
+        });
+    };
+    // The title and playback details fit 480px height without scrolling.
+    label(
+        &mut scene,
+        76.0,
+        32.0,
+        "Media player".into(),
+        20.0,
+        foreground,
+    );
+    let close = Rect::new(18.0, 4.0, 48.0, 48.0);
+    scene.paint.push(PaintNode::RoundedRect {
+        rect: close,
+        radius: 6.0,
+        fill: Fill::Solid(raised),
+        stroke: None,
+    });
+    scene.paint.push(PaintNode::Text {
+        origin: Point::new(31.0, 36.0),
+        text: "←".into(),
+        style: TextStyle {
+            size: 20.0,
+            bold: false,
+        },
+        color: foreground,
+    });
+    scene.hits.push(HitRegion {
+        item_id: "dismiss".into(),
+        rect: close,
+        actionable: true,
+        enabled: true,
+        kind: RowKind::Action,
+    });
+    // Lane 10 owns the regular toplevel. Show an inactive expand affordance
+    // instead of suggesting that a non-existent IPC action succeeded.
+    let expand = Rect::new(width - 66.0, 4.0, 48.0, 48.0);
+    scene.paint.push(PaintNode::Text {
+        origin: Point::new(expand.x + 12.0, 36.0),
+        text: "↗".into(),
+        style: TextStyle {
+            size: 20.0,
+            bold: false,
+        },
+        color: muted,
+    });
+    scene.hits.push(HitRegion {
+        item_id: "expand-unavailable".into(),
+        rect: expand,
+        actionable: false,
+        enabled: false,
+        kind: RowKind::Action,
+    });
+    let track = snapshot
+        .playlist
+        .current
+        .and_then(|i| snapshot.playlist.tracks.get(i))
+        .map(|path| basename(path))
+        .unwrap_or_else(|| "No media selected".into());
+    label(&mut scene, 18.0, 94.0, track, 18.0, foreground);
+    label(
+        &mut scene,
+        18.0,
+        122.0,
+        snapshot.status.clone(),
+        14.0,
+        muted,
+    );
+    let gap = 4.0;
+    let button_width = ((width - 36.0 - 5.0 * gap) / 6.0).max(48.0);
+    let controls = [
+        ("previous", "|◀", "Previous track"),
+        ("seek-back", "−15", "Seek back 15 seconds"),
+        ("stop", "■", "Stop"),
+        (
+            "toggle",
+            if snapshot.status == "Playing" {
+                "Ⅱ"
+            } else {
+                "▶"
+            },
+            "Play or pause",
+        ),
+        ("seek-forward", "+15", "Seek forward 15 seconds"),
+        ("next", "▶|", "Next track"),
+    ];
+    for (index, (id, symbol, _hint)) in controls.iter().enumerate() {
+        let rect = Rect::new(
+            18.0 + index as f64 * (button_width + gap),
+            148.0,
+            button_width,
+            52.0,
+        );
+        scene.paint.push(PaintNode::RoundedRect {
+            rect,
+            radius: 7.0,
+            fill: Fill::Solid(raised),
+            stroke: None,
+        });
+        scene.paint.push(PaintNode::Text {
+            origin: Point::new(rect.x + 9.0, rect.y + 33.0),
+            text: (*symbol).into(),
+            style: TextStyle {
+                size: 18.0,
+                bold: false,
+            },
+            color: foreground,
+        });
+        scene.hits.push(HitRegion {
+            item_id: (*id).into(),
+            rect,
+            actionable: true,
+            enabled: true,
+            kind: RowKind::Action,
+        });
+    }
+    let start = 18.0;
+    let bar_width = (width - 36.0).max(48.0);
+    let progress = if snapshot.duration_ms == 0 {
+        0.0
+    } else {
+        snapshot.position_ms.min(snapshot.duration_ms) as f64 / snapshot.duration_ms as f64
+    };
+    scene.paint.push(PaintNode::RoundedRect {
+        rect: Rect::new(start, 228.0, bar_width, 12.0),
+        radius: 6.0,
+        fill: Fill::Solid(raised),
+        stroke: None,
+    });
+    scene.paint.push(PaintNode::RoundedRect {
+        rect: Rect::new(start, 228.0, bar_width * progress, 12.0),
+        radius: 6.0,
+        fill: Fill::Solid(accent),
+        stroke: None,
+    });
+    scene.hits.push(HitRegion {
+        item_id: "scrub".into(),
+        rect: Rect::new(start, 210.0, bar_width, 48.0),
+        actionable: snapshot.duration_ms > 0,
+        enabled: snapshot.duration_ms > 0,
+        kind: RowKind::Action,
+    });
+    scene.paint.push(PaintNode::Text {
+        origin: Point::new(start, 282.0),
+        text: format!(
+            "{} / {}",
+            time_string(snapshot.position_ms),
+            if snapshot.duration_ms == 0 {
+                "—".into()
+            } else {
+                time_string(snapshot.duration_ms)
+            }
+        ),
+        style: TextStyle {
+            size: 15.0,
+            bold: false,
+        },
+        color: muted,
+    });
+    let loop_label = match snapshot.playlist.loop_mode {
+        LoopMode::Off => "Repeat: off",
+        LoopMode::One => "Repeat: one",
+        LoopMode::All => "Repeat: all",
+    };
+    for (i, (id, text)) in [
+        ("loop", loop_label),
+        (
+            "mute",
+            if snapshot.playlist.muted {
+                "Unmute"
+            } else {
+                "Mute"
+            },
+        ),
+        ("queue", "Playlist"),
+        ("open", "Open file"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let cols = 2.0;
+        let bw = ((width - 44.0) / cols).max(48.0);
+        let rect = Rect::new(
+            18.0 + (i % 2) as f64 * (bw + 8.0),
+            306.0 + (i / 2) as f64 * 56.0,
+            bw,
+            48.0,
+        );
+        scene.paint.push(PaintNode::RoundedRect {
+            rect,
+            radius: 6.0,
+            fill: Fill::Solid(raised),
+            stroke: None,
+        });
+        scene.paint.push(PaintNode::Text {
+            origin: Point::new(rect.x + 12.0, rect.y + 30.0),
+            text: (*text).into(),
+            style: TextStyle {
+                size: 15.0,
+                bold: false,
+            },
+            color: foreground,
+        });
+        scene.hits.push(HitRegion {
+            item_id: (*id).into(),
+            rect,
+            actionable: true,
+            enabled: true,
+            kind: RowKind::Action,
+        });
+    }
+    if let Some(error) = &snapshot.error {
+        scene.paint.push(PaintNode::Text {
+            origin: Point::new(18.0, 431.0),
+            text: format!("Error: {}", error.chars().take(48).collect::<String>()),
+            style: TextStyle {
+                size: 13.0,
+                bold: false,
+            },
+            color: Color::rgb(246, 150, 145),
+        });
+    }
+    if let Some(focused) = focused {
+        if let Some(hit) = scene.hits.iter().find(|hit| hit.item_id == focused) {
+            scene.paint.push(PaintNode::RoundedRect {
+                rect: hit.rect,
+                radius: 7.0,
+                fill: Fill::Solid(Color::rgba(0, 0, 0, 0)),
+                stroke: Some((accent, 2.0)),
+            });
+        }
+    }
+    scene
+}
+
+// A dedicated list layout keeps entries apart from actions on a 440px sheet.
+// Both queue and browser retain their original semantic menu command IDs.
+fn list_scene(
+    viewport: Viewport,
+    snapshot: &Snapshot,
+    page: &Page,
+    files: &[FileEntry],
+    focused: Option<&str>,
+) -> Scene {
+    let mut scene = compact_scene(viewport, snapshot, None);
+    scene.paint.truncate(1);
+    scene.hits.clear();
+    let fg = Color::rgb(234, 240, 249);
+    let bg = Color::rgb(42, 48, 60);
+    let accent = Color::rgb(108, 173, 235);
+    let mut add = |id: &str, label: String, rect: Rect| {
+        scene.paint.push(PaintNode::RoundedRect {
+            rect,
+            radius: 5.0,
+            fill: Fill::Solid(bg),
+            stroke: None,
+        });
+        scene.paint.push(PaintNode::Text {
+            origin: Point::new(rect.x + 8.0, rect.y + 30.0),
+            text: label,
+            style: TextStyle {
+                size: 14.0,
+                bold: false,
+            },
+            color: fg,
+        });
+        scene.hits.push(HitRegion {
+            item_id: id.into(),
+            rect,
+            actionable: true,
+            enabled: true,
+            kind: RowKind::Action,
+        });
+    };
+    let width = viewport.width;
+    let full = width - 36.0;
+    match page {
+        Page::Queue { start, selected } => {
+            add("back", "← Player".into(), Rect::new(18.0, 8.0, full, 48.0));
+            for (row, i) in (*start..(*start + 4).min(snapshot.playlist.tracks.len())).enumerate() {
+                let marker = if Some(i) == snapshot.playlist.current {
+                    "▶"
+                } else if i == *selected {
+                    "●"
+                } else {
+                    "○"
+                };
+                add(
+                    &format!("track-{i}"),
+                    format!("{marker} {}", basename(&snapshot.playlist.tracks[i])),
+                    Rect::new(18.0, 64.0 + row as f64 * 50.0, full, 48.0),
+                );
+            }
+            let controls = [
+                ("q-prevpage", "◀ Page"),
+                ("q-nextpage", "Page ▶"),
+                ("q-play", "▶ Play"),
+                ("q-up", "↑ Move"),
+                ("q-down", "↓ Move"),
+                ("q-remove", "✕ Remove"),
+                ("q-open", "+ Add"),
+            ];
+            let cell = (width - 54.0) / 3.0;
+            for (i, (id, label)) in controls.iter().enumerate() {
+                add(
+                    id,
+                    (*label).into(),
+                    Rect::new(
+                        18.0 + (i % 3) as f64 * (cell + 9.0),
+                        268.0 + (i / 3) as f64 * 52.0,
+                        cell,
+                        48.0,
+                    ),
+                );
+            }
+        }
+        Page::Files { start, .. } => {
+            add(
+                "f-back",
+                "← Player".into(),
+                Rect::new(18.0, 8.0, full, 48.0),
+            );
+            add(
+                "f-updir",
+                "↑ Parent directory".into(),
+                Rect::new(18.0, 60.0, full, 48.0),
+            );
+            for (row, i) in (*start..(*start + 4).min(files.len())).enumerate() {
+                let file = &files[i];
+                add(
+                    &format!("file-{i}"),
+                    format!(
+                        "{} {}",
+                        if file.directory { "▸" } else { "♫" },
+                        basename(&file.path.to_string_lossy())
+                    ),
+                    Rect::new(18.0, 116.0 + row as f64 * 51.0, full, 48.0),
+                );
+            }
+            let cell = (width - 44.0) / 2.0;
+            add(
+                "f-prev",
+                "◀ Previous".into(),
+                Rect::new(18.0, 330.0, cell, 48.0),
+            );
+            add(
+                "f-next",
+                "Next ▶".into(),
+                Rect::new(26.0 + cell, 330.0, cell, 48.0),
+            );
+        }
+        Page::Now => {}
+    }
+    if let Some(id) = focused {
+        if let Some(hit) = scene.hits.iter().find(|hit| hit.item_id == id) {
+            scene.paint.push(PaintNode::RoundedRect {
+                rect: hit.rect,
+                radius: 5.0,
+                fill: Fill::Solid(Color::rgba(0, 0, 0, 0)),
+                stroke: Some((accent, 2.0)),
+            });
+        }
+    }
+    scene
+}
+
+fn seek_at(snapshot: &Snapshot, x: f64, width: f64) -> Option<Command> {
+    if snapshot.duration_ms == 0 {
+        return None;
+    }
+    let fraction = ((x - 18.0) / (width - 36.0).max(48.0)).clamp(0.0, 1.0);
+    Some(Command::Seek {
+        position_ms: (fraction * snapshot.duration_ms as f64).round() as u64,
+    })
 }
 
 /// Configure the sole playback daemon for the SHA-pinned three-pass renderer,
@@ -201,6 +607,7 @@ fn fixture() -> Snapshot {
             current: Some(0),
             volume: 0.7,
             muted: false,
+            loop_mode: LoopMode::Off,
         },
         status: "Paused".into(),
         position_ms: 38_200,
@@ -344,6 +751,7 @@ fn model(s: &Snapshot, page: &Page, files: &[FileEntry]) -> MenuModel {
     let mut items = Vec::new();
     match page {
         Page::Now => {
+            items.push(action("dismiss", "← Close", "dismiss", ""));
             items.push(MenuItem::status("now-title", "Now playing"));
             let title = s
                 .playlist
@@ -355,7 +763,11 @@ fn model(s: &Snapshot, page: &Page, files: &[FileEntry]) -> MenuModel {
                 "{} · {} / {}",
                 s.status,
                 time_string(s.position_ms),
-                time_string(s.duration_ms)
+                if s.duration_ms == 0 {
+                    "—".into()
+                } else {
+                    time_string(s.duration_ms)
+                }
             )));
             if let Some(error) = &s.error {
                 items.push(MenuItem::status(
@@ -376,8 +788,10 @@ fn model(s: &Snapshot, page: &Page, files: &[FileEntry]) -> MenuModel {
             ));
             items.push(action("stop", "■ Stop", "stop", ""));
             items.push(action("next", "⏭ Next", "next", ""));
-            items.push(action("seek-back", "↶ Seek −10s", "seek_back", ""));
-            items.push(action("seek-forward", "↷ Seek +10s", "seek_forward", ""));
+            items.push(action("seek-back", "↶ Seek −15s", "seek_back", ""));
+            items.push(action("seek-forward", "↷ Seek +15s", "seek_forward", ""));
+            items.push(action("scrub", "Seek position", "scrub", ""));
+            items.push(action("loop", "Repeat mode", "loop", ""));
             items.push(action("volume-down", "− Volume", "volume_down", ""));
             items.push(action(
                 "volume-up",
@@ -406,7 +820,7 @@ fn model(s: &Snapshot, page: &Page, files: &[FileEntry]) -> MenuModel {
         Page::Queue { start, selected } => {
             items.push(MenuItem::status("queue-head", "Ordered playlist"));
             items.push(action("back", "← Player", "home", ""));
-            let end = (start + 7).min(s.playlist.tracks.len());
+            let end = (start + 4).min(s.playlist.tracks.len());
             for i in *start..end {
                 let marker = if Some(i) == s.playlist.current {
                     "▶"
@@ -456,7 +870,7 @@ fn model(s: &Snapshot, page: &Page, files: &[FileEntry]) -> MenuModel {
             }));
             items.push(action("f-back", "← Player", "home", ""));
             items.push(action("f-updir", "↑ Parent directory", "parent_dir", ""));
-            let end = (start + 8).min(files.len());
+            let end = (start + 4).min(files.len());
             for (i, entry) in files.iter().enumerate().take(end).skip(*start) {
                 let name = entry.path.file_name().unwrap_or_default().to_string_lossy();
                 items.push(action(
@@ -481,29 +895,32 @@ fn draw(
     backend: &mut WaylandBackend,
     surface: SurfaceId,
     renderer: &CairoRenderer,
-    config: &ShellConfig,
-    model: &MenuModel,
+    _config: &ShellConfig,
+    _model: &MenuModel,
     state: &MenuState,
+    snapshot: &Snapshot,
+    page: &Page,
+    files: &[FileEntry],
     width: u32,
     height: u32,
     scale: i32,
 ) -> Result<Scene, String> {
-    let tokens = match config.theme {
-        ShellTheme::Dark => &DARK_THEME,
-        ShellTheme::Light => &LIGHT_THEME,
-    };
     let viewport = Viewport::new(width as f64, height as f64, f64::from(scale.max(1)));
-    let (scene, mut buffer) = render_menu_with_glyphs(
-        renderer,
-        model,
-        state,
-        viewport,
-        tokens,
-        RenderOptions::default(),
-        None,
-        None,
-    )
-    .map_err(|e| format!("render: {e}"))?;
+    let (scene, mut buffer) = if matches!(page, Page::Now) {
+        let compact = compact_scene(viewport, snapshot, state.selected_id.as_deref());
+        let rendered = renderer.render_scene(&compact).map_err(|e| e.to_string())?;
+        (compact, rendered)
+    } else {
+        let list = list_scene(
+            viewport,
+            snapshot,
+            page,
+            files,
+            state.selected_id.as_deref(),
+        );
+        let buffer = renderer.render_scene(&list).map_err(|e| e.to_string())?;
+        (list, buffer)
+    };
     let info = buffer.info();
     let (w, h, stride) = (info.width as u32, info.height as u32, info.stride as usize);
     let result = buffer
@@ -610,14 +1027,14 @@ fn handle_action(
         }
         "files_prevpage" => {
             if let Page::Files { start, .. } = page {
-                *start = start.saturating_sub(8);
+                *start = start.saturating_sub(4);
             }
             return;
         }
         "files_nextpage" => {
             if let Page::Files { start, .. } = page {
-                if *start + 8 < files.len() {
-                    *start += 8;
+                if *start + 4 < files.len() {
+                    *start += 4;
                 }
             }
             return;
@@ -650,14 +1067,14 @@ fn handle_action(
         }
         "queue_prevpage" => {
             if let Page::Queue { start, .. } = page {
-                *start = start.saturating_sub(7);
+                *start = start.saturating_sub(4);
             }
             return;
         }
         "queue_nextpage" => {
             if let Page::Queue { start, .. } = page {
-                if *start + 7 < snapshot.playlist.tracks.len() {
-                    *start += 7;
+                if *start + 4 < snapshot.playlist.tracks.len() {
+                    *start += 4;
                 }
             }
             return;
@@ -707,14 +1124,23 @@ fn handle_action(
         "stop" => Some(Command::Stop),
         "next" => Some(Command::Next),
         "seek_back" => Some(Command::Seek {
-            position_ms: snapshot.position_ms.saturating_sub(10_000),
+            position_ms: snapshot.position_ms.saturating_sub(15_000),
         }),
         "seek_forward" => Some(Command::Seek {
-            position_ms: (snapshot.position_ms + 10_000).min(if snapshot.duration_ms > 0 {
-                snapshot.duration_ms
-            } else {
-                snapshot.position_ms + 10_000
-            }),
+            position_ms: snapshot.position_ms.saturating_add(15_000).min(
+                if snapshot.duration_ms > 0 {
+                    snapshot.duration_ms
+                } else {
+                    snapshot.position_ms.saturating_add(15_000)
+                },
+            ),
+        }),
+        "loop" => Some(Command::LoopMode {
+            mode: match snapshot.playlist.loop_mode {
+                LoopMode::Off => LoopMode::One,
+                LoopMode::One => LoopMode::All,
+                LoopMode::All => LoopMode::Off,
+            },
         }),
         "volume_down" => Some(Command::Volume {
             level: ((snapshot.playlist.volume * 10.0).round() - 1.0).max(0.0) / 10.0,
@@ -754,7 +1180,7 @@ fn run(config: ShellConfig, mut snap: Snapshot, fixture_mode: bool) -> Result<()
     let surface = backend
         .create_menu(WaylandMenuConfig {
             width: config.menu_width.min(550),
-            height: 690,
+            height: 440,
             margin_top: config.panel_height as i32,
             margin_left: 0,
             output: output.as_ref().map(|o| o.id),
@@ -768,6 +1194,7 @@ fn run(config: ShellConfig, mut snap: Snapshot, fixture_mode: bool) -> Result<()
     let mut state = MenuState::new(&menu);
     let mut scene: Option<Scene> = None;
     let mut pointer_down: Option<String> = None;
+    let mut pointer_seek: Option<f64> = None;
     let mut touch = TouchActivation::default();
     let mut dirty = true;
     let mut ticks = 0u64;
@@ -830,6 +1257,24 @@ fn run(config: ShellConfig, mut snap: Snapshot, fixture_mode: bool) -> Result<()
                         page = Page::Now;
                         dirty = true;
                     }
+                    Key::Left => {
+                        requested = Some(MenuAction::Custom {
+                            kind: "seek_back".into(),
+                            payload: String::new(),
+                        })
+                    }
+                    Key::Right => {
+                        requested = Some(MenuAction::Custom {
+                            kind: "seek_forward".into(),
+                            payload: String::new(),
+                        })
+                    }
+                    Key::Text(t) if t == "l" => {
+                        requested = Some(MenuAction::Custom {
+                            kind: "loop".into(),
+                            payload: String::new(),
+                        })
+                    }
                     Key::Up => {
                         state.handle(&menu, SemanticInput::Up);
                         dirty = true;
@@ -891,8 +1336,21 @@ fn run(config: ShellConfig, mut snap: Snapshot, fixture_mode: bool) -> Result<()
                         .map(str::to_owned);
                     if pressed {
                         pointer_down = at;
+                        pointer_seek = if pointer_down.as_deref() == Some("scrub") {
+                            Some(x)
+                        } else {
+                            None
+                        };
                     } else {
-                        if pointer_down.is_some() && pointer_down == at {
+                        if pointer_seek.take().is_some() && pointer_down.as_deref() == Some("scrub")
+                        {
+                            if let Some(command) =
+                                seek_at(&snap, x, geometry.map_or(0.0, |g| g.0 as f64))
+                            {
+                                send_and_update(command, &mut snap, fixture_mode);
+                                dirty = true;
+                            }
+                        } else if pointer_down.is_some() && pointer_down == at {
                             requested = at
                                 .as_deref()
                                 .and_then(|key| menu.item_by_id(key))
@@ -914,7 +1372,14 @@ fn run(config: ShellConfig, mut snap: Snapshot, fixture_mode: bool) -> Result<()
                 WaylandEvent::TouchUp { id } => {
                     if let Some((selected, x, y)) = touch.up(id) {
                         let released = scene.as_ref().and_then(|s| s.hit_test(x, y));
-                        if Some(selected.as_str()) == released {
+                        if selected == "scrub" {
+                            if let Some(command) =
+                                seek_at(&snap, x, geometry.map_or(0.0, |g| g.0 as f64))
+                            {
+                                send_and_update(command, &mut snap, fixture_mode);
+                                dirty = true;
+                            }
+                        } else if Some(selected.as_str()) == released {
                             requested = released
                                 .and_then(|key| menu.item_by_id(key))
                                 .and_then(|item| item.action.clone());
@@ -925,6 +1390,9 @@ fn run(config: ShellConfig, mut snap: Snapshot, fixture_mode: bool) -> Result<()
                 _ => {}
             }
             if let Some(action) = requested {
+                if matches!(&action, MenuAction::Custom { kind, .. } if kind == "dismiss") {
+                    return Ok(());
+                }
                 let files = match &page {
                     Page::Files { dir, .. } => browse_entries(dir),
                     _ => Vec::new(),
@@ -969,6 +1437,9 @@ fn run(config: ShellConfig, mut snap: Snapshot, fixture_mode: bool) -> Result<()
                     &config,
                     &menu,
                     &state,
+                    &snap,
+                    &page,
+                    &files,
                     w,
                     h,
                     s,
@@ -1030,6 +1501,67 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn compact_transport_hitboxes_are_disjoint_and_touch_sized() {
+        for width in [360.0, 480.0, 550.0] {
+            let scene = compact_scene(Viewport::new(width, 440.0, 1.0), &fixture(), None);
+            let ids = [
+                "previous",
+                "seek-back",
+                "stop",
+                "toggle",
+                "seek-forward",
+                "next",
+            ];
+            let mut previous_right = 0.0;
+            for id in ids {
+                let rect = scene
+                    .hits
+                    .iter()
+                    .find(|hit| hit.item_id == id)
+                    .unwrap()
+                    .rect;
+                assert!(rect.width >= 48.0 && rect.height >= 48.0);
+                assert!(rect.x >= previous_right);
+                assert!(rect.right() <= width);
+                assert_eq!(scene.hit_test(rect.x + 4.0, rect.y + 4.0), Some(id));
+                previous_right = rect.right();
+            }
+        }
+    }
+    #[test]
+    fn scrubber_clamps_extremes_and_blocks_unknown_duration() {
+        let mut s = fixture();
+        assert_eq!(
+            seek_at(&s, -999.0, 480.0),
+            Some(Command::Seek { position_ms: 0 })
+        );
+        assert_eq!(
+            seek_at(&s, 9999.0, 480.0),
+            Some(Command::Seek {
+                position_ms: 224_000
+            })
+        );
+        s.duration_ms = 0;
+        assert!(seek_at(&s, 100.0, 480.0).is_none());
+        assert_eq!(
+            compact_scene(Viewport::new(480.0, 440.0, 1.0), &s, None).hit_test(50.0, 230.0),
+            None
+        );
+    }
+    #[test]
+    fn repeat_control_starts_off_and_remains_touch_accessible() {
+        let mut s = fixture();
+        for mode in [LoopMode::Off, LoopMode::One, LoopMode::All] {
+            s.playlist.loop_mode = mode;
+            let scene = compact_scene(Viewport::new(480.0, 440.0, 1.0), &s, None);
+            let hit = scene.hits.iter().find(|hit| hit.item_id == "loop").unwrap();
+            assert_eq!(
+                scene.hit_test(hit.rect.x + 8.0, hit.rect.y + 8.0),
+                Some("loop")
+            );
+        }
+    }
     #[test]
     fn browser_filters_extension_and_unknown_files() {
         assert!(media_extension(Path::new("/music/demo.opus")));
