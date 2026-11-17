@@ -4,6 +4,30 @@ All notable user-visible changes to NuraLoumi are recorded here.
 
 ## [Unreleased]
 
+## [0.0.8-rc.1] - 2026-11-17
+
+### Fixed
+
+- Panel pointer, touch, and keyboard pressed-state feedback now commits a
+  Cairo/wl_shm frame before the panel's early input-event return. Existing
+  bounded 120-ms release fade and reduced-motion behavior remain unchanged.
+- Packaging explicitly excludes the full file-manager/player xdg_toplevel
+  entrypoint stubs, which deliberately fail closed until real managed windows
+  are implemented, instead of falsely shipping them as finished applications.
+- Alpine APK signing exports a canonical public key, verifies against it, and
+  supports a SHA-256-pinned external persistent RSA release key.
+
+### Qualification boundary
+
+- Host Rust workspace, format, clippy and full Python-script suite gates pass.
+- A real SL101 0.0.7-dev.1 notify-send D-Bus activation smoke succeeded;
+  this does not certify the uninstalled 0.0.8 release candidate.
+- The RC is not a stable 0.0.8 release: new-version on-device UI, player/video
+  E2E, and migration from /opt manually installed runtime to apk-managed /usr
+  executables still need qualification.
+- No installation, compositor replacement, key-trust enrollment, or kernel/OS
+  modifications are authorized by packaging tests.
+
 ## [0.0.7-dev.1] - 2026-11-14
 
 ### Changed

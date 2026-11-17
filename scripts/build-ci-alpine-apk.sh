@@ -107,8 +107,8 @@ PUBLIC_KEY_SHA256=$(sha256sum "$out/$public_key_filename" | cut -d' ' -f1)
 The private signing key is never included in the published artifact.
 If signing_mode=ephemeral-ci-development-only the private key is destroyed
 with this container and is NOT a trusted production identity.
-If signing_mode=protected-release this package was signed using a pinned
-GitHub Actions release secret and the public-key fingerprint above.
+If signing_mode=protected-release this package was signed using an
+externally mounted, SHA-256-pinned release key and the fingerprint above.
 Never automatically enroll new keys in the device's /etc/apk/keys or
 use --allow-untrusted in a deployment script.
 EOF

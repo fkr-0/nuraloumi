@@ -610,7 +610,7 @@ dependencies = [
 
 [[package]]
 name = "nuraloumi-core"
-version = "0.0.7-dev.1"
+version = "0.0.8-rc.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -618,7 +618,7 @@ dependencies = [
 
 [[package]]
 name = "nuraloumi-providers"
-version = "0.0.7-dev.1"
+version = "0.0.8-rc.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -627,7 +627,7 @@ dependencies = [
 
 [[package]]
 name = "nuraloumi-render-cairo"
-version = "0.0.7-dev.1"
+version = "0.0.8-rc.1"
 dependencies = [
  "cairo-rs",
  "nuraloumi-core",
@@ -635,7 +635,7 @@ dependencies = [
 
 [[package]]
 name = "nuraloumi-shell"
-version = "0.0.7-dev.1"
+version = "0.0.8-rc.1"
 dependencies = [
  "cairo-rs",
  "jpeg-decoder",
@@ -654,7 +654,7 @@ dependencies = [
 
 [[package]]
 name = "nuraloumi-wayland"
-version = "0.0.7-dev.1"
+version = "0.0.8-rc.1"
 dependencies = [
  "memmap2",
  "rustix",
@@ -666,7 +666,7 @@ dependencies = [
 
 [[package]]
 name = "nuraloumi-xtask"
-version = "0.0.7-dev.1"
+version = "0.0.8-rc.1"
 
 [[package]]
 name = "once_cell"
