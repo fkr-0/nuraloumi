@@ -418,8 +418,7 @@ pub fn check_package(root: &Path, stage: &Path) -> Result<(), String> {
             return Err(format!("runtime binary is not ELF: {name}"));
         }
     }
-    // Desktop entries must not point to tools omitted from the runtime bundle.
-    // D-Bus activation is only a service descriptor: no autostart or competing owner.
+    // Desktop entries cannot point at tools missing from the runtime bundle.
     for desktop in [
         "nuraloumi-player.desktop",
         "nuraloumi-files.desktop",
@@ -428,11 +427,23 @@ pub fn check_package(root: &Path, stage: &Path) -> Result<(), String> {
     ] {
         let contents = fs::read_to_string(stage.join("share/applications").join(desktop))
             .map_err(|error| format!("read desktop {desktop}: {error}"))?;
+        if !contents.lines().any(|line| line == "[Desktop Entry]")
+            || !contents.lines().any(|line| line == "Type=Application")
+        {
+            return Err(format!(
+                "{desktop} missing Desktop Entry application section"
+            ));
+        }
         for key in ["Exec", "TryExec"] {
-            let value = contents
+            let mut matches = contents
                 .lines()
-                .find_map(|line| line.strip_prefix(&format!("{key}=")))
+                .filter_map(|line| line.strip_prefix(&format!("{key}=")));
+            let value = matches
+                .next()
                 .ok_or_else(|| format!("{desktop} missing {key}"))?;
+            if matches.next().is_some() {
+                return Err(format!("{desktop} duplicate {key}"));
+            }
             let executable = value
                 .split_whitespace()
                 .next()
@@ -444,16 +455,22 @@ pub fn check_package(root: &Path, stage: &Path) -> Result<(), String> {
             }
         }
     }
+    // Only a single, exact user-bus activation entry. Never autostart or
+    // advertise a second competing notification owner.
     let service = fs::read_to_string(
         stage.join("share/dbus-1/services/org.freedesktop.Notifications.service"),
     )
     .map_err(|error| format!("read notification activation: {error}"))?;
-    if !service
+    let lines: Vec<_> = service
         .lines()
-        .any(|line| line == "Name=org.freedesktop.Notifications")
-        || !service
-            .lines()
-            .any(|line| line == "Exec=/usr/bin/nuraloumi-notificationd")
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    if lines
+        != [
+            "[D-BUS Service]",
+            "Name=org.freedesktop.Notifications",
+            "Exec=/usr/bin/nuraloumi-notificationd",
+        ]
         || !bins.iter().any(|bin| bin == "nuraloumi-notificationd")
     {
         return Err("notification activation must reference the packaged daemon".into());

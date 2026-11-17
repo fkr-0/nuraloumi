@@ -142,6 +142,23 @@ class PackageIntegrityTests(unittest.TestCase):
         (self.stage / name).unlink()
         self.assertNotEqual(self.verify().returncode, 0)
 
+    def test_activation_missing_section_rejected_even_with_valid_name_exec(self):
+        name = "share/dbus-1/services/org.freedesktop.Notifications.service"
+        self.payloads[name] = (
+            b"Name=org.freedesktop.Notifications\n"
+            b"Exec=/usr/bin/nuraloumi-notificationd\n"
+        )
+        (self.stage / name).write_bytes(self.payloads[name])
+        self.manifest()
+        self.assertIn("notification activation", self.verify().stderr)
+
+    def test_duplicate_exec_in_desktop_rejected(self):
+        name = "share/applications/nuraloumi-files.desktop"
+        self.payloads[name] += b"Exec=missing-helper\n"
+        (self.stage / name).write_bytes(self.payloads[name])
+        self.manifest()
+        self.assertIn("duplicate Exec", self.verify().stderr)
+
     def test_missing_binary_rejected(self):
         (self.stage / "bin" / self.names[0]).unlink()
         self.assertNotEqual(self.verify().returncode, 0)

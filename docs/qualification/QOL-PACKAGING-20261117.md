@@ -16,7 +16,7 @@ Canonical task: `NURALOUMI-20261117-QOL-R1-14-PACKAGING-CI-20261117-9B5DBC`
 - Stage four explicit desktop entries plus `share/dbus-1/services/org.freedesktop.Notifications.service` in the deterministic tar manifest.
 - Require their presence and validate `Exec` and `TryExec` binaries against the declared Cargo runtime bin list during `package-check`. Validate D-Bus service name, daemon path and included daemon binary.
 - Alpine APK copy recipe installs staged desktop entries and user-bus activation descriptor; no post-install service startup.
-- Isolated manifest fixture tests add missing-activation and broken-Exec failure injections, with an explicit daemon and file-manager model binary.
+- Isolated manifest fixture tests add missing-activation, missing desktop section, duplicate Exec and broken-Exec failure injections, with an explicit daemon and file-manager model binary. The activation descriptor parser now rejects duplicate/extra fields and missing [D-BUS Service] section.
 - Native-package CI fixture now explicitly checks both APK and DEB install every QoL launcher and the notification activation descriptor. This deliberately fails for Debian until its separately owned script is patched.
 
 ## Verification matrix
@@ -33,7 +33,7 @@ Canonical task: `NURALOUMI-20261117-QOL-R1-14-PACKAGING-CI-20261117-9B5DBC`
 | ARMv7 ELF/NEON audit | NOT RUN | No new native ELF was produced; existing audit script and private video contract were not changed |
 | Actual APK and DEB content | NOT VERIFIED | No native container build or remote CI run permitted |
 | Real notification bus / SL101 deployment | NOT VERIFIED | Local-only boundary |
-| Re-run tests after final desktop tightening | PENDING | Workspace execution rejected: 4 active process sessions, capacity reached |
+| Re-run tests after final desktop and D-Bus strictness | PENDING | Workspace execution rejected again: 4 active process sessions, capacity reached; earlier isolated 8/8 and xtask 12/12 green do not prove the final edit |
 
 The test source-only fixture models an available full file manager, but current repository Cargo metadata does not yet provide it. Thus the final release gate is **blocked**, not implicitly qualified. The per-file hash-integrity check and ELF-header check remain in place; no private Grate/GStreamer ABI paths were altered.
 
@@ -43,7 +43,7 @@ The test source-only fixture models an available full file manager, but current 
 - `prompts/20261117-qol-r1-14-dbus-owner-verify.md`: notification activation/duplicate-owner policy
 - `prompts/20261117-qol-r1-14-debian-seam-verify.md`: Debian copy seam, full window and assets
 
-All three were sent through `chatgpt-ops run ... --project nuraloumi`; sending is not completion. Wait for exact OCP checkpoint/test evidence before treating independent review as accepted.
+All three were sent through `chatgpt-ops run ... --project nuraloumi`; sending is not completion. The D-Bus-owner child subsequently completed with 8/8 fixture tests and a source-level owner audit in `docs/qualification/DBUS-OWNER-AUDIT-20261117-CAB21B.md` (not a live bus test). The APK and Debian child reviews were still running at this record's last observation. Wait for their exact OCP checkpoint/test evidence before treating independent review as accepted.
 
 ## Handoffs / release blockers
 
