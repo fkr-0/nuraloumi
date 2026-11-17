@@ -1689,9 +1689,20 @@ fn clear_surface_input_routes(state: &mut BackendState, id: SurfaceId) {
         .iter()
         .filter_map(|(touch_id, surface_id)| (*surface_id == id).then_some(*touch_id))
         .collect();
-    for touch_id in touch_ids {
-        state.touch_surfaces.remove(&touch_id);
-        state.active_touches.remove(&touch_id);
+    for touch_id in &touch_ids {
+        state.touch_surfaces.remove(touch_id);
+        state.active_touches.remove(touch_id);
+    }
+    // A destroyed layer surface cannot receive wl_touch.up. Tell the shell
+    // explicitly to cancel gestures anchored on it, without cancelling
+    // contacts belonging to other still-live surfaces.
+    if !touch_ids.is_empty() {
+        let mut ids = touch_ids;
+        ids.sort_unstable();
+        state.events.push_back(BackendEvent {
+            surface: Some(id),
+            event: PlatformEvent::TouchCancel { ids },
+        });
     }
 }
 
@@ -1967,6 +1978,38 @@ mod tests {
         assert_eq!(state.keyboard_surface, None);
         assert_eq!(state.touch_surfaces, HashMap::from([(8, live)]));
         assert_eq!(state.active_touches, BTreeSet::from([8]));
+        assert_eq!(
+            state.events.pop_front(),
+            Some(BackendEvent {
+                surface: Some(dead),
+                event: PlatformEvent::TouchCancel { ids: vec![3] },
+            })
+        );
+        assert!(state.events.is_empty());
+    }
+
+    #[test]
+    fn destroyed_surface_cancels_only_its_contacts_in_stable_order() {
+        let dead = SurfaceId(1);
+        let live = SurfaceId(2);
+        let mut state = BackendState {
+            touch_surfaces: HashMap::from([(12, dead), (2, live), (5, dead)]),
+            active_touches: BTreeSet::from([2, 5, 12]),
+            ..BackendState::default()
+        };
+        clear_surface_input_routes(&mut state, dead);
+        assert_eq!(state.active_touches, BTreeSet::from([2]));
+        assert_eq!(state.touch_surfaces, HashMap::from([(2, live)]));
+        assert_eq!(
+            state.events.pop_front(),
+            Some(BackendEvent {
+                surface: Some(dead),
+                event: PlatformEvent::TouchCancel { ids: vec![5, 12] },
+            })
+        );
+        assert!(state.events.is_empty());
+        clear_surface_input_routes(&mut state, dead);
+        assert!(state.events.is_empty());
     }
 
     #[test]
