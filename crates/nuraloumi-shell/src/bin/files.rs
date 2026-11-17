@@ -355,6 +355,7 @@ struct Ui {
     browser: Browser,
     selected: Option<usize>,
     page: usize,
+    ranger: bool,
     mode: Mode,
     pinned_app: Option<String>,
     ops: Option<Box<dyn FileOps>>,
@@ -393,6 +394,7 @@ impl Ui {
             selected: (!browser.entries.is_empty()).then_some(0),
             browser,
             page: 0,
+            ranger: false,
             mode: Mode::Normal,
             pinned_app: options.open_with.clone(),
             ops: Some(ops),
@@ -423,6 +425,16 @@ impl Ui {
     fn page_count(size: usize) -> usize {
         size.saturating_sub(1) / PAGE_ROWS + 1
     }
+    // Presentation-only truncation: selection and file operations retain full Entry identity.
+    fn compact_label(value: &str, max_chars: usize) -> String {
+        let mut chars = value.chars();
+        let shortened: String = chars.by_ref().take(max_chars).collect();
+        if chars.next().is_some() {
+            format!("{shortened}…")
+        } else {
+            shortened
+        }
+    }
     fn page_label(&self) -> String {
         format!(
             "Batch {} · Page {}/{} | {} visible{}",
@@ -438,24 +450,63 @@ impl Ui {
         )
     }
     fn menu(&self) -> MenuModel {
-        let mut items =
-            vec![
-                MenuItem::status("location", self.browser.current.display().to_string())
-                    .with_subtitle(self.browser.message.clone()),
-            ];
+        let mut items = if self.mode == Mode::Normal {
+            vec![MenuItem::action(
+                "parent",
+                format!(
+                    "↑  {}",
+                    Self::compact_label(&self.browser.current.display().to_string(), 48)
+                ),
+                action("parent", ""),
+            )]
+        } else {
+            vec![MenuItem::status(
+                "location",
+                self.browser.current.display().to_string(),
+            )]
+        };
         match &self.mode {
             Mode::Normal => {
                 items.push(MenuItem::action(
-                    "parent",
-                    "..  Parent / Back",
-                    action("parent", ""),
+                    "view-mode",
+                    if self.ranger {
+                        "▤ Compact view"
+                    } else {
+                        "▥ Ranger view"
+                    },
+                    action("view-mode", ""),
                 ));
-                items.push(MenuItem::status("page-info", self.page_label()));
-                if self.page > 0 || self.browser.has_previous_batch() {
-                    items.push(MenuItem::action(
-                        "prev",
-                        "◀ Previous page",
-                        action("page-prev", ""),
+                if self.ranger {
+                    let parent = self
+                        .browser
+                        .current
+                        .parent()
+                        .unwrap_or(&self.browser.current);
+                    let preview = self
+                        .selected_entry()
+                        .map(|e| {
+                            if e.directory {
+                                format!("{}/", e.name)
+                            } else {
+                                format!("{} ({} B)", e.name, e.len)
+                            }
+                        })
+                        .unwrap_or_else(|| "(empty)".into());
+                    items.push(MenuItem::status(
+                        "ranger-columns",
+                        format!(
+                            "Parent: {}  │  Current: {}  │  Preview: {}",
+                            parent
+                                .file_name()
+                                .unwrap_or(parent.as_os_str())
+                                .to_string_lossy(),
+                            self.browser
+                                .current
+                                .file_name()
+                                .unwrap_or(self.browser.current.as_os_str())
+                                .to_string_lossy(),
+                            preview,
+                        ),
                     ));
                 }
                 let start = self.page * PAGE_ROWS;
@@ -472,7 +523,11 @@ impl Ui {
                     } else {
                         "  "
                     };
-                    let name = format!("{marker}{}{}", e.name, if e.directory { "/" } else { "" });
+                    let name = format!(
+                        "{marker}{}{}",
+                        Self::compact_label(&e.name, 42),
+                        if e.directory { "/" } else { "" }
+                    );
                     let desc = if e.directory {
                         "Directory".to_string()
                     } else {
@@ -493,40 +548,25 @@ impl Ui {
                         "Empty directory / no safe visible files",
                     ));
                 }
-                if (self.page + 1) * PAGE_ROWS < self.browser.entries.len() || self.browser.has_more
-                {
-                    items.push(MenuItem::action(
-                        "next",
-                        "Next page ▶",
-                        action("page-next", ""),
-                    ));
-                }
-                let selected = self
-                    .selected_entry()
-                    .map(|e| {
-                        format!(
-                            "{} | {} | {} bytes",
-                            e.name,
-                            if e.directory { "directory" } else { "file" },
-                            e.len
-                        )
-                    })
-                    .unwrap_or_else(|| "No entry selected".into());
+                items.push(MenuItem::action("prev", "← Prev", action("page-prev", "")));
+                items.push(MenuItem::action("next", "Next →", action("page-next", "")));
                 items.push(MenuItem::status(
-                    "selection",
-                    format!("Selected: {selected}"),
+                    "status-line",
+                    format!(
+                        "{} │ {} in batch / {} scanned │ {}",
+                        self.page_label(),
+                        self.browser.entries.len(),
+                        self.browser.scanned,
+                        Self::compact_label(&self.browser.message, 36),
+                    ),
                 ));
-                items.push(MenuItem::action("open", "Enter / Open", action("open", "")));
+                items.push(MenuItem::action("open", "Open ↵", action("open", "")));
                 items.push(MenuItem::action(
                     "open-with",
-                    "O / Open With…",
+                    "Open With…",
                     action("open-with", ""),
                 ));
-                items.push(MenuItem::action(
-                    "manage",
-                    "Actions / Refresh / Manage…",
-                    action("manage", ""),
-                ));
+                items.push(MenuItem::action("manage", "Manage…", action("manage", "")));
             }
             Mode::Actions => {
                 let selected = self
@@ -695,7 +735,7 @@ impl Ui {
                 items.push(MenuItem::action("cancel", "Cancel", action("cancel", "")));
             }
         }
-        MenuModel::new("files", "NuraLoumi Files", items)
+        MenuModel::new("files", "Files", items)
     }
     fn state(&self, menu: &MenuModel) -> MenuState {
         let mut state = MenuState::new(menu);
@@ -1172,6 +1212,7 @@ impl Ui {
                 self.mode = Mode::Normal;
                 self.modal_focus = 0;
             }
+            "view-mode" if self.mode == Mode::Normal => self.ranger = !self.ranger,
             "manage" if self.mode == Mode::Normal => {
                 self.mode = Mode::Actions;
                 self.modal_focus = 0;
@@ -1255,6 +1296,7 @@ impl Ui {
             KeyIntent::Delete => action = Some(action_fn("delete", "")),
             KeyIntent::Chooser => action = Some(action_fn("open-with", "")),
             KeyIntent::Refresh => action = Some(action_fn("refresh", "")),
+            KeyIntent::ToggleView => action = Some(action_fn("view-mode", "")),
             KeyIntent::None => return KeyAction::NoChange,
         }
         if let Some(action) = action {
@@ -1327,6 +1369,7 @@ enum KeyIntent {
     Delete,
     Chooser,
     Refresh,
+    ToggleView,
     Text(String),
     Erase,
 }
@@ -1370,6 +1413,9 @@ fn key_intent(key: &Key, mode: &Mode) -> KeyIntent {
             "d" | "D" => KeyIntent::Delete,
             "o" | "O" => KeyIntent::Chooser,
             "u" | "U" => KeyIntent::Refresh,
+            "h" | "H" => KeyIntent::Back,
+            "l" | "L" => KeyIntent::Activate,
+            "v" | "V" => KeyIntent::ToggleView,
             _ => KeyIntent::None,
         },
         _ => KeyIntent::None,
@@ -1778,6 +1824,103 @@ mod tests {
         );
         assert!(parse(vec!["--open-with".into(), "../../malicious.desktop".into()]).is_err());
     }
+    #[test]
+    fn compact_and_ranger_views_preserve_selection_identity() {
+        let root = temp();
+        for idx in 0..9 {
+            fs::write(root.join(format!("{idx:02}.txt")), "data").unwrap();
+        }
+        let mut ui = Ui::with_ops(
+            &opts(root.clone()),
+            fake(
+                OpenOutcome::NeedsFallback {
+                    reason: "none".into(),
+                },
+                vec![],
+            ),
+        )
+        .unwrap();
+        ui.change_selection(8);
+        let snapshot = ui.selected_snapshot().unwrap();
+        assert_eq!(ui.page, 2);
+        ui.on_key(Key::Text("v".into()));
+        assert!(ui.ranger);
+        assert!(ui.menu().item_by_id("ranger-columns").is_some());
+        assert_eq!(ui.selected_snapshot().unwrap(), snapshot);
+        ui.on_key(Key::Text("v".into()));
+        assert!(!ui.ranger);
+        assert_eq!(ui.selected_snapshot().unwrap(), snapshot);
+        ui.change_page(-1);
+        assert_eq!(ui.selected, Some(4));
+        ui.change_page(1);
+        assert_eq!(ui.selected, Some(8));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ranger_navigation_never_dispatches_delete() {
+        let root = temp();
+        fs::create_dir(root.join("directory")).unwrap();
+        fs::write(root.join("keep.txt"), "important").unwrap();
+        let mut options = opts(root.clone());
+        options.capabilities.delete = true;
+        let mut ui = Ui::with_ops(
+            &options,
+            fake(
+                OpenOutcome::NeedsFallback {
+                    reason: "none".into(),
+                },
+                vec![],
+            ),
+        )
+        .unwrap();
+        ui.on_key(Key::Text("v".into()));
+        assert_eq!(
+            key_intent(&Key::Text("h".into()), &Mode::Normal),
+            KeyIntent::Back
+        );
+        assert_eq!(
+            key_intent(&Key::Text("l".into()), &Mode::Normal),
+            KeyIntent::Activate
+        );
+        assert_eq!(ui.on_key(Key::Text("l".into())), KeyAction::Redraw);
+        assert!(ui.browser.current.ends_with("directory"));
+        assert_eq!(ui.on_key(Key::Text("h".into())), KeyAction::Redraw);
+        assert_eq!(ui.browser.current, root);
+        assert!(root.join("keep.txt").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn long_names_and_symlinks_are_display_only_never_selected_as_targets() {
+        use std::os::unix::fs::symlink;
+        let root = temp();
+        let outside = temp();
+        let long_name = format!("{}-tail.txt", "a".repeat(120));
+        fs::write(root.join(&long_name), "safe").unwrap();
+        symlink(outside.join("absent"), root.join("shortcut")).unwrap();
+        let ui = Ui::with_ops(
+            &opts(root.clone()),
+            fake(
+                OpenOutcome::NeedsFallback {
+                    reason: "none".into(),
+                },
+                vec![],
+            ),
+        )
+        .unwrap();
+        assert_eq!(ui.browser.entries.len(), 1);
+        assert_eq!(ui.browser.entries[0].name, long_name);
+        let menu = ui.menu();
+        let item = menu.item_by_id("entry-0").unwrap();
+        assert!(!item.label.contains(&long_name));
+        assert!(item.label.contains('…'));
+        assert_eq!(ui.selected_snapshot().unwrap().1.name, long_name);
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(outside).unwrap();
+    }
+
     #[test]
     fn paging_selection_and_keyboard_mapping() {
         let root = temp();
