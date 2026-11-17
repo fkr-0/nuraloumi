@@ -56,6 +56,93 @@ pub extern "C" fn round(value: f64) -> f64 {
     sl101_round_bits(value)
 }
 
+// Press feedback is transient: it never changes the selected menu tab or
+// the hit rectangles. The fade has a finite lifetime and therefore cannot
+// introduce a perpetual redraw loop on the software-rendered SL101 panel.
+#[derive(Default)]
+struct PanelPressFeedback {
+    held: Option<String>,
+    fading: Option<(String, std::time::Instant)>,
+}
+
+impl PanelPressFeedback {
+    const RELEASE: std::time::Duration = std::time::Duration::from_millis(120);
+
+    fn set(&mut self, target: Option<String>) {
+        if self.held != target {
+            self.held = target;
+            self.fading = None;
+        }
+    }
+
+    fn release(&mut self, now: std::time::Instant, reduced_motion: bool) {
+        self.fading = if reduced_motion {
+            None
+        } else {
+            self.held.take().map(|id| (id, now))
+        };
+        self.held = None;
+    }
+
+    fn sample(&mut self, now: std::time::Instant) -> Option<(&str, f64)> {
+        if let Some(id) = self.held.as_deref() {
+            return Some((id, 1.0));
+        }
+        if let Some((_, start)) = &self.fading {
+            let elapsed = now.saturating_duration_since(*start);
+            if elapsed >= Self::RELEASE {
+                self.fading = None;
+                return None;
+            }
+            let strength = 1.0 - elapsed.as_secs_f64() / Self::RELEASE.as_secs_f64();
+            return self.fading.as_ref().map(|(id, _)| (id.as_str(), strength));
+        }
+        None
+    }
+
+    fn animating(&self) -> bool {
+        self.fading.is_some()
+    }
+
+    fn cancel(&mut self) {
+        self.held = None;
+        self.fading = None;
+    }
+}
+
+fn panel_scene_with_press(
+    mut scene: Scene,
+    pressed: Option<(&str, f64)>,
+    theme: RenderTheme,
+) -> Scene {
+    if let Some((id, strength)) = pressed {
+        if !matches!(id, "battery" | "clock") {
+            if let Some(hit) = scene
+                .hits
+                .iter()
+                .find(|hit| hit.item_id == id && hit.actionable && hit.enabled)
+            {
+                let color = nuraloumi_render_cairo::Color::rgba(
+                    theme.accent.r,
+                    theme.accent.g,
+                    theme.accent.b,
+                    (60.0 * strength.clamp(0.0, 1.0)).round() as u8,
+                );
+                // After the panel background, before icons and text. Neither
+                // slot geometry nor hit-testing changes during the transition.
+                scene.paint.insert(
+                    1,
+                    PaintNode::FillRect {
+                        rect: hit.rect,
+                        color,
+                    },
+                );
+            }
+        }
+    }
+    scene
+}
+
 #[cfg(any(test, target_arch = "arm"))]
 fn sl101_round_bits(value: f64) -> f64 {
     const SIGN: u64 = 1_u64 << 63;
@@ -708,6 +795,9 @@ fn run_live(
     let mut panel_scene: Option<Scene> = None;
     let mut panel_pointer_press: Option<String> = None;
     let mut panel_touch_press: BTreeMap<i32, Option<String>> = BTreeMap::new();
+    let mut panel_press_feedback = PanelPressFeedback::default();
+    let mut panel_keyboard_index = 0usize;
+    let mut panel_keyboard_press: Option<String> = None;
     let mut synthetic_pointer = SyntheticPointerFilter::default();
     let mut active_menu: Option<LiveMenu> = None;
     let mut panel_first_frame_presented = false;
@@ -767,7 +857,7 @@ fn run_live(
         let menu_animating = active_menu
             .as_ref()
             .is_some_and(|menu| menu.motion.is_some());
-        if menu_animating || thumbnail_probe.is_some() {
+        if menu_animating || panel_press_feedback.animating() || thumbnail_probe.is_some() {
             std::thread::sleep(SceneTransitionClock::frame_interval());
             backend
                 .roundtrip()
@@ -871,6 +961,7 @@ fn run_live(
             panel_scene = None;
         }
         let events: Vec<_> = backend.drain_events().collect();
+        let mut panel_press_dirty = false;
 
         for event in events {
             // Correlate touch and synthesized pointer across panel, menu and
@@ -972,8 +1063,14 @@ fn run_live(
                             .and_then(|scene| scene.hit_test(x, y))
                             .map(str::to_owned);
                         if pressed {
-                            panel_pointer_press = hit;
+                            panel_pointer_press = hit.clone();
+                            panel_press_feedback
+                                .set(hit.filter(|id| id != "battery" && id != "clock"));
+                            panel_press_dirty = true;
                         } else {
+                            panel_press_feedback
+                                .release(std::time::Instant::now(), config.reduced_motion);
+                            panel_press_dirty = true;
                             let pressed_id = panel_pointer_press.take();
                             if pressed_id.is_some() && pressed_id == hit {
                                 if let Some(id) = hit {
@@ -1000,15 +1097,30 @@ fn run_live(
                             .and_then(|scene| scene.hit_test(x, y))
                             .map(str::to_owned);
                         begin_panel_touch(&mut panel_touch_press, id, hit);
+                        panel_press_feedback.set(
+                            panel_touch_press
+                                .values()
+                                .next()
+                                .and_then(|id| id.clone())
+                                .filter(|id| id != "battery" && id != "clock"),
+                        );
+                        panel_press_dirty = true;
                     }
                     WaylandEvent::TouchMotion { id, x, y } => {
                         if let Some(pressed) = panel_touch_press.get_mut(&id) {
                             let current =
                                 panel_scene.as_ref().and_then(|scene| scene.hit_test(x, y));
                             update_panel_touch_press(pressed, current);
+                            if pressed.is_none() {
+                                panel_press_feedback.cancel();
+                                panel_press_dirty = true;
+                            }
                         }
                     }
                     WaylandEvent::TouchUp { id } => {
+                        panel_press_feedback
+                            .release(std::time::Instant::now(), config.reduced_motion);
+                        panel_press_dirty = true;
                         panel_pointer_press = None;
                         if let Some(Some(item_id)) = panel_touch_press.remove(&id) {
                             activate_panel_target(
@@ -1027,8 +1139,86 @@ fn run_live(
                         }
                     }
                     WaylandEvent::TouchCancel { ids } => {
+                        panel_press_feedback.cancel();
+                        panel_press_dirty = true;
                         for id in ids {
                             panel_touch_press.remove(&id);
+                        }
+                    }
+                    WaylandEvent::PointerMove { x, y } => {
+                        if panel_pointer_press.as_ref().is_some_and(|id| {
+                            panel_scene.as_ref().and_then(|scene| scene.hit_test(x, y))
+                                != Some(id.as_str())
+                        }) {
+                            panel_pointer_press = None;
+                            panel_press_feedback.cancel();
+                            panel_press_dirty = true;
+                        }
+                    }
+                    WaylandEvent::PointerLeave => {
+                        panel_pointer_press = None;
+                        panel_press_feedback.cancel();
+                        panel_press_dirty = true;
+                    }
+                    WaylandEvent::Key { key, pressed } => {
+                        use nuraloumi_wayland::Key;
+                        let targets: Vec<String> = panel_scene
+                            .as_ref()
+                            .map(|scene| {
+                                scene
+                                    .hits
+                                    .iter()
+                                    .filter(|hit| {
+                                        hit.actionable
+                                            && hit.enabled
+                                            && !matches!(hit.item_id.as_str(), "battery" | "clock")
+                                    })
+                                    .map(|hit| hit.item_id.clone())
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        match key {
+                            Key::Tab if pressed && !targets.is_empty() => {
+                                panel_keyboard_index = (panel_keyboard_index + 1) % targets.len();
+                                panel_keyboard_press = None;
+                                panel_press_feedback.cancel();
+                                panel_press_dirty = true;
+                            }
+                            Key::Enter | Key::Space if !targets.is_empty() => {
+                                let target = targets[panel_keyboard_index % targets.len()].clone();
+                                if pressed {
+                                    if panel_keyboard_press.is_none() {
+                                        panel_keyboard_press = Some(target.clone());
+                                        panel_press_feedback.set(Some(target));
+                                        panel_press_dirty = true;
+                                    }
+                                } else if let Some(previous) = panel_keyboard_press.take() {
+                                    panel_press_feedback
+                                        .release(std::time::Instant::now(), config.reduced_motion);
+                                    panel_press_dirty = true;
+                                    if previous == target {
+                                        activate_panel_target(
+                                            &mut backend,
+                                            &config,
+                                            &mut snapshot,
+                                            &mut panel,
+                                            &mut active_menu,
+                                            &target,
+                                            PanelActivationContext {
+                                                output: output.as_ref(),
+                                                policy,
+                                            },
+                                        )?;
+                                        panel_scene = None;
+                                    }
+                                }
+                            }
+                            Key::Escape if pressed => {
+                                panel_keyboard_press = None;
+                                panel_press_feedback.cancel();
+                                panel_press_dirty = true;
+                            }
+                            _ => {}
                         }
                     }
                     WaylandEvent::Close => {
@@ -1724,18 +1914,20 @@ fn run_live(
             }
         }
 
+        if panel_press_dirty || panel_press_feedback.animating() {
+            panel_scene = None;
+        }
         if panel_scene.is_none() {
             if let Some(geometry) = panel_geometry {
                 let search = panel_search_view(active_menu.as_ref());
-                panel_scene = Some(render_panel_and_present(
-                    &mut backend,
-                    panel_surface,
-                    &renderer,
-                    &snapshot,
-                    &config,
-                    &search,
-                    geometry,
-                )?);
+                let theme = RenderTheme::from(config.active_theme_tokens());
+                let scene = panel_scene_with_press(
+                    build_panel_scene(&snapshot, &config, &search, geometry, theme),
+                    panel_press_feedback.sample(std::time::Instant::now()),
+                    theme,
+                );
+                present_scene(&mut backend, panel_surface, &renderer, &scene)?;
+                panel_scene = Some(scene);
             }
         }
 
@@ -3594,6 +3786,58 @@ fn next_value(args: &mut impl Iterator<Item = String>, option: &str) -> Result<S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn panel_press_hold_release_cancel_and_reduced_motion_are_finite() {
+        let start = std::time::Instant::now();
+        let mut feedback = PanelPressFeedback::default();
+        assert!(feedback.sample(start).is_none());
+        feedback.set(Some("apps".into()));
+        assert_eq!(feedback.sample(start), Some(("apps", 1.0)));
+        feedback.release(start, false);
+        assert_eq!(feedback.sample(start), Some(("apps", 1.0)));
+        let halfway = start + std::time::Duration::from_millis(60);
+        let (_, strength) = feedback.sample(halfway).unwrap();
+        assert!((strength - 0.5).abs() < 1e-9);
+        assert!(feedback
+            .sample(start + PanelPressFeedback::RELEASE)
+            .is_none());
+        assert!(!feedback.animating());
+        feedback.set(Some("audio".into()));
+        feedback.cancel();
+        assert!(feedback.sample(start).is_none());
+        feedback.set(Some("power".into()));
+        feedback.release(start, true);
+        assert!(feedback.sample(start).is_none());
+        assert!(!feedback.animating());
+    }
+
+    #[test]
+    fn panel_press_paint_does_not_change_hits_or_status_widgets() {
+        let snapshot = FixtureSnapshot::default();
+        let config = ShellConfig::default();
+        let theme = RenderTheme::dark();
+        for width in [800, 854, 1280] {
+            let base = build_panel_scene(
+                &snapshot,
+                &config,
+                &PanelSearchView::default(),
+                (width, config.panel_height, 1),
+                theme,
+            );
+            for id in ["apps", "network", "search", "player", "audio", "power"] {
+                let pressed = panel_scene_with_press(base.clone(), Some((id, 1.0)), theme);
+                assert_eq!(pressed.hits, base.hits);
+                assert_eq!(pressed.paint.len(), base.paint.len() + 1, "{id}");
+                let hit = pressed.hits.iter().find(|hit| hit.item_id == id).unwrap();
+                assert!(hit.rect.width >= 48.0 || width == 800, "{id}");
+            }
+            for id in ["battery", "clock"] {
+                let pressed = panel_scene_with_press(base.clone(), Some((id, 1.0)), theme);
+                assert_eq!(pressed.paint, base.paint);
+            }
+        }
+    }
 
     #[test]
     fn status_bar_has_non_overlapping_touch_regions_across_sl101_widths() {
