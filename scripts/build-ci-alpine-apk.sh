@@ -76,14 +76,34 @@ abuild -F checksum
 abuild -F -d -P "$out"
 pkg=$(find "$out" -type f -name "nuraloumi-$apkver-r0.apk" -print -quit)
 test -n "$pkg" && test -s "$pkg"
-cp "$key" "$out/CI-EPHEMERAL-KEY.rsa.pub"
+# APK v2 looks up signing certificates by the exact basename encoded in the
+# .SIGN.RSA.<filename> member. A generic exported filename cannot verify the
+# otherwise valid signature outside this disposable build container.
+public_key_filename=${key##*/}
+case "$public_key_filename" in
+    *.rsa.pub) ;;
+    *) echo 'FAIL: unexpected APK signing public-key filename' >&2; exit 1 ;;
+esac
+install -m0644 "$key" "$out/$public_key_filename"
+if [ "$signing_mode" = "ephemeral-ci-development-only" ]; then
+    # Legacy convenience alias; only the canonical name is an APK trust key.
+    install -m0644 "$key" "$out/CI-EPHEMERAL-KEY.rsa.pub"
+fi
 apk --keys-dir /root/.abuild verify "$pkg"
+# Independently verify with ONLY the key actually published in the artifact.
+# This catches a valid signature whose public key was exported under a name
+# apk cannot resolve, and never enrolls any key on a physical device.
+exported_keys="$tmp/exported-keys"
+mkdir "$exported_keys"
+install -m0644 "$out/$public_key_filename" "$exported_keys/$public_key_filename"
+apk --keys-dir "$exported_keys" verify "$pkg"
 relative_pkg=${pkg#"$out"/}
 (cd "$out" && sha256sum "$relative_pkg") > "$out/NURALOUMI-APK-SHA256SUMS.txt"
 cat > "$out/CI-APK-SIGNING-POLICY.txt" <<EOF
 SIGNING_MODE=$signing_mode
 GIT_SHA=$expected_sha
-PUBLIC_KEY_SHA256=$(sha256sum "$key" | cut -d' ' -f1)
+PUBLIC_KEY_FILE=$public_key_filename
+PUBLIC_KEY_SHA256=$(sha256sum "$out/$public_key_filename" | cut -d' ' -f1)
 The private signing key is never included in the published artifact.
 If signing_mode=ephemeral-ci-development-only the private key is destroyed
 with this container and is NOT a trusted production identity.

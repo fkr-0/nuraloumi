@@ -115,12 +115,18 @@ class NativePackageCiContract(unittest.TestCase):
         for token in (
             "abuild-keygen -a -n", "abuild -F checksum", "abuild -F -d",
             "CI-EPHEMERAL-KEY.rsa.pub", "apk --keys-dir /root/.abuild verify",
+            "public_key_filename=${key##*/}",
+            'install -m0644 "$key" "$out/$public_key_filename"',
+            'apk --keys-dir "$exported_keys" verify "$pkg"',
+            "PUBLIC_KEY_FILE=$public_key_filename",
             "SIGNING_MODE=$signing_mode",
             "signing_mode=ephemeral-ci-development-only",
             'git_commit=$expected_sha', "git_dirty=false",
         ):
             self.assertIn(token, APK_SCRIPT)
         self.assertNotIn("apk add --allow-untrusted", APK_SCRIPT + MUSL)
+        self.assertIn('if [ "$signing_mode" = "ephemeral-ci-development-only" ]; then', APK_SCRIPT)
+        self.assertIn('install -m0644 "$out/$public_key_filename" "$exported_keys/$public_key_filename"', APK_SCRIPT)
         self.assertIn('install -m0644 "$key" "/etc/apk/keys/', APK_SCRIPT)
         self.assertIn("The physical devices never receive this key automatically", APK_SCRIPT)
         self.assertIn("NURALOUMI_APK_RELEASE_PUBLIC_SHA256", APK_SCRIPT)
