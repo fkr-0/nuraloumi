@@ -119,7 +119,7 @@ impl Notifications {
             || body.len() > MAX_TEXT
             || actions.len() > MAX_ACTIONS
             || actions.iter().any(|a| a.len() > MAX_TEXT)
-            || actions.len() % 2 != 0
+            || actions.len() & 1 != 0
         {
             return Err(zbus::fdo::Error::InvalidArgs(
                 "notification exceeds bounded limits".into(),
