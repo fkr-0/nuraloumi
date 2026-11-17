@@ -22,7 +22,7 @@ out=$(cd "$out" && pwd)
 tmp=$(mktemp -d "$out/.deb-stage.XXXXXXXX")
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 pkg="$tmp/pkg"
-install -d "$pkg/DEBIAN" "$pkg/usr/bin" "$pkg/usr/share/applications" "$pkg/usr/share/nuraloumi" "$pkg/usr/share/doc/nuraloumi"
+install -d "$pkg/DEBIAN" "$pkg/usr/bin" "$pkg/usr/share/applications" "$pkg/usr/share/dbus-1/services" "$pkg/usr/share/nuraloumi" "$pkg/usr/share/doc/nuraloumi"
 count=0
 for executable in "$stage"/bin/nuraloumi-*; do
   test -f "$executable" && test -x "$executable"
@@ -30,7 +30,31 @@ for executable in "$stage"/bin/nuraloumi-*; do
   count=$((count+1))
 done
 test "$count" -ge 4
-install -m 0644 "$stage/share/applications/nuraloumi-player.desktop" "$pkg/usr/share/applications/nuraloumi-player.desktop"
+# Every packaged QoL launcher must already be an audited staging input.
+for required in nuraloumi-player.desktop nuraloumi-files.desktop nuraloumi-file-manager.desktop nuraloumi-notifications.desktop; do
+  test -f "$stage/share/applications/$required" && test ! -L "$stage/share/applications/$required" || {
+    echo "missing or unsafe required desktop entry: $required" >&2
+    exit 1
+  }
+done
+desktop_count=0
+for desktop in "$stage"/share/applications/*.desktop; do
+  test -f "$desktop" && test ! -L "$desktop"
+  install -m 0644 "$desktop" "$pkg/usr/share/applications/${desktop##*/}"
+  desktop_count=$((desktop_count+1))
+done
+test "$desktop_count" -ge 4
+service="$stage/share/dbus-1/services/org.freedesktop.Notifications.service"
+test -f "$service" && test ! -L "$service" || {
+  echo "missing or unsafe D-Bus activation descriptor" >&2
+  exit 1
+}
+grep -Fx 'Exec=/usr/bin/nuraloumi-notificationd' "$service" >/dev/null
+test -x "$stage/bin/nuraloumi-notificationd" && test ! -L "$stage/bin/nuraloumi-notificationd" || {
+  echo "missing or unsafe notificationd executable" >&2
+  exit 1
+}
+install -m 0644 "$service" "$pkg/usr/share/dbus-1/services/org.freedesktop.Notifications.service"
 install -m 0644 "$stage/config/nuraloumi.toml.example" "$pkg/usr/share/nuraloumi/nuraloumi.toml.example"
 install -d "$pkg/usr/share/nuraloumi/qualification"
 install -m 0644 "$stage/share/nuraloumi/qualification/README.md" "$pkg/usr/share/nuraloumi/qualification/README.md"
@@ -60,5 +84,9 @@ dpkg-deb --extract "$out/$filename" "$tmp/extracted"
 for executable in "$stage"/bin/nuraloumi-*; do
   cmp "$executable" "$tmp/extracted/usr/bin/${executable##*/}"
 done
+for desktop in "$stage"/share/applications/*.desktop; do
+  cmp "$desktop" "$tmp/extracted/usr/share/applications/${desktop##*/}"
+done
+cmp "$service" "$tmp/extracted/usr/share/dbus-1/services/org.freedesktop.Notifications.service"
 (cd "$out" && sha256sum "$filename") > "$out/$filename.sha256"
 echo "DEB_PACKAGE=PASS path=$out/$filename binaries=$count sha=$expected_sha"

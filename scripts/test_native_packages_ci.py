@@ -32,6 +32,25 @@ class NativePackageCiContract(unittest.TestCase):
                     )),
                     "QoL launchers omitted from native package")
 
+    def test_debian_desktop_and_notification_activation_payload_verified(self):
+        # Verify the extracted package matches audited staging, not only the tar.
+        for required in (
+            "nuraloumi-player.desktop",
+            "nuraloumi-files.desktop",
+            "nuraloumi-file-manager.desktop",
+            "nuraloumi-notifications.desktop",
+        ):
+            self.assertIn(required, DEB_SCRIPT)
+        for token in (
+            '"$stage"/share/applications/*.desktop',
+            'test ! -L "$desktop"',
+            'test -x "$stage/bin/nuraloumi-notificationd"',
+            'Exec=/usr/bin/nuraloumi-notificationd',
+            'cmp "$desktop" "$tmp/extracted/usr/share/applications/${desktop##*/}"',
+            'cmp "$service" "$tmp/extracted/usr/share/dbus-1/services/org.freedesktop.Notifications.service"',
+        ):
+            self.assertIn(token, DEB_SCRIPT)
+
     def test_alpine_prerelease_versions_use_abuild_valid_suffixes(self):
         # Exercise the exact sed conversion used by the CI packaging script,
         # not a separately reimplemented Python version mapper.
