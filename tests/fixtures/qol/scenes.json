@@ -1,0 +1,530 @@
+{
+  "kind": "synthetic-geometry-fixtures/v1",
+  "disclaimer": "Synthetic before/after contract scenarios, not captured runtime scenes or optical testing",
+  "scenes": [
+    {
+      "name": "baseline-1280x800",
+      "viewport": [
+        1280,
+        800
+      ],
+      "scale": 1,
+      "panel": [
+        0,
+        0,
+        1280,
+        48
+      ],
+      "menu": [
+        0,
+        96,
+        480,
+        400
+      ],
+      "title_height": 72,
+      "phantom_glyphs": true,
+      "labels": [
+        "Files",
+        "Files"
+      ],
+      "tabs": [
+        {
+          "label": "Apps",
+          "selected": true
+        },
+        {
+          "label": "Settings",
+          "selected": true
+        }
+      ],
+      "outside_dismiss": false,
+      "controls": [
+        {
+          "id": "mute",
+          "hit": [
+            0,
+            90,
+            32,
+            48
+          ]
+        },
+        {
+          "id": "minus",
+          "hit": [
+            48,
+            90,
+            48,
+            48
+          ]
+        },
+        {
+          "id": "plus",
+          "hit": [
+            96,
+            90,
+            48,
+            48
+          ]
+        }
+      ],
+      "item_rows": [
+        [
+          0,
+          150,
+          480,
+          48
+        ]
+      ],
+      "status_fields": [
+        [
+          0,
+          420,
+          100,
+          24
+        ],
+        [
+          100,
+          420,
+          100,
+          24
+        ]
+      ],
+      "scroll": {
+        "content": 248,
+        "viewport": 248,
+        "visible": true,
+        "draggable": false,
+        "track_hit_width": 4,
+        "thumb_length": 50,
+        "track_length": 200
+      },
+      "expected_failures": [
+        "duplicate-label",
+        "menu-gap",
+        "outside-dismiss",
+        "phantom-glyph",
+        "scroll-visibility",
+        "status-fields",
+        "tabs",
+        "tap-target:mute",
+        "thick-title"
+      ]
+    },
+    {
+      "name": "after-1280x800",
+      "viewport": [
+        1280,
+        800
+      ],
+      "scale": 1,
+      "panel": [
+        0,
+        0,
+        1280,
+        48
+      ],
+      "menu": [
+        0,
+        48,
+        480,
+        400
+      ],
+      "title_height": 40,
+      "phantom_glyphs": false,
+      "labels": [
+        "Files",
+        "Current path"
+      ],
+      "tabs": [
+        {
+          "label": "Apps",
+          "selected": true
+        },
+        {
+          "label": "Settings",
+          "selected": false
+        }
+      ],
+      "outside_dismiss": true,
+      "controls": [
+        {
+          "id": "mute",
+          "hit": [
+            0,
+            90,
+            48,
+            48
+          ]
+        },
+        {
+          "id": "minus",
+          "hit": [
+            48,
+            90,
+            48,
+            48
+          ]
+        },
+        {
+          "id": "plus",
+          "hit": [
+            96,
+            90,
+            48,
+            48
+          ]
+        }
+      ],
+      "item_rows": [
+        [
+          0,
+          150,
+          480,
+          48
+        ]
+      ],
+      "status_fields": [
+        [
+          0,
+          420,
+          100,
+          24
+        ],
+        [
+          100,
+          420,
+          100,
+          24
+        ],
+        [
+          200,
+          420,
+          100,
+          24
+        ]
+      ],
+      "scroll": {
+        "content": 248,
+        "viewport": 248,
+        "visible": false,
+        "draggable": false,
+        "track_hit_width": 0,
+        "thumb_length": 0,
+        "track_length": 0
+      },
+      "expected_failures": []
+    },
+    {
+      "name": "after-854x480",
+      "viewport": [
+        854,
+        480
+      ],
+      "scale": 1,
+      "panel": [
+        0,
+        0,
+        854,
+        48
+      ],
+      "menu": [
+        0,
+        48,
+        480,
+        400
+      ],
+      "title_height": 40,
+      "phantom_glyphs": false,
+      "labels": [
+        "Files",
+        "Current path"
+      ],
+      "tabs": [
+        {
+          "label": "Apps",
+          "selected": true
+        },
+        {
+          "label": "Settings",
+          "selected": false
+        }
+      ],
+      "outside_dismiss": true,
+      "controls": [
+        {
+          "id": "mute",
+          "hit": [
+            0,
+            90,
+            48,
+            48
+          ]
+        },
+        {
+          "id": "minus",
+          "hit": [
+            48,
+            90,
+            48,
+            48
+          ]
+        },
+        {
+          "id": "plus",
+          "hit": [
+            96,
+            90,
+            48,
+            48
+          ]
+        }
+      ],
+      "item_rows": [
+        [
+          0,
+          150,
+          480,
+          48
+        ]
+      ],
+      "status_fields": [
+        [
+          0,
+          420,
+          100,
+          24
+        ],
+        [
+          100,
+          420,
+          100,
+          24
+        ],
+        [
+          200,
+          420,
+          100,
+          24
+        ]
+      ],
+      "scroll": {
+        "content": 248,
+        "viewport": 248,
+        "visible": false,
+        "draggable": false,
+        "track_hit_width": 0,
+        "thumb_length": 0,
+        "track_length": 0
+      },
+      "expected_failures": []
+    },
+    {
+      "name": "after-800x480",
+      "viewport": [
+        800,
+        480
+      ],
+      "scale": 1,
+      "panel": [
+        0,
+        0,
+        800,
+        48
+      ],
+      "menu": [
+        0,
+        48,
+        480,
+        400
+      ],
+      "title_height": 40,
+      "phantom_glyphs": false,
+      "labels": [
+        "Files",
+        "Current path"
+      ],
+      "tabs": [
+        {
+          "label": "Apps",
+          "selected": true
+        },
+        {
+          "label": "Settings",
+          "selected": false
+        }
+      ],
+      "outside_dismiss": true,
+      "controls": [
+        {
+          "id": "mute",
+          "hit": [
+            0,
+            90,
+            48,
+            48
+          ]
+        },
+        {
+          "id": "minus",
+          "hit": [
+            48,
+            90,
+            48,
+            48
+          ]
+        },
+        {
+          "id": "plus",
+          "hit": [
+            96,
+            90,
+            48,
+            48
+          ]
+        }
+      ],
+      "item_rows": [
+        [
+          0,
+          150,
+          480,
+          48
+        ]
+      ],
+      "status_fields": [
+        [
+          0,
+          420,
+          100,
+          24
+        ],
+        [
+          100,
+          420,
+          100,
+          24
+        ],
+        [
+          200,
+          420,
+          100,
+          24
+        ]
+      ],
+      "scroll": {
+        "content": 248,
+        "viewport": 248,
+        "visible": false,
+        "draggable": false,
+        "track_hit_width": 0,
+        "thumb_length": 0,
+        "track_length": 0
+      },
+      "expected_failures": []
+    },
+    {
+      "name": "after-fractional-854x480",
+      "viewport": [
+        854,
+        480
+      ],
+      "scale": 1.25,
+      "panel": [
+        0,
+        0,
+        854,
+        48
+      ],
+      "menu": [
+        0,
+        48,
+        480,
+        400
+      ],
+      "title_height": 40,
+      "phantom_glyphs": false,
+      "labels": [
+        "Files",
+        "Current path"
+      ],
+      "tabs": [
+        {
+          "label": "Apps",
+          "selected": true
+        },
+        {
+          "label": "Settings",
+          "selected": false
+        }
+      ],
+      "outside_dismiss": true,
+      "controls": [
+        {
+          "id": "mute",
+          "hit": [
+            0,
+            90,
+            48,
+            48
+          ]
+        },
+        {
+          "id": "minus",
+          "hit": [
+            48,
+            90,
+            48,
+            48
+          ]
+        },
+        {
+          "id": "plus",
+          "hit": [
+            96,
+            90,
+            48,
+            48
+          ]
+        }
+      ],
+      "item_rows": [
+        [
+          0,
+          150,
+          480,
+          48
+        ]
+      ],
+      "status_fields": [
+        [
+          0,
+          420,
+          100,
+          24
+        ],
+        [
+          100,
+          420,
+          100,
+          24
+        ],
+        [
+          200,
+          420,
+          100,
+          24
+        ]
+      ],
+      "scroll": {
+        "content": 248,
+        "viewport": 248,
+        "visible": false,
+        "draggable": false,
+        "track_hit_width": 0,
+        "thumb_length": 0,
+        "track_length": 0
+      },
+      "expected_failures": []
+    }
+  ]
+}
