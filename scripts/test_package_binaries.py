@@ -73,7 +73,19 @@ class BinaryTests(unittest.TestCase):
             "src/bin/" + pathlib.Path(name).name
             for name in tracked.stdout.splitlines())
         declared_paths = sorted(item["path"] for item in declared)
-        self.assertEqual(source_paths, declared_paths)
+        # These two tracked entrypoints deliberately fail closed instead of
+        # launching bogus layer-shell "full windows". They are *not* shippable
+        # until xdg_toplevel is genuinely integrated and qualified.
+        nonshipping = {
+            "src/bin/file_manager_window.rs",
+            "src/bin/player_window.rs",
+        }
+        self.assertEqual(set(source_paths) - set(declared_paths), nonshipping)
+        self.assertFalse(set(declared_paths) - set(source_paths))
+        for source in sorted(nonshipping):
+            text = (crate / source).read_text()
+            self.assertIn("std::process::ExitCode::FAILURE", text, source)
+            self.assertRegex(text, r"(?i)xdg_toplevel|layer.shell", source)
         self.assertEqual(len({item["name"] for item in declared}), len(declared))
         self.assertIn(
             {"name": "nuraloumi-screenshot", "path": "src/bin/screenshot.rs"},

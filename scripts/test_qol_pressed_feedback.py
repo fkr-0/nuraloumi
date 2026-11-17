@@ -68,10 +68,22 @@ class PressedReleaseGates(unittest.TestCase):
         panel = source(PANEL)
         # The event arm must change the visual scene immediately, not merely
         # remember the target for pointer-up activation.
-        arm = panel.split("WaylandEvent::PointerButton { x, y, pressed, .. } => {", 1)
-        self.assertEqual(len(arm), 2, "panel pointer arm moved; update QA extractor")
-        down = arm[1].split("WaylandEvent::TouchDown", 1)[0]
-        self.assertRegex(down, r"(?:render_panel_and_present|request_redraw|panel_visual|press_feedback|pressed_visual|dirty_panel)")
+        # Only the primary (BTN_LEFT) event should arm the feedback. The
+        # panel event match exits early and must commit before 'continue'.
+        arm = panel.split("button: 0x110,", 1)
+        self.assertEqual(len(arm), 2, "primary panel pointer arm moved")
+        down = arm[1].split("WaylandEvent::TouchDown { id, x, y } => {", 1)[0]
+        self.assertIn("panel_press_feedback", down)
+        self.assertIn("panel_press_dirty = true", down)
+        panel_input = panel.split("if event.surface == Some(panel_surface) {", 1)[1]
+        panel_input = panel_input.split("let dismiss_surface", 1)[0]
+        self.assertIn("if panel_press_dirty {", panel_input)
+        self.assertIn("render_panel_feedback_and_present(", panel_input)
+        self.assertLess(
+            panel_input.rfind("render_panel_feedback_and_present("),
+            panel_input.rfind("continue;"),
+            "pressed pixels must be presented before the panel event bypass",
+        )
 
     def test_panel_touch_down_and_cancel_invalidate_visual(self):
         panel = source(PANEL)
@@ -85,11 +97,16 @@ class PressedReleaseGates(unittest.TestCase):
         self.assertRegex(block, r"(?:render_panel_and_present|request_redraw|panel_visual|press_feedback|pressed_visual|dirty_panel)")
 
     def test_panel_scene_accepts_ephemeral_press_state(self):
-        body = function_body(source(PANEL), "build_panel_scene")
-        self.assertTrue(
-            re.search(r"(?:pressed|press_feedback|press_state|held)", body, re.I),
-            "Panel scene must consume transient press state to paint pressed feedback",
-        )
+        panel = source(PANEL)
+        body = function_body(panel, "render_panel_feedback_and_present")
+        overlay = function_body(panel, "panel_scene_with_press")
+        self.assertIn("panel_scene_with_press(", body)
+        self.assertIn("press_feedback.sample(", body)
+        self.assertIn("present_scene(", body)
+        self.assertIn("hit.actionable && hit.enabled", overlay)
+        self.assertIn("scene.paint.insert(", overlay)
+        self.assertIn("battery", overlay)
+        self.assertIn("clock", overlay)
 
     def test_finite_release_and_reduced_motion_primitives(self):
         core = source(CORE)

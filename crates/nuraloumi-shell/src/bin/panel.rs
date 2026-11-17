@@ -1240,6 +1240,27 @@ fn run_live(
                     }
                     _ => {}
                 }
+                // Panel-surface events are intentionally not routed to the
+                // transient menu. Commit their pressed visual before this
+                // early continue; otherwise the common end-of-iteration
+                // redraw is skipped and the press is never shown.
+                if panel_press_dirty {
+                    if let Some(geometry) = panel_geometry {
+                        let search = panel_search_view(active_menu.as_ref());
+                        panel_scene = Some(render_panel_feedback_and_present(
+                            &mut backend,
+                            panel_surface,
+                            &renderer,
+                            &snapshot,
+                            &config,
+                            &search,
+                            geometry,
+                            &mut panel_press_feedback,
+                        )?);
+                    } else {
+                        panel_scene = None;
+                    }
+                }
                 continue;
             }
 
@@ -1927,14 +1948,16 @@ fn run_live(
         if panel_scene.is_none() {
             if let Some(geometry) = panel_geometry {
                 let search = panel_search_view(active_menu.as_ref());
-                let theme = RenderTheme::from(config.active_theme_tokens());
-                let scene = panel_scene_with_press(
-                    build_panel_scene(&snapshot, &config, &search, geometry, theme),
-                    panel_press_feedback.sample(std::time::Instant::now()),
-                    theme,
-                );
-                present_scene(&mut backend, panel_surface, &renderer, &scene)?;
-                panel_scene = Some(scene);
+                panel_scene = Some(render_panel_feedback_and_present(
+                    &mut backend,
+                    panel_surface,
+                    &renderer,
+                    &snapshot,
+                    &config,
+                    &search,
+                    geometry,
+                    &mut panel_press_feedback,
+                )?);
             }
         }
 
@@ -2150,6 +2173,29 @@ fn render_panel_and_present(
 ) -> Result<Scene, String> {
     let theme = RenderTheme::from(config.active_theme_tokens());
     let scene = build_panel_scene(snapshot, config, search, geometry, theme);
+    present_scene(backend, surface, renderer, &scene)?;
+    Ok(scene)
+}
+
+// This is the only live rendering path that samples ephemeral panel press
+// state. It is shared by panel input events and the bounded release animation.
+#[allow(clippy::too_many_arguments)]
+fn render_panel_feedback_and_present(
+    backend: &mut WaylandBackend,
+    surface: SurfaceId,
+    renderer: &CairoRenderer,
+    snapshot: &FixtureSnapshot,
+    config: &ShellConfig,
+    search: &PanelSearchView,
+    geometry: (u32, u32, i32),
+    press_feedback: &mut PanelPressFeedback,
+) -> Result<Scene, String> {
+    let theme = RenderTheme::from(config.active_theme_tokens());
+    let scene = panel_scene_with_press(
+        build_panel_scene(snapshot, config, search, geometry, theme),
+        press_feedback.sample(std::time::Instant::now()),
+        theme,
+    );
     present_scene(backend, surface, renderer, &scene)?;
     Ok(scene)
 }
