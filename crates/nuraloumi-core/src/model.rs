@@ -237,6 +237,11 @@ pub enum MenuAction {
         id: String,
         delta: i32,
     },
+    /// Absolute bounded value assignment; providers remain responsible for applying it.
+    SetValue {
+        id: String,
+        value: i32,
+    },
     Navigate {
         target: String,
     },
@@ -274,6 +279,237 @@ impl MenuAction {
             },
             action: Box::new(action),
         }
+    }
+}
+
+/// Typed, presentation-independent compact controls. This is additive to
+/// legacy MenuItem JSON: older menu snapshots retain their exact encoding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CompactControl {
+    /// A 48-logical-pixel minimum hit target; icon is a semantic ASCII fallback.
+    Button {
+        id: String,
+        label: String,
+        icon: String,
+        enabled: bool,
+        action: MenuAction,
+    },
+    /// A group is horizontal, with each button independently addressable.
+    Toolbar {
+        id: String,
+        buttons: Vec<CompactButton>,
+    },
+    /// Integer bounds are inclusive. Non-divisible maxima are reachable.
+    Slider {
+        id: String,
+        label: String,
+        value_id: String,
+        min: i32,
+        max: i32,
+        step: i32,
+        value: i32,
+        enabled: bool,
+    },
+    /// The currently selected tab has no action; other tabs navigate by typed action.
+    Tabs {
+        id: String,
+        tabs: Vec<CompactTab>,
+    },
+    Breadcrumb {
+        id: String,
+        parts: Vec<String>,
+    },
+    Status {
+        id: String,
+        fields: Vec<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompactButton {
+    pub id: String,
+    pub label: String,
+    pub icon: String,
+    pub enabled: bool,
+    pub action: MenuAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompactTab {
+    pub id: String,
+    pub label: String,
+    pub selected: bool,
+    pub action: MenuAction,
+}
+
+/// Pure keyboard adjustments for a focused compact slider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactSliderKey {
+    Decrease,
+    Increase,
+    Minimum,
+    Maximum,
+}
+
+/// Prevent duplicate IDs across the entire control stack.
+pub fn validate_compact_controls(controls: &[CompactControl]) -> Result<(), &'static str> {
+    let mut seen = std::collections::HashSet::new();
+    for control in controls {
+        control.validate()?;
+        let id = match control {
+            CompactControl::Button { id, .. }
+            | CompactControl::Toolbar { id, .. }
+            | CompactControl::Slider { id, .. }
+            | CompactControl::Tabs { id, .. }
+            | CompactControl::Breadcrumb { id, .. }
+            | CompactControl::Status { id, .. } => id,
+        };
+        if !seen.insert(id.as_str()) {
+            return Err("duplicate control id");
+        }
+        match control {
+            CompactControl::Toolbar { buttons, .. } => {
+                for b in buttons {
+                    if !seen.insert(b.id.as_str()) {
+                        return Err("duplicate button id");
+                    }
+                }
+            }
+            CompactControl::Tabs { tabs, .. } => {
+                for t in tabs {
+                    if !seen.insert(t.id.as_str()) {
+                        return Err("duplicate tab id");
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+impl CompactControl {
+    /// Clamp then quantize toward the nearest permitted step, preserving max.
+    pub fn quantize(min: i32, max: i32, step: i32, value: i32) -> Option<i32> {
+        if min >= max || step <= 0 {
+            return None;
+        }
+        if value >= max {
+            return Some(max);
+        }
+        if value <= min {
+            return Some(min);
+        }
+        let delta = i64::from(value) - i64::from(min);
+        let step = i64::from(step);
+        let snapped = i64::from(min) + ((delta + step / 2) / step) * step;
+        Some(snapped.clamp(i64::from(min), i64::from(max)) as i32)
+    }
+
+    /// Value emitted by touch/drag/keyboard positioning, never an implicit delta.
+    pub fn slider_action(&self, value: i32) -> Option<MenuAction> {
+        let Self::Slider {
+            value_id,
+            min,
+            max,
+            step,
+            enabled: true,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        Some(MenuAction::SetValue {
+            id: value_id.clone(),
+            value: Self::quantize(*min, *max, *step, value)?,
+        })
+    }
+
+    pub fn slider_key_action(&self, key: CompactSliderKey) -> Option<MenuAction> {
+        let Self::Slider {
+            min,
+            max,
+            step,
+            value,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        let candidate = match key {
+            CompactSliderKey::Decrease => value.saturating_sub(*step),
+            CompactSliderKey::Increase => value.saturating_add(*step),
+            CompactSliderKey::Minimum => *min,
+            CompactSliderKey::Maximum => *max,
+        };
+        self.slider_action(candidate)
+    }
+
+    pub fn validate(&self) -> Result<(), &'static str> {
+        match self {
+            Self::Button {
+                id, label, icon, ..
+            } => {
+                if id.is_empty() || label.is_empty() || icon.chars().count() > 4 {
+                    return Err("invalid button");
+                }
+            }
+            Self::Toolbar { id, buttons } => {
+                if id.is_empty() || buttons.is_empty() || buttons.len() > 8 {
+                    return Err("invalid toolbar");
+                }
+                let mut seen = std::collections::HashSet::new();
+                for b in buttons {
+                    if b.id.is_empty()
+                        || b.label.is_empty()
+                        || b.icon.chars().count() > 4
+                        || !seen.insert(&b.id)
+                    {
+                        return Err("invalid toolbar button");
+                    }
+                }
+            }
+            Self::Slider {
+                id,
+                label,
+                value_id,
+                min,
+                max,
+                step,
+                value,
+                ..
+            } => {
+                if id.is_empty()
+                    || label.is_empty()
+                    || value_id.is_empty()
+                    || Self::quantize(*min, *max, *step, *value).is_none()
+                {
+                    return Err("invalid slider");
+                }
+            }
+            Self::Tabs { id, tabs } => {
+                if id.is_empty()
+                    || tabs.is_empty()
+                    || tabs.len() > 8
+                    || tabs.iter().filter(|t| t.selected).count() != 1
+                {
+                    return Err("invalid tabs");
+                }
+                let mut seen = std::collections::HashSet::new();
+                for t in tabs {
+                    if t.id.is_empty() || t.label.is_empty() || !seen.insert(&t.id) {
+                        return Err("invalid tab");
+                    }
+                }
+            }
+            Self::Breadcrumb { id, parts } | Self::Status { id, fields: parts } => {
+                if id.is_empty() || parts.is_empty() || parts.len() > 8 {
+                    return Err("invalid status section");
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -336,6 +572,102 @@ mod tests {
         assert_eq!(
             model.item_by_id("child").map(|item| item.label.as_str()),
             Some("Child")
+        );
+    }
+}
+
+#[cfg(test)]
+mod compact_contract_tests {
+    use super::*;
+    #[test]
+    fn bounded_steps_extremes_and_overflow() {
+        assert_eq!(CompactControl::quantize(0, 94, 10, 94), Some(94));
+        assert_eq!(CompactControl::quantize(0, 94, 10, -50), Some(0));
+        assert_eq!(CompactControl::quantize(0, 94, 10, 43), Some(40));
+        assert_eq!(
+            CompactControl::quantize(i32::MIN, i32::MAX, 100, i32::MAX),
+            Some(i32::MAX)
+        );
+        assert_eq!(CompactControl::quantize(0, 100, 0, 50), None);
+    }
+    #[test]
+    fn typed_slider_json_round_trip_legacy_remains_valid() {
+        let slider = CompactControl::Slider {
+            id: "volume".into(),
+            label: "Volume".into(),
+            value_id: "audio.volume".into(),
+            min: 0,
+            max: 100,
+            step: 5,
+            value: 48,
+            enabled: true,
+        };
+        slider.validate().unwrap();
+        let back: CompactControl =
+            serde_json::from_str(&serde_json::to_string(&slider).unwrap()).unwrap();
+        assert_eq!(slider, back);
+        assert_eq!(
+            slider.slider_action(78),
+            Some(MenuAction::SetValue {
+                id: "audio.volume".into(),
+                value: 80
+            })
+        );
+        let legacy = MenuModel::new(
+            "old",
+            "Old",
+            vec![MenuItem::action(
+                "x",
+                "X",
+                MenuAction::Activate { id: "x".into() },
+            )],
+        );
+        assert_eq!(
+            serde_json::from_str::<MenuModel>(&serde_json::to_string(&legacy).unwrap()).unwrap(),
+            legacy
+        );
+    }
+}
+
+#[cfg(test)]
+mod compact_validation_tests {
+    use super::*;
+    #[test]
+    fn unique_ids_and_absolute_keyboard_slider_actions() {
+        let mk = || CompactControl::Button {
+            id: "same".into(),
+            label: "A".into(),
+            icon: "+".into(),
+            enabled: true,
+            action: MenuAction::Close,
+        };
+        assert_eq!(
+            validate_compact_controls(&[mk(), mk()]),
+            Err("duplicate control id")
+        );
+        let slider = CompactControl::Slider {
+            id: "volume".into(),
+            label: "Volume".into(),
+            value_id: "audio.set".into(),
+            min: 0,
+            max: 94,
+            step: 10,
+            value: 90,
+            enabled: true,
+        };
+        assert_eq!(
+            slider.slider_key_action(CompactSliderKey::Increase),
+            Some(MenuAction::SetValue {
+                id: "audio.set".into(),
+                value: 94
+            })
+        );
+        assert_eq!(
+            slider.slider_key_action(CompactSliderKey::Minimum),
+            Some(MenuAction::SetValue {
+                id: "audio.set".into(),
+                value: 0
+            })
         );
     }
 }

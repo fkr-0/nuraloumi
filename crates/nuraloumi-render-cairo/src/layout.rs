@@ -911,3 +911,480 @@ mod launcher_tab_tests {
         );
     }
 }
+
+/// Render a compact horizontal control stack independently of legacy menu rows.
+/// Hits are stable semantic IDs, never glyph-specific geometry; the caller must
+/// resolve them with `compact_action_at` rather than executing in the renderer.
+pub fn layout_compact_controls<T: TextMeasurer>(
+    surface_id: &str,
+    controls: &[nuraloumi_core::model::CompactControl],
+    interaction: &InteractionState,
+    viewport: Viewport,
+    theme: &Theme,
+    text: &T,
+) -> Scene {
+    use nuraloumi_core::model::CompactControl as Control;
+    let panel = Rect::new(0.0, 0.0, viewport.width, viewport.height);
+    let mut paint = vec![PaintNode::FillRect {
+        rect: panel,
+        color: theme.overlay,
+    }];
+    let mut hits = Vec::new();
+    let rows_for = |count: usize| -> usize {
+        let columns = (viewport.width / 48.0).floor().max(1.0) as usize;
+        count.div_ceil(columns).max(1)
+    };
+    let total_height: f64 = controls
+        .iter()
+        .map(|control| match control {
+            Control::Toolbar { buttons, .. } => rows_for(buttons.len()) as f64 * 48.0,
+            Control::Tabs { tabs, .. } => rows_for(tabs.len()) as f64 * 48.0,
+            _ => 48.0,
+        })
+        .sum();
+    let max_offset = (total_height - viewport.height).max(0.0);
+    let mut offset = if interaction.scroll_offset.is_finite() {
+        interaction.scroll_offset.clamp(0.0, max_offset)
+    } else {
+        0.0
+    };
+    // Keyboard focus must remain visible even with a stale scroll position.
+    if let Some(focused) = interaction.selected_id.as_deref() {
+        let mut top = 0.0;
+        for control in controls {
+            let (rows, index) = match control {
+                Control::Button { id, .. } => (1, (id == focused).then_some(0)),
+                Control::Slider { id, .. } => (1, (id == focused).then_some(0)),
+                Control::Toolbar { buttons, .. } => (
+                    rows_for(buttons.len()),
+                    buttons.iter().position(|b| b.id == focused),
+                ),
+                Control::Tabs { tabs, .. } => (
+                    rows_for(tabs.len()),
+                    tabs.iter().position(|t| t.id == focused),
+                ),
+                _ => (1, None),
+            };
+            if let Some(index) = index {
+                let cols = (viewport.width / 48.0).floor().max(1.0) as usize;
+                let focus_top = top + (index / cols) as f64 * 48.0;
+                if focus_top < offset {
+                    offset = focus_top;
+                } else if focus_top + 48.0 > offset + viewport.height {
+                    offset = focus_top + 48.0 - viewport.height;
+                }
+                offset = offset.clamp(0.0, max_offset);
+                break;
+            }
+            top += rows as f64 * 48.0;
+        }
+    }
+    paint.push(PaintNode::ClipPush(panel));
+    let mut y = -offset;
+    for control in controls {
+        let row_height = 48.0_f64;
+        let row = Rect::new(0.0, y, viewport.width, row_height);
+        y += row_height;
+        let selected = |id: &str| interaction.selected_id.as_deref() == Some(id);
+        let draw_text = |paint: &mut Vec<PaintNode>, rect: Rect, label: &str, active: bool| {
+            let style = TextStyle {
+                size: 13.0,
+                bold: active,
+            };
+            let label = text.ellipsize(label, (rect.width - 12.0).max(0.0), style);
+            paint.push(PaintNode::Text {
+                origin: Point::new(rect.x + 6.0, centered_baseline(rect, text, style)),
+                text: label,
+                style,
+                color: if active {
+                    theme.primary_text
+                } else {
+                    theme.secondary_text
+                },
+            });
+        };
+        let mut button = |id: &str, label: &str, enabled: bool, rect: Rect, active: bool| {
+            paint.push(PaintNode::RoundedRect {
+                rect: Rect::new(
+                    rect.x + 2.0,
+                    rect.y + 4.0,
+                    (rect.width - 4.0).max(0.0),
+                    rect.height - 8.0,
+                ),
+                radius: 4.0,
+                fill: Fill::Solid(if active { theme.selected } else { theme.card }),
+                stroke: selected(id).then_some((theme.accent, 2.0)),
+            });
+            draw_text(&mut paint, rect, label, active);
+            if let Some(visible) = rect.intersection(panel) {
+                hits.push(HitRegion {
+                    item_id: id.to_string(),
+                    rect: visible,
+                    actionable: true,
+                    enabled,
+                    kind: RowKind::Action,
+                });
+            }
+        };
+        match control {
+            Control::Button {
+                id,
+                label,
+                icon,
+                enabled,
+                ..
+            } => {
+                let fallback = if icon.is_ascii() && !icon.is_empty() {
+                    icon.as_str()
+                } else {
+                    label.as_str()
+                };
+                button(id, fallback, *enabled, row, selected(id));
+            }
+            Control::Toolbar { buttons, .. } => {
+                // A narrow viewport stacks instead of shrinking below 48 logical px.
+                let columns = (viewport.width / 48.0).floor().max(1.0) as usize;
+                let columns = columns.min(buttons.len()).max(1);
+                let cell_width = viewport.width / columns as f64;
+                for (index, item) in buttons.iter().enumerate() {
+                    let line = index / columns;
+                    let col = index % columns;
+                    let rect = Rect::new(
+                        col as f64 * cell_width,
+                        row.y + line as f64 * 48.0,
+                        cell_width,
+                        48.0,
+                    );
+                    let fallback = if item.icon.is_ascii() && !item.icon.is_empty() {
+                        &item.icon
+                    } else {
+                        &item.label
+                    };
+                    button(&item.id, fallback, item.enabled, rect, selected(&item.id));
+                }
+                y += (buttons.len().div_ceil(columns) - 1) as f64 * 48.0;
+            }
+            Control::Tabs { tabs, .. } => {
+                let columns = (viewport.width / 48.0).floor().max(1.0) as usize;
+                let columns = columns.min(tabs.len()).max(1);
+                let cell_width = viewport.width / columns as f64;
+                for (index, tab) in tabs.iter().enumerate() {
+                    let line = index / columns;
+                    let col = index % columns;
+                    let rect = Rect::new(
+                        col as f64 * cell_width,
+                        row.y + line as f64 * 48.0,
+                        cell_width,
+                        48.0,
+                    );
+                    button(&tab.id, &tab.label, !tab.selected, rect, tab.selected);
+                }
+                y += (tabs.len().div_ceil(columns) - 1) as f64 * 48.0;
+            }
+            Control::Slider {
+                id,
+                label,
+                min,
+                max,
+                step,
+                value,
+                enabled,
+                ..
+            } => {
+                draw_text(
+                    &mut paint,
+                    Rect::new(0.0, row.y, (viewport.width * 0.32).min(140.0), 48.0),
+                    label,
+                    *enabled,
+                );
+                let track = compact_slider_rect(row);
+                let ratio = if max > min {
+                    (i64::from(*value.clamp(min, max)) - i64::from(*min)) as f64
+                        / (i64::from(*max) - i64::from(*min)) as f64
+                } else {
+                    0.0
+                };
+                paint.push(PaintNode::RoundedRect {
+                    rect: Rect::new(track.x, track.y + 18.0, track.width, 12.0),
+                    radius: 6.0,
+                    fill: Fill::Solid(theme.card),
+                    stroke: None,
+                });
+                paint.push(PaintNode::RoundedRect {
+                    rect: Rect::new(track.x, track.y + 18.0, track.width * ratio, 12.0),
+                    radius: 6.0,
+                    fill: Fill::Solid(theme.accent),
+                    stroke: None,
+                });
+                let thumb_x = track.x + track.width * ratio;
+                paint.push(PaintNode::RoundedRect {
+                    rect: Rect::new(thumb_x - 5.0, track.y + 13.0, 10.0, 22.0),
+                    radius: 4.0,
+                    fill: Fill::Solid(theme.primary_text),
+                    stroke: selected(id).then_some((theme.accent, 2.0)),
+                });
+                let _ = step; // Quantization is performed only by semantic actions.
+                if let Some(visible) = track.intersection(panel) {
+                    hits.push(HitRegion {
+                        item_id: id.clone(),
+                        rect: visible,
+                        actionable: true,
+                        enabled: *enabled,
+                        kind: RowKind::Action,
+                    });
+                }
+            }
+            Control::Breadcrumb { parts, .. } | Control::Status { fields: parts, .. } => {
+                draw_text(&mut paint, row, &parts.join(" / "), false);
+            }
+        }
+    }
+    paint.push(PaintNode::ClipPop);
+    let body = panel;
+    Scene {
+        viewport,
+        menu_id: surface_id.to_string(),
+        panel_rect: panel,
+        paint,
+        hits,
+        scroll: ScrollWindow {
+            viewport: body,
+            content_height: total_height,
+            offset,
+            max_offset,
+            clipped: total_height > viewport.height,
+        },
+    }
+}
+
+/// Slider track is the entire accessible right-hand region (48px high);
+/// actual visible chrome remains a 12px strip.
+fn compact_slider_rect(row: Rect) -> Rect {
+    let start = (row.width * 0.32).min(140.0);
+    Rect::new(row.x + start, row.y, (row.width - start).max(1.0), 48.0)
+}
+
+/// Map exact pointer/touch positions to typed actions. No command execution.
+pub fn compact_action_at(
+    controls: &[nuraloumi_core::model::CompactControl],
+    scene: &Scene,
+    x: f64,
+    y: f64,
+) -> Option<nuraloumi_core::MenuAction> {
+    use nuraloumi_core::model::CompactControl as Control;
+    let id = scene.hit_test(x, y)?;
+    for control in controls {
+        match control {
+            Control::Button {
+                id: control_id,
+                enabled: true,
+                action,
+                ..
+            } if control_id == id => return Some(action.clone()),
+            Control::Toolbar { buttons, .. } => {
+                if let Some(b) = buttons.iter().find(|b| b.id == id && b.enabled) {
+                    return Some(b.action.clone());
+                }
+            }
+            Control::Tabs { tabs, .. } => {
+                if let Some(t) = tabs.iter().find(|t| t.id == id && !t.selected) {
+                    return Some(t.action.clone());
+                }
+            }
+            Control::Slider {
+                id: slider_id,
+                min,
+                max,
+                ..
+            } if slider_id == id => {
+                let rect = scene.hits.iter().find(|h| h.item_id == id)?.rect;
+                let ratio = ((x - rect.x) / rect.width).clamp(0.0, 1.0);
+                let raw =
+                    (f64::from(*min) + (i64::from(*max) - i64::from(*min)) as f64 * ratio).round();
+                return control
+                    .slider_action(raw.clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32);
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod compact_geometry_tests {
+    use super::*;
+    use crate::render::DeterministicText;
+    use nuraloumi_core::model::CompactControl;
+    #[test]
+    fn slider_touch_extremes_and_dpi_independent_targets() {
+        let controls = vec![CompactControl::Slider {
+            id: "volume".into(),
+            label: "Volume".into(),
+            value_id: "volume.set".into(),
+            min: 0,
+            max: 94,
+            step: 10,
+            value: 40,
+            enabled: true,
+        }];
+        for scale in [1.0, 1.5, 2.0] {
+            let scene = layout_compact_controls(
+                "test",
+                &controls,
+                &InteractionState::default(),
+                Viewport::new(400.0, 100.0, scale),
+                &Theme::default(),
+                &DeterministicText,
+            );
+            let hit = &scene.hits[0];
+            assert_eq!(hit.rect.height, 48.0);
+            assert_eq!(
+                compact_action_at(&controls, &scene, hit.rect.x, 24.0),
+                Some(nuraloumi_core::MenuAction::SetValue {
+                    id: "volume.set".into(),
+                    value: 0
+                })
+            );
+            assert_eq!(
+                compact_action_at(&controls, &scene, hit.rect.right() - 0.001, 24.0),
+                Some(nuraloumi_core::MenuAction::SetValue {
+                    id: "volume.set".into(),
+                    value: 94
+                })
+            );
+        }
+    }
+    #[test]
+    fn toolbar_wrap_preserves_minimum_hit_size_and_disabled_state() {
+        use nuraloumi_core::model::CompactButton;
+        let buttons = (0..4)
+            .map(|i| CompactButton {
+                id: format!("b{i}"),
+                label: format!("B{i}"),
+                icon: "+".into(),
+                enabled: i != 0,
+                action: nuraloumi_core::MenuAction::Activate {
+                    id: format!("a{i}"),
+                },
+            })
+            .collect();
+        let controls = vec![CompactControl::Toolbar {
+            id: "toolbar".into(),
+            buttons,
+        }];
+        let scene = layout_compact_controls(
+            "test",
+            &controls,
+            &InteractionState::default(),
+            Viewport::new(100.0, 400.0, 1.0),
+            &Theme::default(),
+            &DeterministicText,
+        );
+        assert_eq!(scene.hits.len(), 4);
+        assert!(scene
+            .hits
+            .iter()
+            .all(|h| h.rect.width >= 48.0 && h.rect.height >= 48.0));
+        assert_eq!(scene.hit_test(25.0, 24.0), None);
+        assert_eq!(scene.hit_test(75.0, 24.0), Some("b1"));
+        assert_eq!(scene.hit_test(25.0, 72.0), Some("b2"));
+    }
+}
+
+#[cfg(test)]
+mod compact_fixture_tests {
+    use super::*;
+    use crate::render::{CairoRenderer, DeterministicText};
+    use nuraloumi_core::model::{CompactButton, CompactControl, CompactTab};
+
+    /// Explicitly regenerate with: cargo test -p nuraloumi-render-cairo
+    /// compact_fixture_png -- --ignored
+    #[test]
+    #[ignore = "regenerates a reviewable in-repository PNG fixture"]
+    fn compact_fixture_png() {
+        let controls = vec![
+            CompactControl::Toolbar {
+                id: "volume.actions".into(),
+                buttons: vec![
+                    CompactButton {
+                        id: "mute".into(),
+                        label: "Mute".into(),
+                        icon: "M".into(),
+                        enabled: true,
+                        action: nuraloumi_core::MenuAction::Toggle {
+                            id: "audio.mute".into(),
+                        },
+                    },
+                    CompactButton {
+                        id: "down".into(),
+                        label: "Decrease".into(),
+                        icon: "-".into(),
+                        enabled: true,
+                        action: nuraloumi_core::MenuAction::Adjust {
+                            id: "audio.volume".into(),
+                            delta: -5,
+                        },
+                    },
+                    CompactButton {
+                        id: "up".into(),
+                        label: "Increase".into(),
+                        icon: "+".into(),
+                        enabled: true,
+                        action: nuraloumi_core::MenuAction::Adjust {
+                            id: "audio.volume".into(),
+                            delta: 5,
+                        },
+                    },
+                ],
+            },
+            CompactControl::Slider {
+                id: "volume".into(),
+                label: "Volume".into(),
+                value_id: "audio.volume".into(),
+                min: 0,
+                max: 100,
+                step: 1,
+                value: 58,
+                enabled: true,
+            },
+            CompactControl::Tabs {
+                id: "settings.tabs".into(),
+                tabs: vec![
+                    CompactTab {
+                        id: "sound".into(),
+                        label: "Sound".into(),
+                        selected: true,
+                        action: nuraloumi_core::MenuAction::Navigate {
+                            target: "sound".into(),
+                        },
+                    },
+                    CompactTab {
+                        id: "screen".into(),
+                        label: "Screen".into(),
+                        selected: false,
+                        action: nuraloumi_core::MenuAction::Navigate {
+                            target: "screen".into(),
+                        },
+                    },
+                ],
+            },
+            CompactControl::Status {
+                id: "status".into(),
+                fields: vec!["58%".into(), "Ready".into()],
+            },
+        ];
+        let scene = layout_compact_controls(
+            "qol-fixture",
+            &controls,
+            &InteractionState::default(),
+            Viewport::new(440.0, 192.0, 1.0),
+            &Theme::default(),
+            &DeterministicText,
+        );
+        let buffer = CairoRenderer::default().render_scene(&scene).unwrap();
+        let path = "docs/fixtures/qol-widget-controls.png";
+        std::fs::create_dir_all("docs/fixtures").unwrap();
+        let mut file = std::fs::File::create(path).unwrap();
+        buffer.surface().write_to_png(&mut file).unwrap();
+    }
+}

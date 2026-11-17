@@ -245,7 +245,10 @@ fn validate_action(
     nested_confirmation: bool,
 ) -> Result<(), ValidationError> {
     match action {
-        MenuAction::Activate { id } | MenuAction::Toggle { id } | MenuAction::Adjust { id, .. } => {
+        MenuAction::Activate { id }
+        | MenuAction::Toggle { id }
+        | MenuAction::Adjust { id, .. }
+        | MenuAction::SetValue { id, .. } => {
             validate_id("action.id", id, limits.max_id_chars)?;
         }
         MenuAction::Navigate { target } => {
