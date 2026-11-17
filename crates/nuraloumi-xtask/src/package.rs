@@ -195,9 +195,20 @@ pub fn stage_package(
         &root.join("packaging/nuraloumi.toml.example"),
         &config_dir.join("nuraloumi.toml.example"),
     )?;
+    for desktop in [
+        "nuraloumi-player.desktop",
+        "nuraloumi-files.desktop",
+        "nuraloumi-file-manager.desktop",
+        "nuraloumi-notifications.desktop",
+    ] {
+        copy_required(
+            &root.join("packaging/applications").join(desktop),
+            &stage.join("share/applications").join(desktop),
+        )?;
+    }
     copy_required(
-        &root.join("packaging/applications/nuraloumi-player.desktop"),
-        &stage.join("share/applications/nuraloumi-player.desktop"),
+        &root.join("packaging/dbus-1/services/org.freedesktop.Notifications.service"),
+        &stage.join("share/dbus-1/services/org.freedesktop.Notifications.service"),
     )?;
     copy_tree(
         &root.join("docs/qualification"),
@@ -377,6 +388,10 @@ pub fn check_package(root: &Path, stage: &Path) -> Result<(), String> {
         "LICENSE",
         "config/nuraloumi.toml.example",
         "share/applications/nuraloumi-player.desktop",
+        "share/applications/nuraloumi-files.desktop",
+        "share/applications/nuraloumi-file-manager.desktop",
+        "share/applications/nuraloumi-notifications.desktop",
+        "share/dbus-1/services/org.freedesktop.Notifications.service",
         "share/nuraloumi/qualification/README.md",
     ] {
         if !expected_files.contains_key(required) {
@@ -402,6 +417,46 @@ pub fn check_package(root: &Path, stage: &Path) -> Result<(), String> {
         if &header != b"\x7fELF" {
             return Err(format!("runtime binary is not ELF: {name}"));
         }
+    }
+    // Desktop entries must not point to tools omitted from the runtime bundle.
+    // D-Bus activation is only a service descriptor: no autostart or competing owner.
+    for desktop in [
+        "nuraloumi-player.desktop",
+        "nuraloumi-files.desktop",
+        "nuraloumi-file-manager.desktop",
+        "nuraloumi-notifications.desktop",
+    ] {
+        let contents = fs::read_to_string(stage.join("share/applications").join(desktop))
+            .map_err(|error| format!("read desktop {desktop}: {error}"))?;
+        for key in ["Exec", "TryExec"] {
+            let value = contents
+                .lines()
+                .find_map(|line| line.strip_prefix(&format!("{key}=")))
+                .ok_or_else(|| format!("{desktop} missing {key}"))?;
+            let executable = value
+                .split_whitespace()
+                .next()
+                .ok_or_else(|| format!("{desktop} empty {key}"))?;
+            if !bins.iter().any(|binary| binary == executable) {
+                return Err(format!(
+                    "{desktop} {key} references absent binary {executable}"
+                ));
+            }
+        }
+    }
+    let service = fs::read_to_string(
+        stage.join("share/dbus-1/services/org.freedesktop.Notifications.service"),
+    )
+    .map_err(|error| format!("read notification activation: {error}"))?;
+    if !service
+        .lines()
+        .any(|line| line == "Name=org.freedesktop.Notifications")
+        || !service
+            .lines()
+            .any(|line| line == "Exec=/usr/bin/nuraloumi-notificationd")
+        || !bins.iter().any(|bin| bin == "nuraloumi-notificationd")
+    {
+        return Err("notification activation must reference the packaged daemon".into());
     }
     let actual_files = collect_files(stage)?;
     if actual_files.len() != expected_files.len() {

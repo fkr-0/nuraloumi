@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=NuraLoumi Notifications
+Comment=Notification history and controls
+Exec=nuraloumi-notifications
+TryExec=nuraloumi-notifications
+Icon=preferences-system-notifications
+Terminal=false
+Categories=Utility;
+StartupNotify=false

@@ -17,7 +17,7 @@ source="nuraloumi-stage.tar.gz"
 builddir="$srcdir/bundle"
 
 package() {
-    install -d "$pkgdir/usr/bin" "$pkgdir/usr/share/applications" "$pkgdir/usr/share/nuraloumi" "$pkgdir/usr/share/nuraloumi/qualification" \
+    install -d "$pkgdir/usr/bin" "$pkgdir/usr/share/applications" "$pkgdir/usr/share/dbus-1/services" "$pkgdir/usr/share/nuraloumi" "$pkgdir/usr/share/nuraloumi/qualification" \
         "$pkgdir/usr/share/licenses/nuraloumi"
     local binary count=0
     for binary in "$builddir"/bin/nuraloumi-*; do
@@ -26,7 +26,10 @@ package() {
         count=$((count+1))
     done
     [ "$count" -ge 4 ] || return 1
-    install -m644 "$builddir/share/applications/nuraloumi-player.desktop" "$pkgdir/usr/share/applications/nuraloumi-player.desktop"
+    for desktop in "$builddir"/share/applications/*.desktop; do
+        install -m644 "$desktop" "$pkgdir/usr/share/applications/${desktop##*/}" || return 1
+    done
+    install -m644 "$builddir/share/dbus-1/services/org.freedesktop.Notifications.service" "$pkgdir/usr/share/dbus-1/services/org.freedesktop.Notifications.service"
     # One media player process. Optional, separately qualified native
     # video plugin lives inside playerd, never as an extra executable.
     if [ -d "$builddir/lib/nuraloumi/video" ]; then

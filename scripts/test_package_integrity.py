@@ -24,7 +24,8 @@ class PackageIntegrityTests(unittest.TestCase):
             '[workspace.package]\nversion = "0.0.3"\nedition = "2021"\n'
         )
         names = {
-            "nuraloumi-shell": ["nuraloumi-menu", "nuraloumi-panel", "nuraloumi-feeds"],
+            "nuraloumi-shell": ["nuraloumi-menu", "nuraloumi-panel", "nuraloumi-feeds",
+                                "nuraloumi-notificationd", "nuraloumi-file-manager"],
             "nuraloumi-providers": ["nuraloumi-probe"],
             "nuraloumi-wayland": ["nuraloumi-thumbnail-helper"],
         }
@@ -69,9 +70,23 @@ class PackageIntegrityTests(unittest.TestCase):
         for name in self.names:
             self.payloads[f"bin/{name}"] = b"\x7fELFtest-fixture-not-executable"
         for name in ["README.md", "LICENSE", "config/nuraloumi.toml.example",
-                     "share/applications/nuraloumi-player.desktop",
                      "share/nuraloumi/qualification/README.md"]:
             self.payloads[name] = b"fixture"
+        for desktop, binary in {
+            "nuraloumi-player.desktop": "nuraloumi-feeds",
+            "nuraloumi-files.desktop": "nuraloumi-feeds",
+            "nuraloumi-file-manager.desktop": "nuraloumi-file-manager",
+            "nuraloumi-notifications.desktop": "nuraloumi-feeds",
+        }.items():
+            self.payloads[f"share/applications/{desktop}"] = (
+                f"[Desktop Entry]\nType=Application\nExec={binary}\nTryExec={binary}\n"
+            ).encode()
+        # The miniature fixture does not build a daemon; use a metadata bin
+        # with that name so the service link is still checked.
+        self.payloads["share/dbus-1/services/org.freedesktop.Notifications.service"] = (
+            b"[D-BUS Service]\nName=org.freedesktop.Notifications\n"
+            b"Exec=/usr/bin/nuraloumi-notificationd\n"
+        )
         for name, content in self.payloads.items():
             path = self.stage / name
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -112,6 +127,19 @@ class PackageIntegrityTests(unittest.TestCase):
 
     def test_unlisted_file_rejected(self):
         (self.stage / "unlisted.txt").write_text("oops")
+        self.assertNotEqual(self.verify().returncode, 0)
+
+    def test_desktop_exec_not_in_bundle_rejected(self):
+        key = "share/applications/nuraloumi-files.desktop"
+        self.payloads[key] = (b"[Desktop Entry]\nExec=missing-helper\n"
+                              b"TryExec=missing-helper\n")
+        (self.stage / key).write_bytes(self.payloads[key])
+        self.manifest()
+        self.assertIn("references absent binary", self.verify().stderr)
+
+    def test_missing_activation_rejected(self):
+        name = "share/dbus-1/services/org.freedesktop.Notifications.service"
+        (self.stage / name).unlink()
         self.assertNotEqual(self.verify().returncode, 0)
 
     def test_missing_binary_rejected(self):

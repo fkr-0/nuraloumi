@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=NuraLoumi Files
+Comment=Compact touch-friendly file browser
+Exec=nuraloumi-files
+TryExec=nuraloumi-files
+Icon=system-file-manager
+Terminal=false
+Categories=System;FileTools;FileManager;
+StartupNotify=false

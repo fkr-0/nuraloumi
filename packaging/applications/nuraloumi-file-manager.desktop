@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=NuraLoumi File Manager
+Comment=Full file manager window
+Exec=nuraloumi-file-manager
+TryExec=nuraloumi-file-manager
+Icon=system-file-manager
+Terminal=false
+Categories=System;FileTools;FileManager;
+StartupNotify=false
