@@ -66,7 +66,11 @@ sudo -n -u user env \
       if grep -q "\"status\": \"Error\"" "$QUAL_DIR/current.json"; then
         echo "PLAYER_ERROR poll=$n"; break
       fi
-      if grep -q "\"status\": \"Stopped\"" "$QUAL_DIR/current.json"; then
+      # Natural EOS in LoopMode::Off is Ended; Stopped means an explicit stop.
+      # A terminal status alone never qualifies the stream: the log gates
+      # below still require video+audio EOS and 414 released Wayland buffers.
+      if grep -q "\"status\": \"Ended\"" "$QUAL_DIR/current.json" &&
+         grep -q "\"error\": null" "$QUAL_DIR/current.json"; then
         result=0;echo "PLAYER_EOS at_poll=$n"; break
       fi
     done
