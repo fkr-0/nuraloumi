@@ -2,9 +2,9 @@ use nuraloumi_providers::{
     session::OwnedDesktopSession, ActionProvider, ActionResult, ApplicationProvider,
     ApplicationSnapshot, AudioAction, AudioProvider, BacklightAction, BacklightProvider,
     BatterySnapshot, BluetoothAction, BluetoothProvider, ClockProvider, Health, MediaAction,
-    MediaProvider, NetworkAction,
-    NetworkProvider, NotificationAction, NotificationProvider, ProbeSnapshot, ProcessProvider,
-    ProcessSnapshot, Provider, SessionAction, SessionProvider, SnapshotMeta, SystemCommandRunner,
+    MediaProvider, NetworkAction, NetworkProvider, NotificationAction, NotificationProvider,
+    ProbeSnapshot, ProcessProvider, ProcessSnapshot, Provider, SessionAction, SessionProvider,
+    SnapshotMeta, SystemCommandRunner,
 };
 use nuraloumi_render_cairo::{
     CairoRenderer, Color, HitRegion as RenderHitRegion, PaintNode, Point, Rect, RenderOptions,
