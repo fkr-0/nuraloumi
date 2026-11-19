@@ -341,6 +341,19 @@ nurabrowser_engine_run(const NuraBrowserOptions *options)
         g_printerr("nura-browser: refusing to run with WebKit sandbox disabled\n");
         return EXIT_FAILURE;
     }
+    const char *sandbox_toggle = g_getenv("WEBKIT_USE_SANDBOX");
+    if (sandbox_toggle && g_strcmp0(sandbox_toggle, "1") != 0) {
+        g_printerr("nura-browser: WEBKIT_USE_SANDBOX must remain enabled\n");
+        return EXIT_FAILURE;
+    }
+    /* The native core can be started without the private-root shell wrapper.
+     * Reject absent helpers here too, before WebKit creates any subprocess. */
+    g_autofree char *bwrap = g_find_program_in_path("bwrap");
+    g_autofree char *dbus_proxy = g_find_program_in_path("xdg-dbus-proxy");
+    if (!bwrap || !dbus_proxy) {
+        g_printerr("nura-browser: sandbox helpers unavailable (bwrap and xdg-dbus-proxy required)\n");
+        return EXIT_FAILURE;
+    }
     if (getuid() != geteuid()) {
         g_printerr("nura-browser: setuid execution is unsupported\n");
         return EXIT_FAILURE;
