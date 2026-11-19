@@ -40,7 +40,11 @@ class BuildContractTests(unittest.TestCase):
         for dep in q.DEPS:
             self.assertIn(f"dependency('{dep}'", text)
         self.assertIn("version: '>=2.54.0'", text)
-        self.assertIn("rename: ',browse'", text)
+        # The internal engine no longer installs the historical public alias.
+        # Only NuraLoumi's Rust browser binary owns the user-facing command.
+        self.assertIn("'nurabrowser-core'", text)
+        self.assertIn("install_dir: get_option('libexecdir') / 'nuraloumi' / 'browser'", text)
+        self.assertNotIn("rename: ',browse'", text)
         self.assertNotIn("sl101-browse", text.replace("No sl101-browse compatibility shim.", ""))
 
     def test_no_legacy_api_in_code(self):
