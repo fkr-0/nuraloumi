@@ -1,10 +1,15 @@
+//! Notification Center: a standalone Cairo/wl_shm surface.
+//!
+//! Provider mutations are deliberately isolated from scene construction.
+//! Until the provider exposes persisted read flags and timestamps, read state
+//! is session-local and history is grouped by application, not fabricated time.
 use nuraloumi_core::{
     MenuAction, MenuItem, MenuModel, MenuState, SemanticInput, DARK_THEME, LIGHT_THEME,
 };
 use nuraloumi_providers::notifications::{
     NotificationAction, NotificationEntry, NotificationProvider, NotificationSnapshot,
 };
-use nuraloumi_providers::{ActionProvider, CommandRunner, Health, Provider};
+use nuraloumi_providers::{ActionProvider, Health, Provider};
 use nuraloumi_render_cairo::{CairoRenderer, RenderOptions, Scene, Viewport};
 use nuraloumi_shell::{
     dismiss_backdrop_margins, load_config_or_default, render_menu_with_glyphs, ShellConfig,
@@ -14,20 +19,33 @@ use nuraloumi_wayland::{
     BackendError, DismissBackdropConfig, Frame, Key, MenuConfig as WaylandMenuConfig, PixelFormat,
     PlatformEvent as WaylandEvent, SurfaceId, WaylandBackend,
 };
-use std::{collections::BTreeSet, env, path::PathBuf, process::ExitCode, sync::mpsc, thread};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    env,
+    path::PathBuf,
+    process::ExitCode,
+};
+
+const MAX_ENTRIES: usize = 64;
+const MAX_QUERY_CHARS: usize = 80;
+const BODY_LINE_CHARS: usize = 46;
+const BODY_VISIBLE_LINES: usize = 5;
+const PRIMARY_BUTTON: u32 = 0x110; // Linux BTN_LEFT
+
 #[derive(Default)]
 struct Args {
     config: Option<PathBuf>,
     fixture: bool,
 }
+
 fn parse_args() -> Result<Args, String> {
-    let mut a = Args::default();
+    let mut args = Args::default();
     let mut iter = env::args().skip(1);
     while let Some(arg) = iter.next() {
         match arg.as_str() {
-            "--fixture" => a.fixture = true,
+            "--fixture" => args.fixture = true,
             "--live" => {}
-            "--config" => a.config = Some(iter.next().ok_or("--config requires a path")?.into()),
+            "--config" => args.config = Some(iter.next().ok_or("--config requires a path")?.into()),
             "--help" | "-h" => {
                 println!("--config PATH  --fixture  --live");
                 std::process::exit(0)
@@ -35,27 +53,684 @@ fn parse_args() -> Result<Args, String> {
             _ => return Err(format!("unknown argument: {arg}")),
         }
     }
-    Ok(a)
+    Ok(args)
 }
-fn selection(model: &MenuModel, state: &MenuState) -> Option<MenuAction> {
+
+fn cmd(kind: &str, payload: impl Into<String>) -> MenuAction {
+    MenuAction::Custom {
+        kind: kind.into(),
+        payload: payload.into(),
+    }
+}
+
+fn safe_visible_char(ch: char) -> bool {
+    !ch.is_control() && !matches!(ch, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+}
+
+fn clean(value: &str, limit: usize) -> String {
+    let mut result = String::new();
+    for ch in value.chars() {
+        // Keep untrusted summaries from introducing fake rows or visual reordering.
+        if result.chars().count() >= limit {
+            result.push('…');
+            break;
+        }
+        if !safe_visible_char(ch) {
+            result.push(' ');
+        } else {
+            result.push(ch);
+        }
+    }
+    result.trim().to_owned()
+}
+
+fn body_lines(body: &str) -> Vec<String> {
+    let mut lines = vec![String::new()];
+    for ch in body.chars().take(240) {
+        if ch == '\n'
+            || lines
+                .last()
+                .is_some_and(|v| v.chars().count() >= BODY_LINE_CHARS)
+        {
+            lines.push(String::new());
+        }
+        if ch != '\n' {
+            lines
+                .last_mut()
+                .expect("body always has a line")
+                .push(if !safe_visible_char(ch) { ' ' } else { ch });
+        }
+    }
+    lines
+}
+
+#[derive(Default)]
+struct UiState {
+    query: String,
+    detail: Option<u32>,
+    body_offset: usize,
+    read: BTreeSet<u32>,
+    confirm_ids: Option<Vec<u32>>,
+    error: Option<String>,
+    notice: Option<String>,
+    pointer_press: Option<String>,
+    touch_press: Option<TouchPress>,
+    active_touches: BTreeSet<i32>,
+    touch_cancelled: bool,
+}
+
+struct TouchPress {
+    id: i32,
+    item: Option<String>,
+    x: f64,
+    y: f64,
+    scroll_y: f64,
+    scrolling: bool,
+}
+
+impl UiState {
+    fn selected_count(&self, snapshot: &NotificationSnapshot) -> usize {
+        snapshot
+            .notifications
+            .iter()
+            .take(MAX_ENTRIES)
+            .filter(|n| !self.read.contains(&n.id))
+            .count()
+    }
+
+    fn view(&mut self, id: u32, snapshot: &NotificationSnapshot) {
+        if snapshot.notifications.iter().any(|n| n.id == id) {
+            self.detail = Some(id);
+            self.read.insert(id);
+            self.body_offset = 0;
+            self.error = None;
+        }
+    }
+
+    fn refresh_read_ids(&mut self, snapshot: &NotificationSnapshot) {
+        self.read
+            .retain(|id| snapshot.notifications.iter().any(|entry| entry.id == *id));
+        if self
+            .detail
+            .is_some_and(|id| !snapshot.notifications.iter().any(|n| n.id == id))
+        {
+            self.detail = None;
+        }
+    }
+
+    fn reset_gestures(&mut self) {
+        self.pointer_press = None;
+        self.touch_press = None;
+    }
+
+    fn pointer(
+        &mut self,
+        scene: Option<&Scene>,
+        x: f64,
+        y: f64,
+        button: u32,
+        pressed: bool,
+    ) -> Option<String> {
+        if button != PRIMARY_BUTTON && button != 1 {
+            return None;
+        }
+        let current = scene.and_then(|s| s.hit_test(x, y)).map(str::to_owned);
+        if pressed {
+            self.pointer_press = current;
+            None
+        } else {
+            let start = self.pointer_press.take();
+            if start.is_some() && start == current {
+                start
+            } else {
+                None
+            }
+        }
+    }
+
+    fn touch_down(&mut self, scene: Option<&Scene>, id: i32, x: f64, y: f64) {
+        if !self.active_touches.insert(id) {
+            self.touch_cancelled = true;
+        }
+        if self.active_touches.len() > 1 {
+            self.touch_cancelled = true;
+            self.touch_press = None;
+            return;
+        }
+        if !self.touch_cancelled {
+            self.touch_press = Some(TouchPress {
+                id,
+                item: scene.and_then(|s| s.hit_test(x, y)).map(str::to_owned),
+                x,
+                y,
+                scroll_y: y,
+                scrolling: false,
+            });
+        }
+    }
+
+    /// Emit one navigational scroll step per 28 logical pixels of movement.
+    /// A swipe never activates the originally pressed notification.
+    fn touch_move(&mut self, id: i32, x: f64, y: f64) -> Option<i32> {
+        let press = self.touch_press.as_mut().filter(|p| p.id == id)?;
+        press.x = x;
+        press.y = y;
+        let delta = y - press.scroll_y;
+        if delta.abs() < 28.0 {
+            return None;
+        }
+        press.scrolling = true;
+        let steps = (delta.abs() / 28.0).floor().min(8.0) as i32;
+        press.scroll_y += f64::from(steps) * 28.0 * delta.signum();
+        Some(if delta < 0.0 { steps } else { -steps })
+    }
+
+    fn touch_up(&mut self, scene: Option<&Scene>, id: i32) -> Option<String> {
+        if !self.active_touches.remove(&id) {
+            return None;
+        }
+        let result = if self.touch_cancelled {
+            None
+        } else {
+            self.touch_press
+                .take()
+                .filter(|p| p.id == id && !p.scrolling)
+                .and_then(|p| {
+                    let current = scene.and_then(|s| s.hit_test(p.x, p.y));
+                    (Some(p.item.as_deref()?) == current).then_some(p.item?)
+                })
+        };
+        if self.active_touches.is_empty() {
+            self.touch_cancelled = false;
+            self.touch_press = None;
+        }
+        result
+    }
+
+    fn touch_cancel(&mut self, ids: &[i32]) {
+        self.touch_cancelled = true;
+        self.touch_press = None;
+        if ids.is_empty() {
+            self.active_touches.clear();
+            self.touch_cancelled = false;
+        } else {
+            for id in ids {
+                self.active_touches.remove(id);
+            }
+            if self.active_touches.is_empty() {
+                self.touch_cancelled = false;
+            }
+        }
+    }
+
+    fn scroll_body(&mut self, snapshot: &NotificationSnapshot, delta: isize) {
+        let Some(entry) = self
+            .detail
+            .and_then(|id| snapshot.notifications.iter().find(|n| n.id == id))
+        else {
+            return;
+        };
+        let max = body_lines(&entry.body)
+            .len()
+            .saturating_sub(BODY_VISIBLE_LINES);
+        self.body_offset = self.body_offset.saturating_add_signed(delta).min(max);
+    }
+}
+
+fn fixture() -> NotificationSnapshot {
+    let mut snapshot = NotificationSnapshot::unavailable(0, String::new());
+    snapshot.issues.clear();
+    snapshot.meta.health = Health::Healthy;
+    snapshot.backend = "fixture".into();
+    snapshot.notifications = (0..10)
+        .map(|i| NotificationEntry {
+            id: i + 1,
+            app: if i % 2 == 0 { "Chat" } else { "System" }.into(),
+            summary: format!("Demo notification {}", i + 1),
+            body: if i == 0 {
+                "Long body: ".to_owned()
+                    + &"This text is readable in the paginated detail view. ".repeat(5)
+            } else {
+                format!("Sample message body {}", i + 1)
+            },
+            actions: if i % 2 == 0 {
+                vec!["open".into(), "reply".into()]
+            } else {
+                vec![]
+            },
+            default_action: None,
+        })
+        .collect();
+    snapshot
+}
+
+fn filtered<'a>(snapshot: &'a NotificationSnapshot, query: &str) -> Vec<&'a NotificationEntry> {
+    let needle = query.to_lowercase();
+    let mut seen = BTreeSet::new();
+    snapshot
+        .notifications
+        .iter()
+        .take(MAX_ENTRIES)
+        .filter(|entry| seen.insert(entry.id))
+        .filter(|entry| {
+            needle.is_empty()
+                || entry.app.to_lowercase().contains(&needle)
+                || entry.summary.to_lowercase().contains(&needle)
+                || entry.body.to_lowercase().contains(&needle)
+        })
+        .collect()
+}
+
+fn model(snapshot: &NotificationSnapshot, ui: &UiState) -> MenuModel {
+    let count = snapshot.notifications.len().min(MAX_ENTRIES);
+    let unread = ui.selected_count(snapshot);
+    let mut items = vec![
+        MenuItem::status("heading", format!("Notifications  ·  {count}"))
+            .with_subtitle(format!("{unread} unread in this session · F5 refresh")),
+    ];
+
+    if let Some(error) = &ui.error {
+        items.push(MenuItem::status(
+            "error",
+            format!("Unavailable: {}", clean(error, 100)),
+        ));
+        items.push(MenuItem::action("retry", "Retry", cmd("refresh", "")));
+    } else if snapshot.meta.health == Health::Unavailable {
+        items.push(MenuItem::status(
+            "error",
+            "Notification backend unavailable",
+        ));
+        items.push(MenuItem::action("retry", "Retry", cmd("refresh", "")));
+    }
+    if let Some(notice) = &ui.notice {
+        items.push(MenuItem::status("notice", clean(notice, 100)));
+    }
+    if !snapshot.issues.is_empty() {
+        items.push(MenuItem::status(
+            "provider-issue",
+            format!("Backend reports {} issue(s)", snapshot.issues.len()),
+        ));
+    }
+
+    if let Some(ids) = &ui.confirm_ids {
+        items.push(MenuItem::section(
+            "confirm-section",
+            "CONFIRM DESTRUCTIVE ACTION",
+        ));
+        items.push(MenuItem::status(
+            "confirm-text",
+            format!(
+                "Delete {} history entries? This cannot be undone.",
+                ids.len()
+            ),
+        ));
+        items.push(MenuItem::action(
+            "confirm-clear",
+            "Yes, clear all",
+            cmd("clear", ""),
+        ));
+        items.push(MenuItem::action(
+            "cancel-clear",
+            "Cancel · keep notifications",
+            cmd("cancel", ""),
+        ));
+        return MenuModel::new("notifications-confirm", "Notifications", items);
+    }
+
+    if let Some(id) = ui.detail {
+        if let Some(entry) = snapshot.notifications.iter().find(|n| n.id == id) {
+            items.push(MenuItem::action("back", "← Back to inbox", cmd("back", "")));
+            items.push(MenuItem::section("detail-app", clean(&entry.app, 90)));
+            items.push(MenuItem::status("detail-title", clean(&entry.summary, 140)));
+            items.push(MenuItem::section("detail-body-heading", "MESSAGE"));
+            let lines = body_lines(&entry.body);
+            if lines.iter().all(|v| v.is_empty()) {
+                items.push(MenuItem::status(
+                    "detail-empty",
+                    "No additional message text",
+                ));
+            } else {
+                for (index, line) in lines
+                    .iter()
+                    .enumerate()
+                    .skip(ui.body_offset)
+                    .take(BODY_VISIBLE_LINES)
+                {
+                    items.push(MenuItem::status(format!("body-{index}"), line));
+                }
+                if ui.body_offset > 0 {
+                    items.push(MenuItem::action(
+                        "body-previous",
+                        "↑ Previous lines",
+                        cmd("scroll-up", ""),
+                    ));
+                }
+                if ui.body_offset + BODY_VISIBLE_LINES < lines.len() {
+                    items.push(MenuItem::action(
+                        "body-next",
+                        "↓ More lines",
+                        cmd("scroll-down", ""),
+                    ));
+                }
+            }
+            items.push(MenuItem::section("detail-actions", "ACTIONS"));
+            items.push(MenuItem::action(
+                "toggle-read",
+                if ui.read.contains(&id) {
+                    "Mark unread"
+                } else {
+                    "Mark read"
+                },
+                cmd("read", id.to_string()),
+            ));
+            let mut seen = BTreeSet::new();
+            for action in entry.actions.iter().chain(entry.default_action.iter()) {
+                if seen.insert(action.clone()) {
+                    items.push(MenuItem::action(
+                        format!("invoke-{id}-{}", seen.len()),
+                        format!("Run: {}", clean(action, 80)),
+                        cmd("invoke", format!("{id}:{action}")),
+                    ));
+                }
+            }
+            items.push(MenuItem::action(
+                "dismiss-detail",
+                "Dismiss notification",
+                cmd("dismiss", id.to_string()),
+            ));
+            return MenuModel::new("notifications-detail", "Notification detail", items);
+        }
+    }
+
+    items.push(MenuItem::status(
+        "hint",
+        format!(
+            "Type to filter: {} · Esc close",
+            if ui.query.is_empty() {
+                "all"
+            } else {
+                &ui.query
+            }
+        ),
+    ));
+    if !snapshot.notifications.is_empty() {
+        items.push(MenuItem::action(
+            "clear-all",
+            "Clear all…",
+            cmd("ask-clear", ""),
+        ));
+    }
+    let entries = filtered(snapshot, &ui.query);
+    if entries.is_empty() {
+        items.push(MenuItem::status(
+            "empty",
+            if !ui.query.is_empty() {
+                "No matching notifications"
+            } else if snapshot.meta.health == Health::Unavailable {
+                "No history available"
+            } else {
+                "Your inbox is empty"
+            },
+        ));
+    } else {
+        // Dunst's present contract contains neither per-entry timestamps nor
+        // persisted read markers. Preserve app grouping without inventing ages.
+        let mut groups: BTreeMap<String, Vec<&NotificationEntry>> = BTreeMap::new();
+        for entry in entries {
+            groups.entry(entry.app.clone()).or_default().push(entry);
+        }
+        for (index, (app, group)) in groups.iter().enumerate() {
+            let title = clean(app, 70);
+            items.push(MenuItem::section(
+                format!("app-{index}"),
+                format!(
+                    "{}  ·  {}",
+                    if title.is_empty() {
+                        "Unknown application"
+                    } else {
+                        &title
+                    },
+                    group.len()
+                ),
+            ));
+            for entry in group {
+                let label = format!(
+                    "{} {}",
+                    if ui.read.contains(&entry.id) {
+                        "○"
+                    } else {
+                        "●"
+                    },
+                    clean(&entry.summary, 100)
+                );
+                let subtitle = clean(&entry.body, 90);
+                items.push(
+                    MenuItem::action(
+                        format!("view-{}", entry.id),
+                        label,
+                        cmd("view", entry.id.to_string()),
+                    )
+                    .with_subtitle(if subtitle.is_empty() {
+                        "Open details".into()
+                    } else {
+                        subtitle
+                    }),
+                );
+            }
+        }
+    }
+    items.push(MenuItem::status(
+        "footer",
+        "● unread · ○ read (session only)",
+    ));
+    MenuModel::new("notifications", "Notifications", items)
+}
+
+fn selected_action(model: &MenuModel, state: &MenuState) -> Option<MenuAction> {
     model
         .item_by_id(state.selected_id.as_deref()?)?
         .action
         .clone()
 }
-fn hit(scene: &Option<Scene>, model: &MenuModel, x: f64, y: f64) -> Option<MenuAction> {
-    model
-        .item_by_id(scene.as_ref()?.hit_test(x, y)?)?
-        .action
-        .clone()
+
+fn selected_id_action(model: &MenuModel, item: &str) -> Option<MenuAction> {
+    model.item_by_id(item)?.action.clone()
 }
+
+fn refresh(
+    provider: &mut NotificationProvider<nuraloumi_providers::command::SystemCommandRunner>,
+    snapshot: &mut NotificationSnapshot,
+    ui: &mut UiState,
+) {
+    match provider.snapshot() {
+        Ok(next) if next.meta.health != Health::Unavailable => {
+            *snapshot = next;
+            ui.error = None;
+            ui.refresh_read_ids(snapshot);
+        }
+        Ok(next) => {
+            ui.error = Some(
+                next.issues
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "backend unavailable".into()),
+            );
+            if snapshot.notifications.is_empty() {
+                *snapshot = next;
+            }
+        }
+        Err(error) => {
+            ui.error = Some(format!("{error:?}"));
+        }
+    }
+}
+
+fn perform(
+    action: MenuAction,
+    ui: &mut UiState,
+    snapshot: &mut NotificationSnapshot,
+    provider: &mut NotificationProvider<nuraloumi_providers::command::SystemCommandRunner>,
+    fixture_mode: bool,
+) {
+    let MenuAction::Custom { kind, payload } = action else {
+        return;
+    };
+    ui.notice = None;
+    match kind.as_str() {
+        "refresh" => {
+            if fixture_mode {
+                *snapshot = fixture();
+                ui.error = None;
+            } else {
+                refresh(provider, snapshot, ui);
+            }
+        }
+        "back" => {
+            ui.detail = None;
+            ui.body_offset = 0;
+        }
+        "view" => {
+            if let Ok(id) = payload.parse() {
+                ui.view(id, snapshot);
+            }
+        }
+        "read" => {
+            if let Ok(id) = payload.parse::<u32>() {
+                if snapshot.notifications.iter().any(|n| n.id == id) && !ui.read.insert(id) {
+                    ui.read.remove(&id);
+                }
+            }
+        }
+        "scroll-up" => ui.scroll_body(snapshot, -(BODY_VISIBLE_LINES as isize)),
+        "scroll-down" => ui.scroll_body(snapshot, BODY_VISIBLE_LINES as isize),
+        "ask-clear" => {
+            if !snapshot.notifications.is_empty() {
+                ui.confirm_ids = Some(
+                    snapshot
+                        .notifications
+                        .iter()
+                        .take(MAX_ENTRIES)
+                        .map(|n| n.id)
+                        .collect(),
+                );
+                ui.reset_gestures();
+            }
+        }
+        "cancel" => ui.confirm_ids = None,
+        "clear" => {
+            let Some(expected) = ui.confirm_ids.take() else {
+                return;
+            };
+            let current = snapshot
+                .notifications
+                .iter()
+                .take(MAX_ENTRIES)
+                .map(|n| n.id)
+                .collect::<Vec<_>>();
+            if expected != current {
+                ui.error = Some("History changed; reconfirm clear-all".into());
+                return;
+            }
+            if fixture_mode {
+                snapshot.notifications.clear();
+                ui.detail = None;
+            } else {
+                // Guard the confirmation against new arrivals since the prompt.
+                // Provider::execute is still the sole action authority.
+                match provider.snapshot() {
+                    Ok(live)
+                        if live.meta.health != Health::Unavailable
+                            && live
+                                .notifications
+                                .iter()
+                                .take(MAX_ENTRIES)
+                                .map(|n| n.id)
+                                .collect::<Vec<_>>()
+                                == expected => {}
+                    _ => {
+                        ui.error =
+                            Some("History changed or is unavailable; reconfirm clear-all".into());
+                        return;
+                    }
+                }
+                match provider.execute(NotificationAction::Clear) {
+                    Ok(_) => {
+                        refresh(provider, snapshot, ui);
+                        ui.detail = None;
+                    }
+                    Err(error) => ui.error = Some(format!("Clear failed: {error:?}")),
+                }
+            }
+        }
+        "dismiss" | "invoke" => {
+            let (id, backend_action) = if kind == "dismiss" {
+                let Ok(id) = payload.parse::<u32>() else {
+                    return;
+                };
+                (id, NotificationAction::Remove { id })
+            } else {
+                let Some((raw_id, name)) = payload.split_once(':') else {
+                    return;
+                };
+                let Ok(id) = raw_id.parse::<u32>() else {
+                    return;
+                };
+                let allowed = snapshot
+                    .notifications
+                    .iter()
+                    .find(|n| n.id == id)
+                    .is_some_and(|n| {
+                        n.actions.iter().any(|a| a == name)
+                            || n.default_action.as_deref() == Some(name)
+                    });
+                if !allowed {
+                    ui.error = Some("Action is no longer available; refresh".into());
+                    return;
+                }
+                (
+                    id,
+                    NotificationAction::Invoke {
+                        id,
+                        action: name.into(),
+                    },
+                )
+            };
+            if !snapshot.notifications.iter().any(|n| n.id == id) {
+                ui.error = Some("Notification is no longer available".into());
+                return;
+            }
+            if fixture_mode {
+                if kind == "dismiss" {
+                    snapshot.notifications.retain(|n| n.id != id);
+                } else {
+                    ui.notice = Some("Fixture: no system action executed".into());
+                }
+            } else {
+                match provider.execute(backend_action) {
+                    Ok(_) => refresh(provider, snapshot, ui),
+                    Err(error) => {
+                        ui.error = Some(format!("Action failed: {error:?}"));
+                        return;
+                    }
+                }
+            }
+            ui.read.remove(&id);
+            if ui.detail == Some(id) {
+                ui.detail = None;
+                ui.body_offset = 0;
+            }
+        }
+        _ => {}
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw(
     backend: &mut WaylandBackend,
     surface: SurfaceId,
     renderer: &CairoRenderer,
     config: &ShellConfig,
-    model: &MenuModel,
+    menu: &MenuModel,
     state: &MenuState,
     width: u32,
     height: u32,
@@ -65,630 +740,155 @@ fn draw(
         ShellTheme::Dark => &DARK_THEME,
         ShellTheme::Light => &LIGHT_THEME,
     };
-    let viewport = Viewport::new(f64::from(width), f64::from(height), f64::from(scale.max(1)));
     let (scene, mut buffer) = render_menu_with_glyphs(
         renderer,
-        model,
+        menu,
         state,
-        viewport,
+        Viewport::new(f64::from(width), f64::from(height), f64::from(scale.max(1))),
         tokens,
         RenderOptions::default(),
         None,
         None,
     )
-    .map_err(|e| format!("render: {e}"))?;
+    .map_err(|error| format!("render: {error}"))?;
     let info = buffer.info();
-    let bw = u32::try_from(info.width).map_err(|e| e.to_string())?;
-    let bh = u32::try_from(info.height).map_err(|e| e.to_string())?;
-    let stride = usize::try_from(info.stride).map_err(|e| e.to_string())?;
+    let width = u32::try_from(info.width).map_err(|error| error.to_string())?;
+    let height = u32::try_from(info.height).map_err(|error| error.to_string())?;
+    let stride = usize::try_from(info.stride).map_err(|error| error.to_string())?;
     let result = buffer
         .with_argb32_bytes(|pixels, _| {
             backend.present(
                 surface,
                 Frame {
-                    width: bw,
-                    height: bh,
+                    width,
+                    height,
                     stride,
                     format: PixelFormat::Argb8888,
                     pixels,
                 },
             )
         })
-        .map_err(|e| e.to_string())?;
+        .map_err(|error| error.to_string())?;
     match result {
         Ok(()) | Err(BackendError::WouldBlock) => Ok(scene),
-        Err(e) => Err(e.to_string()),
+        Err(error) => Err(error.to_string()),
     }
 }
+
 fn transparent(
     backend: &mut WaylandBackend,
     surface: SurfaceId,
-    w: u32,
-    h: u32,
-    s: i32,
+    width: u32,
+    height: u32,
+    scale: i32,
 ) -> Result<(), String> {
-    let scale = u32::try_from(s.max(1)).map_err(|e| e.to_string())?;
-    let pw = w.checked_mul(scale).ok_or("overflow")?;
-    let ph = h.checked_mul(scale).ok_or("overflow")?;
-    let count = usize::try_from(pw)
-        .ok()
-        .and_then(|v| usize::try_from(ph).ok().and_then(|n| v.checked_mul(n)))
-        .and_then(|n| n.checked_mul(4))
-        .ok_or("overflow")?;
-    let blank = vec![0u8; count];
+    let scale = u32::try_from(scale.max(1)).map_err(|e| e.to_string())?;
+    let pixels = width
+        .checked_mul(scale)
+        .and_then(|w| height.checked_mul(scale).and_then(|h| w.checked_mul(h)))
+        .and_then(|count| count.checked_mul(4))
+        .and_then(|size| usize::try_from(size).ok())
+        .ok_or("backdrop size overflow")?;
+    let blank = vec![0u8; pixels];
     match backend.present(
         surface,
-        Frame::packed(pw, ph, PixelFormat::Argb8888, &blank),
+        Frame::packed(width * scale, height * scale, PixelFormat::Argb8888, &blank),
     ) {
         Ok(()) | Err(BackendError::WouldBlock) => Ok(()),
-        Err(e) => Err(e.to_string()),
+        Err(error) => Err(error.to_string()),
     }
 }
+
 fn close(
     backend: &mut WaylandBackend,
     surface: SurfaceId,
-    dismiss: Option<SurfaceId>,
+    backdrop: Option<SurfaceId>,
 ) -> Result<(), String> {
-    if let Some(s) = dismiss {
-        backend.destroy_surface(s).map_err(|e| e.to_string())?;
+    if let Some(id) = backdrop {
+        backend.destroy_surface(id).map_err(|e| e.to_string())?;
     }
     backend.destroy_surface(surface).map_err(|e| e.to_string())
 }
 
-const PRIMARY_POINTER_BUTTON: u32 = 0x110;
-
-#[derive(Default)]
-struct SafePress {
-    pointer: Option<MenuAction>,
-    touches: BTreeSet<i32>,
-    touch: Option<(i32, MenuAction)>,
-}
-
-impl SafePress {
-    fn pointer_button(
-        &mut self,
-        button: u32,
-        pressed: bool,
-        hovered: Option<MenuAction>,
-    ) -> Option<MenuAction> {
-        if button != PRIMARY_POINTER_BUTTON {
-            return None;
-        }
-        if pressed {
-            self.pointer = hovered;
-            None
-        } else {
-            self.pointer
-                .take()
-                .filter(|armed| Some(armed) == hovered.as_ref())
-        }
-    }
-
-    fn pointer_move(&mut self, hovered: Option<MenuAction>) {
-        if self.pointer.as_ref() != hovered.as_ref() {
-            self.pointer = None;
-        }
-    }
-
-    fn pointer_leave(&mut self) {
-        self.pointer = None;
-    }
-
-    fn touch_down(&mut self, id: i32, hovered: Option<MenuAction>) {
-        self.touches.insert(id);
-        if self.touches.len() == 1 {
-            self.touch = hovered.map(|action| (id, action));
-        } else {
-            self.touch = None; // Multitouch cannot activate destructive actions.
-        }
-    }
-
-    fn touch_move(&mut self, id: i32, hovered: Option<MenuAction>) {
-        if self
-            .touch
-            .as_ref()
-            .is_some_and(|(armed_id, action)| *armed_id == id && Some(action) != hovered.as_ref())
-        {
-            self.touch = None;
-        }
-    }
-
-    fn touch_up(&mut self, id: i32) -> Option<MenuAction> {
-        let was_active = self.touches.remove(&id);
-        if was_active
-            && self.touches.is_empty()
-            && self.touch.as_ref().is_some_and(|(active, _)| *active == id)
-        {
-            self.touch.take().map(|(_, action)| action)
-        } else {
-            if self.touch.as_ref().is_some_and(|(active, _)| *active == id) {
-                self.touch = None;
-            }
-            None
-        }
-    }
-
-    fn touch_cancel(&mut self, ids: &[i32]) {
-        for id in ids {
-            self.touches.remove(id);
-        }
-        self.touch = None;
-    }
-
-    fn reset(&mut self) {
-        self.pointer = None;
-        self.touches.clear();
-        self.touch = None;
-    }
-}
-
-const BACKDROP_TAP_TOLERANCE: f64 = 12.0;
-
-fn moved_beyond_tap(start: (f64, f64), point: (f64, f64)) -> bool {
-    let dx = (point.0 - start.0).abs();
-    let dy = (point.1 - start.1).abs();
-    !dx.is_finite() || !dy.is_finite() || dx.max(dy) > BACKDROP_TAP_TOLERANCE
-}
-
-/// Backdrop touch focus remains on the initial Wayland surface during drag.
-/// A release is a dismiss only if it was a short, single-contact tap.
-#[derive(Default)]
-struct BackdropPress {
-    press: SafePress,
-    pointer_origin: Option<(f64, f64)>,
-    touch_origin: Option<(i32, f64, f64)>,
-}
-
-impl BackdropPress {
-    fn handle(&mut self, event: &WaylandEvent) -> bool {
-        match event {
-            WaylandEvent::PointerButton {
-                x,
-                y,
-                button,
-                pressed,
-            } => {
-                if *button != PRIMARY_POINTER_BUTTON {
-                    return false;
-                }
-                if *pressed {
-                    self.pointer_origin = Some((*x, *y));
-                } else {
-                    // Also guard release coordinates if the compositor did not
-                    // deliver intermediate pointer-motion events.
-                    let dragged = self
-                        .pointer_origin
-                        .is_some_and(|start| moved_beyond_tap(start, (*x, *y)));
-                    self.pointer_origin = None;
-                    if dragged {
-                        self.press.pointer_leave();
-                        return false;
-                    }
-                }
-                self.press
-                    .pointer_button(*button, *pressed, Some(MenuAction::Close))
-                    .is_some()
-            }
-            WaylandEvent::PointerMove { x, y } => {
-                if self
-                    .pointer_origin
-                    .is_some_and(|start| moved_beyond_tap(start, (*x, *y)))
-                {
-                    self.pointer_origin = None;
-                    self.press.pointer_leave();
-                }
-                false
-            }
-            WaylandEvent::PointerLeave => {
-                self.pointer_origin = None;
-                self.press.pointer_leave();
-                false
-            }
-            WaylandEvent::TouchDown { id, x, y } => {
-                self.press.touch_down(*id, Some(MenuAction::Close));
-                self.touch_origin = (self.press.touches.len() == 1
-                    && self
-                        .press
-                        .touch
-                        .as_ref()
-                        .is_some_and(|(active, _)| active == id))
-                .then_some((*id, *x, *y));
-                false
-            }
-            WaylandEvent::TouchMotion { id, x, y } => {
-                if self.touch_origin.is_some_and(|(active, sx, sy)| {
-                    active == *id && moved_beyond_tap((sx, sy), (*x, *y))
-                }) {
-                    self.touch_origin = None;
-                    self.press.touch_move(*id, None);
-                }
-                false
-            }
-            WaylandEvent::TouchUp { id } => {
-                // An unmatched finger must not allow a later up to dismiss.
-                let matching = self
-                    .touch_origin
-                    .is_some_and(|(active, _, _)| active == *id);
-                self.touch_origin = None;
-                if !matching {
-                    self.press.touch_cancel(&[*id]);
-                    return false;
-                }
-                self.press.touch_up(*id).is_some()
-            }
-            WaylandEvent::TouchCancel { ids } => {
-                self.touch_origin = None;
-                self.press.touch_cancel(ids);
-                false
-            }
-            _ => false,
-        }
-    }
-}
-
-fn verified_clear_result(
-    result: Result<String, String>,
-    snapshot: &NotificationSnapshot,
-    ids: &[u32],
-) -> Result<String, String> {
-    let message = result?;
-    if snapshot.meta.health != Health::Healthy {
-        return Err(format!(
-            "removal was attempted but history re-read is {} ({} issue(s)); result not verified",
-            snapshot.meta.health.as_str(),
-            snapshot.issues.len()
-        ));
-    }
-    if ids
-        .iter()
-        .any(|id| snapshot.notifications.iter().any(|entry| entry.id == *id))
-    {
-        return Err(
-            "confirmed notification ID still in history after removal; result not verified".into(),
-        );
-    }
-    Ok(message)
-}
-
-/// At most one bounded clear task can be active, and the UI is not blocked
-/// while Dunst performs subprocess operations. The result channel is bounded.
-fn execute_and_verify_clear<R: CommandRunner>(
-    provider: &mut NotificationProvider<R>,
-    ids: Vec<u32>,
-) -> (Result<String, String>, NotificationSnapshot) {
-    let result = provider
-        .execute(NotificationAction::ClearKnown { ids: ids.clone() })
-        .map(|result| result.message)
-        .map_err(|error| format!("{error:?}"));
-    let snapshot = provider
-        .snapshot()
-        .unwrap_or_else(|error| NotificationSnapshot::unavailable(0, format!("{error:?}")));
-    let verified = verified_clear_result(result, &snapshot, &ids);
-    (verified, snapshot)
-}
-
-fn start_clear(ids: Vec<u32>) -> mpsc::Receiver<(Result<String, String>, NotificationSnapshot)> {
-    let (sender, receiver) = mpsc::sync_channel(1);
-    thread::spawn(move || {
-        let mut provider = NotificationProvider::system();
-        let _ = sender.send(execute_and_verify_clear(&mut provider, ids));
-    });
-    receiver
-}
-
-/// Only periodically wake during an in-flight clear. Otherwise use blocking
-/// Wayland dispatch and remain idle without polling or worker threads.
-fn dispatch_while_clearing(backend: &mut WaylandBackend) -> Result<(), String> {
-    backend.flush().map_err(|error| error.to_string())?;
-    let mut fd = libc::pollfd {
-        fd: backend.poll_fd(),
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    let ready = unsafe { libc::poll(&mut fd, 1, 40) };
-    if ready < 0 {
-        let error = std::io::Error::last_os_error();
-        if error.kind() != std::io::ErrorKind::Interrupted {
-            return Err(format!("poll Wayland while clearing: {error}"));
-        }
-    } else if ready > 0 {
-        if fd.revents & libc::POLLIN != 0 {
-            backend
-                .blocking_dispatch()
-                .map_err(|error| error.to_string())?;
-        } else if fd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
-            return Err("Wayland disconnected while clearing notifications".to_owned());
-        }
-    } else {
-        backend
-            .dispatch_pending()
-            .map_err(|error| error.to_string())?;
-    }
-    Ok(())
-}
-
-const MAX_TEXT_CHARS: usize = 240;
-fn fixture() -> NotificationSnapshot {
-    let mut s = NotificationSnapshot::unavailable(0, String::new());
-    s.issues.clear();
-    s.backend = "fixture".into();
-    s.notifications = (0..10)
-        .map(|i| NotificationEntry {
-            id: i + 1,
-            app: if i % 2 == 0 { "Chat" } else { "System" }.into(),
-            summary: format!("Demo notification {}", i + 1),
-            body: format!("Sample message body {}", i + 1),
-            actions: if i % 2 == 0 {
-                vec!["open".into(), "reply".into()]
-            } else {
-                vec![]
-            },
-            default_action: None,
-        })
-        .collect();
-    s
-}
-fn short(s: &str) -> String {
-    let flat = s.replace('\n', " ");
-    if flat.chars().count() <= MAX_TEXT_CHARS {
-        flat
-    } else {
-        format!(
-            "{}…",
-            flat.chars().take(MAX_TEXT_CHARS - 1).collect::<String>()
-        )
-    }
-}
-fn model(
-    snapshot: &NotificationSnapshot,
-    query: &str,
-    confirmed_ids: Option<&[u32]>,
-    notice: Option<&str>,
-    clearing: bool,
-) -> MenuModel {
-    let count = snapshot.notifications.len();
-    let mut items = vec![
-        MenuItem::status("header", format!("Notifications ({count})"))
-            .with_subtitle(format!("Filter: {query}")),
-    ];
-    if clearing {
-        items.push(MenuItem::status("clearing", "Clearing confirmed history…"));
-    } else if let Some(ids) = confirmed_ids {
-        items.push(MenuItem::action(
-            "confirm",
-            format!(
-                "Clear {} confirmed notifications? Enter to confirm",
-                ids.len()
-            ),
-            MenuAction::Custom {
-                kind: "clear".into(),
-                payload: String::new(),
-            },
-        ));
-    } else {
-        items.push(MenuItem::action(
-            "clear",
-            "Clear all…",
-            MenuAction::Custom {
-                kind: "ask".into(),
-                payload: String::new(),
-            },
-        ));
-    }
-    if let Some(notice) = notice {
-        items.push(MenuItem::status("feedback", short(notice)));
-    }
-    let q = query.to_lowercase();
-    let mut shown = 0;
-    for n in snapshot.notifications.iter().take(64) {
-        if !n.app.to_lowercase().contains(&q) && !n.summary.to_lowercase().contains(&q) {
-            continue;
-        }
-        shown += 1;
-        items.push(
-            MenuItem::status(format!("n-{}", n.id), short(&n.summary)).with_subtitle(format!(
-                "{} · {}",
-                n.app,
-                short(&n.body)
-            )),
-        );
-        // Dunst cannot atomically target a historical notification action
-        // by ID. Never render dangerous "Invoke" buttons that fail closed.
-        if !clearing {
-            items.push(MenuItem::action(
-                format!("dismiss-{}", n.id),
-                "Dismiss",
-                MenuAction::Custom {
-                    kind: "remove".into(),
-                    payload: n.id.to_string(),
-                },
-            ));
-        }
-    }
-    if shown == 0 {
-        items.push(MenuItem::status(
-            "empty",
-            if snapshot.meta.health == Health::Unavailable && snapshot.backend != "fixture" {
-                "Notification history unavailable"
-            } else if query.is_empty() {
-                "No notifications"
-            } else {
-                "No matching notifications"
-            },
-        ));
-    }
-    if snapshot
-        .notifications
-        .iter()
-        .any(|entry| !entry.actions.is_empty())
-    {
-        items.push(MenuItem::status(
-            "action-safety",
-            "Actions disabled: Dunst cannot target history actions safely",
-        ));
-    }
-    items.push(MenuItem::status(
-        "backend",
-        format!("{} · {} issues", snapshot.backend, snapshot.issues.len()),
-    ));
-    MenuModel::new("notifications", "Notifications", items)
-}
-fn act(
-    action: MenuAction,
-    snapshot: &mut NotificationSnapshot,
-    provider: &mut NotificationProvider<nuraloumi_providers::command::SystemCommandRunner>,
-    fixture_mode: bool,
-    confirmed_ids: &mut Option<Vec<u32>>,
-) -> Result<(), String> {
-    if let MenuAction::Custom { kind, payload } = action {
-        if kind == "ask" {
-            // Freeze the exact IDs when requesting confirmation. A later
-            // refresh or sender arrival must not widen the destructive action.
-            *confirmed_ids = (!snapshot.notifications.is_empty()).then(|| {
-                snapshot
-                    .notifications
-                    .iter()
-                    .map(|entry| entry.id)
-                    .collect()
-            });
-            return Ok(());
-        }
-        let action = match kind.as_str() {
-            // Defense in depth: never route an unsafe Dunst history action,
-            // even if another caller forges a custom menu activation.
-            "invoke" => {
-                return Err("Dunst history actions cannot safely target a notification ID".into())
-            }
-            "clear" => match confirmed_ids.as_ref() {
-                Some(ids) => NotificationAction::ClearKnown { ids: ids.clone() },
-                None => return Ok(()),
-            },
-            "remove" => NotificationAction::Remove {
-                id: payload.parse().map_err(|e| format!("{e}"))?,
-            },
-            _ => return Ok(()),
-        };
-        if fixture_mode {
-            match action {
-                NotificationAction::ClearKnown { ids } => {
-                    snapshot
-                        .notifications
-                        .retain(|entry| !ids.contains(&entry.id));
-                }
-                NotificationAction::Remove { id } => snapshot.notifications.retain(|n| n.id != id),
-                _ => {}
-            }
-        } else {
-            provider.execute(action).map_err(|e| format!("{e:?}"))?;
-            *snapshot = provider.snapshot().map_err(|e| format!("{e:?}"))?;
-        }
-        *confirmed_ids = None;
-    }
-    Ok(())
-}
 fn run(config: ShellConfig, fixture_mode: bool) -> Result<(), String> {
     let mut provider = NotificationProvider::system();
     let mut snapshot = if fixture_mode {
         fixture()
     } else {
-        provider.snapshot().map_err(|e| format!("{e:?}"))?
+        provider.snapshot().map_err(|error| format!("{error:?}"))?
     };
-    let mut query = String::new();
-    let mut confirmed_ids: Option<Vec<u32>> = None;
-    let mut notice: Option<String> = None;
-    let mut pending_clear: Option<mpsc::Receiver<(Result<String, String>, NotificationSnapshot)>> =
-        None;
-    let mut press = SafePress::default();
-    let mut dismiss_press = BackdropPress::default();
-    let mut backend = WaylandBackend::connect().map_err(|e| e.to_string())?;
+    let mut ui = UiState::default();
+    let mut backend = WaylandBackend::connect().map_err(|error| error.to_string())?;
     if !backend.capabilities().layer_shell {
         return Err("layer shell unavailable".into());
     }
-    backend.blocking_dispatch().map_err(|e| e.to_string())?;
+    backend
+        .blocking_dispatch()
+        .map_err(|error| error.to_string())?;
     let output = backend.outputs().into_iter().next();
-    let dismiss = {
-        let (t, r, b, l) = dismiss_backdrop_margins(config.panel_edge, config.panel_height);
-        backend
-            .create_dismiss_backdrop(DismissBackdropConfig {
-                margin_top: t,
-                margin_right: r,
-                margin_bottom: b,
-                margin_left: l,
-                output: output.as_ref().map(|o| o.id),
-                namespace: "nuraloumi-notifications-dismiss".into(),
-            })
-            .ok()
-    };
+    let (top, right, bottom, left) =
+        dismiss_backdrop_margins(config.panel_edge, config.panel_height);
+    let backdrop = backend
+        .create_dismiss_backdrop(DismissBackdropConfig {
+            margin_top: top,
+            margin_right: right,
+            margin_bottom: bottom,
+            margin_left: left,
+            output: output.as_ref().map(|o| o.id),
+            namespace: "nuraloumi-notifications-dismiss".into(),
+        })
+        .ok();
     let surface = backend
         .create_menu(WaylandMenuConfig {
             width: config.menu_width.min(520),
-            height: 560,
+            height: 600,
             margin_top: config.panel_height as i32,
             margin_left: 0,
             output: output.as_ref().map(|o| o.id),
             namespace: "nuraloumi-notifications".into(),
         })
-        .map_err(|e| e.to_string())?;
+        .map_err(|error| error.to_string())?;
     let renderer = CairoRenderer::default();
-    let mut menu = model(
-        &snapshot,
-        &query,
-        confirmed_ids.as_deref(),
-        notice.as_deref(),
-        false,
-    );
+    let mut menu = model(&snapshot, &ui);
     let mut state = MenuState::new(&menu);
     let mut geometry = None;
-    let mut scene = None;
+    let mut scene: Option<Scene> = None;
     loop {
-        if pending_clear.is_some() {
-            dispatch_while_clearing(&mut backend)?;
-        } else {
-            backend.blocking_dispatch().map_err(|e| e.to_string())?;
-        }
-        for ev in backend.drain_events().collect::<Vec<_>>() {
-            if dismiss.is_some() && ev.surface == dismiss {
-                match ev.event {
+        // Blocking event dispatch, not a busy polling/animation loop.
+        backend
+            .blocking_dispatch()
+            .map_err(|error| error.to_string())?;
+        for event in backend.drain_events().collect::<Vec<_>>() {
+            if event.surface == backdrop {
+                match event.event {
                     WaylandEvent::Configure {
                         width,
                         height,
                         scale,
                     } => transparent(
                         &mut backend,
-                        dismiss.ok_or("dismiss missing")?,
+                        backdrop.ok_or("backdrop missing")?,
                         width,
                         height,
                         scale,
                     )?,
-                    input @ (WaylandEvent::PointerButton { .. }
-                    | WaylandEvent::PointerMove { .. }
-                    | WaylandEvent::PointerLeave
+                    WaylandEvent::PointerButton { pressed: true, .. }
                     | WaylandEvent::TouchDown { .. }
-                    | WaylandEvent::TouchMotion { .. }
-                    | WaylandEvent::TouchUp { .. }
-                    | WaylandEvent::TouchCancel { .. }) => {
-                        if dismiss_press.handle(&input) {
-                            close(&mut backend, surface, dismiss)?;
-                            return Ok(());
-                        }
-                    }
-                    WaylandEvent::Close => {
-                        close(&mut backend, surface, dismiss)?;
+                    | WaylandEvent::Close => {
+                        close(&mut backend, surface, backdrop)?;
                         return Ok(());
                     }
                     _ => {}
                 }
                 continue;
             }
-            if ev.surface.is_some() && ev.surface != Some(surface) {
-                press.reset();
+            if event.surface.is_some() && event.surface != Some(surface) {
                 continue;
             }
             let mut redraw = false;
-            let mut requested = None;
-            let mut refresh = false;
-            let mut remove_selected = false;
-            match ev.event {
+            let mut requested: Option<MenuAction> = None;
+            let mut should_close = false;
+            match event.event {
                 WaylandEvent::Configure {
                     width,
                     height,
@@ -697,158 +897,136 @@ fn run(config: ShellConfig, fixture_mode: bool) -> Result<(), String> {
                     geometry = Some((width, height, scale));
                     redraw = true;
                 }
-                WaylandEvent::Close => {
-                    close(&mut backend, surface, dismiss)?;
-                    return Ok(());
-                }
-                WaylandEvent::Key { key, pressed: true } => match key {
-                    Key::Escape => {
-                        if confirmed_ids.is_some() {
-                            confirmed_ids = None;
-                            redraw = true;
-                        } else {
-                            close(&mut backend, surface, dismiss)?;
-                            return Ok(());
-                        }
-                    }
-                    Key::Up => {
-                        state.handle(&menu, SemanticInput::Up);
-                        redraw = true;
-                    }
-                    Key::Down | Key::Tab => {
-                        state.handle(&menu, SemanticInput::Down);
-                        redraw = true;
-                    }
-                    Key::Enter => requested = selection(&menu, &state),
-                    Key::Function(5) => refresh = true,
-                    Key::Raw(111) => remove_selected = true,
-                    Key::Modified { key, modifiers }
-                        if modifiers.ctrl && matches!(*key,Key::Text(ref t) if t=="l") =>
-                    {
-                        requested = Some(MenuAction::Custom {
-                            kind: "ask".into(),
-                            payload: String::new(),
-                        })
-                    }
-                    Key::Backspace => {
-                        query.pop();
-                        redraw = true;
-                    }
-                    Key::Text(t) if t == "q" && query.is_empty() => {
-                        close(&mut backend, surface, dismiss)?;
-                        return Ok(());
-                    }
-                    Key::Text(t) if t == "r" && query.is_empty() => refresh = true,
-                    Key::Text(t) if t == "c" && query.is_empty() => {
-                        requested = Some(MenuAction::Custom {
-                            kind: "ask".into(),
-                            payload: String::new(),
-                        });
-                    }
-                    Key::Text(t) if t == "d" && query.is_empty() => remove_selected = true,
-                    Key::Text(t) if !t.chars().any(char::is_control) => {
-                        query.push_str(&t);
-                        redraw = true;
-                    }
-                    _ => {}
-                },
+                WaylandEvent::Close => should_close = true,
+                WaylandEvent::PointerLeave => ui.pointer_press = None,
                 WaylandEvent::PointerButton {
                     x,
                     y,
-                    pressed,
                     button,
+                    pressed,
                 } => {
-                    requested = press.pointer_button(button, pressed, hit(&scene, &menu, x, y));
+                    if pressed {
+                        redraw = true;
+                    }
+                    if let Some(id) = ui.pointer(scene.as_ref(), x, y, button, pressed) {
+                        requested = selected_id_action(&menu, &id);
+                    }
                 }
-                WaylandEvent::PointerMove { x, y } | WaylandEvent::PointerEnter { x, y } => {
-                    press.pointer_move(hit(&scene, &menu, x, y));
-                }
-                WaylandEvent::PointerLeave => press.pointer_leave(),
                 WaylandEvent::TouchDown { id, x, y } => {
-                    press.touch_down(id, hit(&scene, &menu, x, y));
+                    ui.touch_down(scene.as_ref(), id, x, y);
+                    redraw = true;
                 }
                 WaylandEvent::TouchMotion { id, x, y } => {
-                    press.touch_move(id, hit(&scene, &menu, x, y));
-                }
-                WaylandEvent::TouchUp { id } => requested = press.touch_up(id),
-                WaylandEvent::TouchCancel { ids } => press.touch_cancel(&ids),
-                _ => {}
-            }
-            if remove_selected {
-                if let Some(id) = state
-                    .selected_id
-                    .as_ref()
-                    .and_then(|v| v.strip_prefix("dismiss-").or_else(|| v.strip_prefix("n-")))
-                {
-                    requested = Some(MenuAction::Custom {
-                        kind: "remove".into(),
-                        payload: id.into(),
-                    });
-                }
-            }
-            if let Some(a) = requested {
-                if pending_clear.is_none() {
-                    if !fixture_mode
-                        && matches!(a, MenuAction::Custom { ref kind, .. } if kind == "clear")
-                    {
-                        if let Some(ids) = confirmed_ids.take() {
-                            pending_clear = Some(start_clear(ids));
-                            notice = None;
-                        }
-                    } else {
-                        match act(
-                            a,
-                            &mut snapshot,
-                            &mut provider,
-                            fixture_mode,
-                            &mut confirmed_ids,
-                        ) {
-                            Ok(()) => notice = None,
-                            Err(error) => {
-                                confirmed_ids = None;
-                                notice = Some(error);
+                    if let Some(step) = ui.touch_move(id, x, y) {
+                        if ui.detail.is_some() {
+                            ui.scroll_body(&snapshot, isize::try_from(step).unwrap_or(0));
+                        } else if ui.confirm_ids.is_none() {
+                            for _ in 0..step.unsigned_abs() {
+                                state.handle(
+                                    &menu,
+                                    if step > 0 {
+                                        SemanticInput::Down
+                                    } else {
+                                        SemanticInput::Up
+                                    },
+                                );
                             }
                         }
+                        redraw = true;
                     }
                 }
-                press.reset();
-                redraw = true;
-            }
-            if refresh && pending_clear.is_none() {
-                if fixture_mode {
-                    snapshot = fixture();
-                    notice = None;
-                } else {
-                    match provider.snapshot() {
-                        Ok(fresh) => {
-                            snapshot = fresh;
-                            notice = None;
+                WaylandEvent::TouchUp { id } => {
+                    if let Some(hit) = ui.touch_up(scene.as_ref(), id) {
+                        requested = selected_id_action(&menu, &hit);
+                    }
+                }
+                WaylandEvent::TouchCancel { ids } => ui.touch_cancel(&ids),
+                WaylandEvent::Key { key, pressed: true } => {
+                    ui.reset_gestures();
+                    match key {
+                        Key::Escape => {
+                            if ui.confirm_ids.take().is_some() {
+                                redraw = true;
+                            } else if ui.detail.take().is_some() {
+                                redraw = true;
+                                ui.body_offset = 0;
+                            } else {
+                                should_close = true;
+                            }
                         }
-                        Err(error) => notice = Some(format!("{error:?}")),
+                        Key::Up => {
+                            if ui.detail.is_some() {
+                                ui.scroll_body(&snapshot, -1);
+                            } else {
+                                state.handle(&menu, SemanticInput::Up);
+                            }
+                            redraw = true;
+                        }
+                        Key::Down => {
+                            if ui.detail.is_some() {
+                                ui.scroll_body(&snapshot, 1);
+                            } else {
+                                state.handle(&menu, SemanticInput::Down);
+                            }
+                            redraw = true;
+                        }
+                        Key::Tab => {
+                            state.handle(&menu, SemanticInput::Down);
+                            redraw = true;
+                        }
+                        Key::Enter | Key::Space => requested = selected_action(&menu, &state),
+                        Key::Function(5) => requested = Some(cmd("refresh", "")),
+                        Key::Raw(104) => {
+                            ui.scroll_body(&snapshot, -(BODY_VISIBLE_LINES as isize));
+                            redraw = true;
+                        }
+                        Key::Raw(109) => {
+                            ui.scroll_body(&snapshot, BODY_VISIBLE_LINES as isize);
+                            redraw = true;
+                        }
+                        Key::Backspace if ui.confirm_ids.is_none() && ui.detail.is_none() => {
+                            ui.query.pop();
+                            redraw = true;
+                        }
+                        Key::Text(text)
+                            if ui.confirm_ids.is_none()
+                                && ui.detail.is_none()
+                                && text.chars().all(safe_visible_char) =>
+                        {
+                            for ch in text.chars() {
+                                if ui.query.chars().count() >= MAX_QUERY_CHARS {
+                                    break;
+                                }
+                                ui.query.push(ch);
+                            }
+                            redraw = true;
+                        }
+                        _ => {}
                     }
                 }
+                _ => {}
+            }
+            if should_close {
+                close(&mut backend, surface, backdrop)?;
+                return Ok(());
+            }
+            if let Some(action) = requested {
+                perform(action, &mut ui, &mut snapshot, &mut provider, fixture_mode);
                 redraw = true;
             }
             if redraw {
-                let selected = state.selected_id.clone();
-                menu = model(
-                    &snapshot,
-                    &query,
-                    confirmed_ids.as_deref(),
-                    notice.as_deref(),
-                    pending_clear.is_some(),
-                );
+                let previous = state.selected_id.clone();
+                menu = model(&snapshot, &ui);
                 state = MenuState::new(&menu);
-                if let Some(id) = selected {
+                if let Some(previous) = previous {
                     if menu
-                        .item_by_id(&id)
-                        .and_then(|i| i.action.as_ref())
-                        .is_some()
+                        .item_by_id(&previous)
+                        .is_some_and(|item| item.is_actionable())
                     {
-                        state.selected_id = Some(id);
+                        state.selected_id = Some(previous);
                     }
                 }
-                if let Some((w, h, s)) = geometry {
+                if let Some((width, height, scale)) = geometry {
                     scene = Some(draw(
                         &mut backend,
                         surface,
@@ -856,50 +1034,8 @@ fn run(config: ShellConfig, fixture_mode: bool) -> Result<(), String> {
                         &config,
                         &menu,
                         &state,
-                        w,
-                        h,
-                        s,
-                    )?);
-                }
-            }
-        }
-        // Apply a background clear result even with no incoming Wayland event.
-        // Pending work runs on a bounded thread, and the menu stays responsive.
-        if let Some(receiver) = pending_clear.as_ref() {
-            let completed = match receiver.try_recv() {
-                Ok(value) => Some(value),
-                Err(mpsc::TryRecvError::Disconnected) => Some((
-                    Err("notification clear worker disconnected".into()),
-                    NotificationSnapshot::unavailable(0, "clear worker disconnected".into()),
-                )),
-                Err(mpsc::TryRecvError::Empty) => None,
-            };
-            if let Some((result, fresh)) = completed {
-                pending_clear = None;
-                snapshot = fresh; // Reflect partial success after any failure.
-                notice = Some(match result {
-                    Ok(message) => message,
-                    Err(error) => format!("Clear incomplete or unverified: {error}"),
-                });
-                menu = model(
-                    &snapshot,
-                    &query,
-                    confirmed_ids.as_deref(),
-                    notice.as_deref(),
-                    false,
-                );
-                state = MenuState::new(&menu);
-                press.reset();
-                if let Some((w, h, scale)) = geometry {
-                    scene = Some(draw(
-                        &mut backend,
-                        surface,
-                        &renderer,
-                        &config,
-                        &menu,
-                        &state,
-                        w,
-                        h,
+                        width,
+                        height,
                         scale,
                     )?);
                 }
@@ -907,558 +1043,218 @@ fn run(config: ShellConfig, fixture_mode: bool) -> Result<(), String> {
         }
     }
 }
+
 fn main() -> ExitCode {
     let args = match parse_args() {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("{e}");
+        Ok(args) => args,
+        Err(error) => {
+            eprintln!("{error}");
             return ExitCode::from(2);
         }
     };
     let config = load_config_or_default(args.config.as_deref()).unwrap_or_default();
     match run(config, args.fixture) {
         Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("nuraloumi-notifications: {e}");
+        Err(error) => {
+            eprintln!("nuraloumi-notifications: {error}");
             ExitCode::FAILURE
         }
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn ui_action(kind: &str) -> MenuAction {
-        MenuAction::Custom {
-            kind: kind.into(),
-            payload: String::new(),
-        }
+
+    fn action(snapshot: &mut NotificationSnapshot, ui: &mut UiState, action: MenuAction) {
+        let mut provider = NotificationProvider::system();
+        perform(action, ui, snapshot, &mut provider, true);
     }
 
     #[test]
-    fn dangerous_history_action_is_not_clickable_and_cannot_be_forged() {
+    fn groups_by_app_filters_body_and_keeps_stable_ids() {
         let snapshot = fixture();
-        let menu = model(&snapshot, "", None, None, false);
-        assert!(menu.item_by_id("action-1-open").is_none());
-        assert!(menu.item_by_id("action-safety").is_some());
-        assert!(menu.item_by_id("dismiss-1").is_some());
-        let mut provider = NotificationProvider::system();
-        let mut copy = snapshot;
-        let mut confirmed = None;
-        let rejected = act(
-            MenuAction::Custom {
-                kind: "invoke".into(),
-                payload: "1:reply".into(),
-            },
-            &mut copy,
-            &mut provider,
-            true,
-            &mut confirmed,
-        );
-        assert!(rejected.is_err());
+        let ui = UiState::default();
+        let menu = model(&snapshot, &ui);
+        assert!(menu.item_by_id("app-0").is_some());
+        assert!(menu.item_by_id("app-1").is_some());
+        assert!(menu.item_by_id("view-1").is_some());
+        assert_eq!(filtered(&snapshot, "Sample message body 2").len(), 1);
+        assert_eq!(filtered(&snapshot, "unmatched").len(), 0);
+        assert_eq!(filtered(&snapshot, "").len(), 10);
     }
 
     #[test]
-    fn release_activation_requires_same_primary_pointer_target() {
-        let mut p = SafePress::default();
-        let first = ui_action("ask");
-        let other = ui_action("clear");
-        assert!(p
-            .pointer_button(PRIMARY_POINTER_BUTTON, true, Some(first.clone()))
-            .is_none());
-        assert!(p
-            .pointer_button(0x111, false, Some(first.clone()))
-            .is_none());
-        assert!(p
-            .pointer_button(PRIMARY_POINTER_BUTTON, false, Some(other))
-            .is_none());
-        assert!(p
-            .pointer_button(PRIMARY_POINTER_BUTTON, false, Some(first.clone()))
-            .is_none());
-        assert!(p
-            .pointer_button(PRIMARY_POINTER_BUTTON, true, Some(first.clone()))
-            .is_none());
-        assert_eq!(
-            p.pointer_button(PRIMARY_POINTER_BUTTON, false, Some(first.clone())),
-            Some(first.clone())
-        );
-        assert!(p
-            .pointer_button(PRIMARY_POINTER_BUTTON, true, Some(first.clone()))
-            .is_none());
-        p.pointer_leave();
-        assert!(p
-            .pointer_button(PRIMARY_POINTER_BUTTON, false, Some(first.clone()))
-            .is_none());
-        assert!(p
-            .pointer_button(PRIMARY_POINTER_BUTTON, true, Some(first.clone()))
-            .is_none());
-        p.pointer_move(None);
-        assert!(p
-            .pointer_button(PRIMARY_POINTER_BUTTON, false, Some(first))
-            .is_none());
-    }
-
-    #[test]
-    fn touch_requires_same_finger_target_and_release_without_multitouch() {
-        let mut p = SafePress::default();
-        let first = ui_action("ask");
-        let other = ui_action("clear");
-        p.touch_down(7, Some(first.clone()));
-        assert!(p.touch_up(8).is_none());
-        p.touch_move(7, Some(other));
-        assert!(p.touch_up(7).is_none());
-        p.touch_down(7, Some(first.clone()));
-        assert_eq!(p.touch_up(7), Some(first.clone()));
-        p.touch_down(7, Some(first.clone()));
-        p.touch_down(8, Some(first.clone()));
-        assert!(p.touch_up(7).is_none());
-        assert!(p.touch_up(8).is_none());
-        p.touch_down(11, Some(first.clone()));
-        p.touch_cancel(&[11]);
-        assert!(p.touch_up(11).is_none());
-        p.touch_down(12, Some(first));
-        p.reset();
-        assert!(p.touch_up(12).is_none());
-    }
-
-    #[test]
-    fn backdrop_touch_drag_does_not_dismiss_but_small_tap_does() {
-        let mut backdrop = BackdropPress::default();
-        assert!(!backdrop.handle(&WaylandEvent::TouchDown {
-            id: 7,
-            x: 100.0,
-            y: 100.0,
-        }));
-        assert!(!backdrop.handle(&WaylandEvent::TouchMotion {
-            id: 7,
-            x: 102.0,
-            y: 104.0,
-        }));
-        assert!(backdrop.handle(&WaylandEvent::TouchUp { id: 7 }));
-
-        // Wayland retains the original touch surface while dragging:
-        // moving away must cancel and cannot dismiss on release.
-        assert!(!backdrop.handle(&WaylandEvent::TouchDown {
-            id: 8,
-            x: 100.0,
-            y: 100.0,
-        }));
-        assert!(!backdrop.handle(&WaylandEvent::TouchMotion {
-            id: 8,
-            x: 140.0,
-            y: 100.0,
-        }));
-        assert!(!backdrop.handle(&WaylandEvent::TouchMotion {
-            id: 8,
-            x: 100.0,
-            y: 100.0,
-        }));
-        assert!(!backdrop.handle(&WaylandEvent::TouchUp { id: 8 }));
-    }
-
-    #[test]
-    fn backdrop_release_rejects_cancel_multitouch_wrong_id_and_pointer_drag() {
-        let mut backdrop = BackdropPress::default();
-        assert!(!backdrop.handle(&WaylandEvent::TouchDown {
-            id: 1,
-            x: 1.0,
-            y: 1.0,
-        }));
-        assert!(!backdrop.handle(&WaylandEvent::TouchUp { id: 99 }));
-        assert!(!backdrop.handle(&WaylandEvent::TouchUp { id: 1 }));
-
-        assert!(!backdrop.handle(&WaylandEvent::TouchDown {
-            id: 2,
-            x: 1.0,
-            y: 1.0,
-        }));
-        assert!(!backdrop.handle(&WaylandEvent::TouchCancel { ids: vec![2] }));
-        assert!(!backdrop.handle(&WaylandEvent::TouchUp { id: 2 }));
-
-        assert!(!backdrop.handle(&WaylandEvent::TouchDown {
-            id: 3,
-            x: 1.0,
-            y: 1.0,
-        }));
-        assert!(!backdrop.handle(&WaylandEvent::TouchDown {
-            id: 4,
-            x: 1.0,
-            y: 1.0,
-        }));
-        assert!(!backdrop.handle(&WaylandEvent::TouchUp { id: 3 }));
-        assert!(!backdrop.handle(&WaylandEvent::TouchUp { id: 4 }));
-
-        assert!(!backdrop.handle(&WaylandEvent::PointerButton {
-            x: 3.0,
-            y: 3.0,
-            pressed: true,
-            button: PRIMARY_POINTER_BUTTON,
-        }));
-        assert!(!backdrop.handle(&WaylandEvent::PointerMove { x: 30.0, y: 3.0 }));
-        assert!(!backdrop.handle(&WaylandEvent::PointerButton {
-            x: 3.0,
-            y: 3.0,
-            pressed: false,
-            button: PRIMARY_POINTER_BUTTON,
-        }));
-        assert!(!backdrop.handle(&WaylandEvent::PointerButton {
-            x: 3.0,
-            y: 3.0,
-            pressed: true,
-            button: PRIMARY_POINTER_BUTTON,
-        }));
-        assert!(!backdrop.handle(&WaylandEvent::PointerButton {
-            x: 30.0,
-            y: 3.0,
-            pressed: false,
-            button: PRIMARY_POINTER_BUTTON,
-        }));
-        assert!(!backdrop.handle(&WaylandEvent::PointerButton {
-            x: 3.0,
-            y: 3.0,
-            pressed: true,
-            button: 0x111,
-        }));
-        assert!(!backdrop.handle(&WaylandEvent::PointerButton {
-            x: 3.0,
-            y: 3.0,
-            pressed: false,
-            button: 0x111,
-        }));
-        assert!(!backdrop.handle(&WaylandEvent::PointerButton {
-            x: 3.0,
-            y: 3.0,
-            pressed: true,
-            button: PRIMARY_POINTER_BUTTON,
-        }));
-        assert!(backdrop.handle(&WaylandEvent::PointerButton {
-            x: 3.0,
-            y: 3.0,
-            pressed: false,
-            button: PRIMARY_POINTER_BUTTON,
-        }));
-    }
-
-    #[derive(Default)]
-    struct ReadAfterClearRunner {
-        history_reads: usize,
-        fail_second_history: bool,
-        retain_removed_id: bool,
-        reintroduce_id_as_65th: bool,
-    }
-
-    impl CommandRunner for ReadAfterClearRunner {
-        fn run(
-            &mut self,
-            spec: &nuraloumi_providers::CommandSpec,
-            _limits: nuraloumi_providers::CommandLimits,
-        ) -> Result<nuraloumi_providers::CommandOutput, nuraloumi_providers::ProviderError>
-        {
-            assert_eq!(spec.program, "dunstctl");
-            let success = |stdout: &str| nuraloumi_providers::CommandOutput {
-                status: 0,
-                stdout: stdout.into(),
-                stderr: String::new(),
-            };
-            match spec.args.as_slice() {
-                [cmd] if cmd == "history" => {
-                    self.history_reads += 1;
-                    if self.fail_second_history && self.history_reads == 2 {
-                        return Ok(nuraloumi_providers::CommandOutput {
-                            status: 2,
-                            stdout: String::new(),
-                            stderr: "Dunst vanished".into(),
-                        });
-                    }
-                    if self.history_reads == 1 || self.retain_removed_id {
-                        Ok(success(
-                            r#"{"data":[[{"id":{"data":42},"appname":{"data":"test"},"summary":{"data":"Alert"},"body":{"data":"message"}}]]}"#,
-                        ))
-                    } else if self.reintroduce_id_as_65th {
-                        // History grew after removal. The original 64 entries
-                        // do not contain ID 42, but the 65th does: absence
-                        // from the bounded snapshot must NOT prove deletion.
-                        let entries = (100..164)
-                            .chain(std::iter::once(42))
-                            .map(|id| format!(r#"{{"id":{{"data":{id}}}}}"#))
-                            .collect::<Vec<_>>()
-                            .join(",");
-                        Ok(success(&format!(r#"{{"data":[[{entries}]]}}"#)))
-                    } else {
-                        Ok(success(r#"{"data":[]}"#))
-                    }
-                }
-                [cmd, id] if cmd == "history-rm" && id == "42" => Ok(success("")),
-                _ => Err(nuraloumi_providers::ProviderError::backend(
-                    "unexpected mock dunstctl command",
-                )),
-            }
-        }
-    }
-
-    #[test]
-    fn clear_post_read_failure_is_not_reported_as_success() {
-        let mut provider = NotificationProvider::new(ReadAfterClearRunner {
-            fail_second_history: true,
-            ..Default::default()
-        });
-        let (result, snapshot) = execute_and_verify_clear(&mut provider, vec![42]);
-        let error = result.unwrap_err();
-        assert!(error.contains("not verified"), "{error}");
-        assert_eq!(snapshot.meta.health, Health::Unavailable);
-        let menu = model(&snapshot, "", None, Some(&error), false);
-        assert!(menu.item_by_id("feedback").is_some());
-        assert_eq!(
-            menu.item_by_id("empty").unwrap().label,
-            "Notification history unavailable"
-        );
-    }
-
-    #[test]
-    fn clear_post_read_must_prove_id_absence() {
-        let mut provider = NotificationProvider::new(ReadAfterClearRunner {
-            retain_removed_id: true,
-            ..Default::default()
-        });
-        let (result, snapshot) = execute_and_verify_clear(&mut provider, vec![42]);
-        assert_eq!(snapshot.meta.health, Health::Healthy);
-        assert!(result.unwrap_err().contains("still in history"));
-
-        let mut provider = NotificationProvider::new(ReadAfterClearRunner::default());
-        let (result, snapshot) = execute_and_verify_clear(&mut provider, vec![42]);
-        assert_eq!(snapshot.meta.health, Health::Healthy);
-        assert!(snapshot.notifications.is_empty());
-        assert!(result.unwrap().contains("removed 1 known"));
-    }
-
-    #[test]
-    fn post_clear_65th_entry_cannot_fake_verified_absence() {
-        let mut provider = NotificationProvider::new(ReadAfterClearRunner {
-            reintroduce_id_as_65th: true,
-            ..Default::default()
-        });
-        let (result, snapshot) = execute_and_verify_clear(&mut provider, vec![42]);
-        assert_eq!(snapshot.notifications.len(), 64);
-        assert_eq!(snapshot.meta.health, Health::Degraded);
-        assert!(snapshot
-            .issues
-            .iter()
-            .any(|issue| issue.contains("incomplete")));
-        assert!(
-            !snapshot.notifications.iter().any(|entry| entry.id == 42),
-            "test fixture must hide the lingering ID beyond the snapshot bound"
-        );
-        let error = result.expect_err("incomplete post-clear history cannot prove ID removal");
-        assert!(error.contains("not verified"), "{error}");
-        let menu = model(&snapshot, "", None, Some(&error), false);
-        assert!(menu.item_by_id("feedback").is_some());
-    }
-
-    #[test]
-    fn background_clear_mode_does_not_expose_destructive_buttons() {
-        let snapshot = fixture();
-        let menu = model(&snapshot, "", None, Some("pending"), true);
-        assert!(menu.item_by_id("clearing").is_some());
-        assert!(menu.item_by_id("feedback").is_some());
-        assert!(menu.item_by_id("dismiss-1").is_none());
-        assert!(menu.item_by_id("clear").is_none());
-    }
-
-    #[test]
-    fn confirmed_clear_preserves_notification_arriving_after_ask() {
+    fn read_state_session_only_and_detail_returns_to_inbox() {
         let mut snapshot = fixture();
-        let mut provider = NotificationProvider::system();
-        let mut confirmed_ids = None;
-
-        act(
-            ui_action("ask"),
-            &mut snapshot,
-            &mut provider,
-            true,
-            &mut confirmed_ids,
-        )
-        .unwrap();
-        assert_eq!(confirmed_ids.as_ref().unwrap().len(), 10);
-        let mut incoming = snapshot.notifications[0].clone();
-        incoming.id = 101;
-        incoming.summary = "Arrived after confirmation".into();
-        snapshot.notifications.push(incoming);
-
-        // The confirmation text reflects the frozen set, not the refreshed
-        // history count. New arrivals cannot be silently added to Clear All.
-        let menu = model(&snapshot, "", confirmed_ids.as_deref(), None, false);
-        assert!(menu
-            .item_by_id("confirm")
-            .unwrap()
-            .label
-            .contains("10 confirmed"));
-
-        act(
-            ui_action("clear"),
-            &mut snapshot,
-            &mut provider,
-            true,
-            &mut confirmed_ids,
-        )
-        .unwrap();
-        assert_eq!(
-            snapshot
-                .notifications
-                .iter()
-                .map(|item| item.id)
-                .collect::<Vec<_>>(),
-            vec![101],
-        );
-        assert!(confirmed_ids.is_none());
+        let mut ui = UiState::default();
+        action(&mut snapshot, &mut ui, cmd("view", "1"));
+        assert!(ui.read.contains(&1));
+        assert_eq!(ui.detail, Some(1));
+        assert!(model(&snapshot, &ui).item_by_id("body-next").is_some());
+        action(&mut snapshot, &mut ui, cmd("scroll-down", ""));
+        assert!(ui.body_offset > 0);
+        action(&mut snapshot, &mut ui, cmd("read", "1"));
+        assert!(!ui.read.contains(&1));
+        action(&mut snapshot, &mut ui, cmd("back", ""));
+        assert!(ui.detail.is_none());
     }
 
     #[test]
-    fn clear_requires_confirmation_and_rearming_captures_new_set() {
+    fn confirmation_cancel_and_stale_clear_protection() {
         let mut snapshot = fixture();
-        let mut provider = NotificationProvider::system();
-        let mut confirmed_ids = None;
-
-        // Direct clear without an earlier Ask is inert.
-        act(
-            ui_action("clear"),
-            &mut snapshot,
-            &mut provider,
-            true,
-            &mut confirmed_ids,
-        )
-        .unwrap();
+        let mut ui = UiState::default();
+        action(&mut snapshot, &mut ui, cmd("clear", ""));
         assert_eq!(snapshot.notifications.len(), 10);
-
-        act(
-            ui_action("ask"),
-            &mut snapshot,
-            &mut provider,
-            true,
-            &mut confirmed_ids,
-        )
-        .unwrap();
-        let mut incoming = snapshot.notifications[0].clone();
-        incoming.id = 102;
-        snapshot.notifications.push(incoming);
-        assert_eq!(confirmed_ids.as_ref().unwrap().len(), 10);
-
-        // Explicitly asking again refreshes the proposed destructive set.
-        act(
-            ui_action("ask"),
-            &mut snapshot,
-            &mut provider,
-            true,
-            &mut confirmed_ids,
-        )
-        .unwrap();
-        assert!(confirmed_ids.as_ref().unwrap().contains(&102));
-        act(
-            ui_action("clear"),
-            &mut snapshot,
-            &mut provider,
-            true,
-            &mut confirmed_ids,
-        )
-        .unwrap();
+        action(&mut snapshot, &mut ui, cmd("ask-clear", ""));
+        assert!(model(&snapshot, &ui).item_by_id("confirm-clear").is_some());
+        action(&mut snapshot, &mut ui, cmd("cancel", ""));
+        assert_eq!(snapshot.notifications.len(), 10);
+        action(&mut snapshot, &mut ui, cmd("ask-clear", ""));
+        snapshot.notifications.pop();
+        action(&mut snapshot, &mut ui, cmd("clear", ""));
+        assert_eq!(snapshot.notifications.len(), 9);
+        assert!(ui.error.is_some());
+        action(&mut snapshot, &mut ui, cmd("ask-clear", ""));
+        action(&mut snapshot, &mut ui, cmd("clear", ""));
         assert!(snapshot.notifications.is_empty());
-        assert!(confirmed_ids.is_none());
-
-        // No confirmation is armed for an empty history.
-        act(
-            ui_action("ask"),
-            &mut snapshot,
-            &mut provider,
-            true,
-            &mut confirmed_ids,
-        )
-        .unwrap();
-        assert!(confirmed_ids.is_none());
     }
 
-    // A real D-Bus/daemon integration test must never touch the user's live
-    // notification daemon. This runs only when explicitly requested against
-    // a fresh, ephemeral dbus-run-session and dedicated Dunst/Xvfb instance.
     #[test]
-    #[ignore = "requires isolated dbus-run-session + Dunst/Xvfb"]
-    fn isolated_dbus_ui_confirmation_keeps_new_arrival() {
+    fn action_identity_must_exist_in_current_history() {
+        let mut snapshot = fixture();
+        let mut ui = UiState::default();
+        action(&mut snapshot, &mut ui, cmd("invoke", "1:forged"));
+        assert!(ui.error.is_some());
+        assert_eq!(snapshot.notifications.len(), 10);
+        action(&mut snapshot, &mut ui, cmd("dismiss", "999"));
+        assert_eq!(snapshot.notifications.len(), 10);
+        action(&mut snapshot, &mut ui, cmd("dismiss", "1"));
+        assert_eq!(snapshot.notifications.len(), 9);
+    }
+
+    #[test]
+    fn untrusted_text_cannot_inject_controls_or_unbounded_query() {
+        assert!(!clean("hello\nworld\u{202e}", 40).contains('\n'));
+        assert!(!clean("hello\u{202e}", 40).contains('\u{202e}'));
+        assert_eq!(clean(&"x".repeat(500), 32).chars().count(), 33);
         assert_eq!(
-            std::env::var("NURALOUMI_PRIVATE_DUNST_E2E").as_deref(),
-            Ok("isolated"),
-            "explicit isolated-bus opt-in required"
+            body_lines(&"x".repeat(800))
+                .iter()
+                .map(|v| v.chars().count())
+                .sum::<usize>(),
+            240
         );
-        let bus = std::env::var("DBUS_SESSION_BUS_ADDRESS").expect("private D-Bus address");
-        assert!(
-            bus.starts_with("unix:path=/tmp/dbus-"),
-            "refusing to mutate any non-ephemeral D-Bus session"
-        );
-        fn send(summary: &str) -> u32 {
-            let output = std::process::Command::new("notify-send")
-                .args([
-                    "-p",
-                    "-a",
-                    "nuraloumi-private-e2e",
-                    "-t",
-                    "700",
-                    summary,
-                    "one private notification",
-                ])
-                .output()
-                .expect("notify-send is installed");
-            assert!(output.status.success(), "{output:?}");
-            String::from_utf8(output.stdout)
-                .unwrap()
-                .trim()
-                .parse()
-                .expect("notification ID")
-        }
-        let first = send("before-confirmation");
-        std::thread::sleep(std::time::Duration::from_millis(1350));
-        let mut provider = NotificationProvider::system();
-        let mut snapshot = provider.snapshot().expect("private Dunst history");
-        assert_eq!(snapshot.notifications.len(), 1);
-        assert_eq!(snapshot.notifications[0].id, first);
-
-        let mut confirmed_ids = None;
-        act(
-            ui_action("ask"),
-            &mut snapshot,
-            &mut provider,
-            false,
-            &mut confirmed_ids,
-        )
-        .unwrap();
-        assert_eq!(confirmed_ids.as_deref(), Some(&[first][..]));
-
-        let second = send("after-confirmation");
-        std::thread::sleep(std::time::Duration::from_millis(1350));
-        act(
-            ui_action("clear"),
-            &mut snapshot,
-            &mut provider,
-            false,
-            &mut confirmed_ids,
-        )
-        .unwrap();
-        assert!(confirmed_ids.is_none());
-        assert!(snapshot.notifications.iter().all(|n| n.id != first));
-        assert!(snapshot.notifications.iter().any(|n| n.id == second));
-        assert_eq!(snapshot.notifications.len(), 1);
-
-        let third = send("async-clear-later");
-        std::thread::sleep(std::time::Duration::from_millis(1350));
-        let rx = start_clear(vec![third]);
-        let (result, fresh) = rx.recv_timeout(std::time::Duration::from_secs(7)).unwrap();
-        assert!(result.is_ok(), "{result:?}");
-        assert!(fresh.notifications.iter().all(|entry| entry.id != third));
-        assert!(fresh.notifications.iter().any(|entry| entry.id == second));
     }
 
     #[test]
-    fn model_and_truncation() {
-        let s = fixture();
-        assert_eq!(s.notifications.len(), 10);
-        assert!(model(&s, "Chat", None, None, false)
-            .item_by_id("dismiss-1")
+    fn touch_swipe_scrolls_and_cannot_accidentally_activate() {
+        let scene = test_scene();
+        let (x, y) = hit_center(&scene, "clear-all");
+        let mut ui = UiState::default();
+        ui.touch_down(Some(&scene), 10, x, y);
+        assert_eq!(ui.touch_move(10, x, y - 280.0), Some(8));
+        assert_eq!(ui.touch_up(Some(&scene), 10), None);
+        ui.touch_down(Some(&scene), 11, x, y);
+        assert_eq!(ui.touch_move(11, x, y + 56.0), Some(-2));
+        assert_eq!(ui.touch_up(Some(&scene), 11), None);
+    }
+
+    #[test]
+    fn keyboard_and_touch_resolve_the_same_typed_action() {
+        let snapshot = fixture();
+        let menu = model(&snapshot, &UiState::default());
+        let mut state = MenuState::new(&menu);
+        state.handle(&menu, SemanticInput::Down);
+        let id = state.selected_id.clone().expect("keyboard selected a row");
+        assert_eq!(
+            selected_action(&menu, &state),
+            selected_id_action(&menu, &id)
+        );
+        state.handle(&menu, SemanticInput::Up);
+        assert!(selected_action(&menu, &state).is_some());
+    }
+
+    #[test]
+    fn scene_actionable_rows_are_touch_sized_and_error_has_retry() {
+        let scene = test_scene();
+        assert!(scene
+            .hits
+            .iter()
+            .filter(|hit| hit.actionable && hit.enabled)
+            .all(|hit| hit.rect.height >= 48.0));
+        let mut unavailable = NotificationSnapshot::unavailable(0, "service missing".into());
+        assert!(model(&unavailable, &UiState::default())
+            .item_by_id("retry")
             .is_some());
-        assert_eq!(short(&"x".repeat(500)).chars().count(), 240);
+        unavailable.notifications.clear();
+        let ui = UiState {
+            query: "nothing".into(),
+            ..UiState::default()
+        };
+        assert!(model(&unavailable, &ui).item_by_id("empty").is_some());
+    }
+
+    #[test]
+    fn pointer_releases_inside_and_not_on_press_or_outside() {
+        let scene = test_scene();
+        let (x, y) = hit_center(&scene, "clear-all");
+        let mut ui = UiState::default();
+        assert_eq!(ui.pointer(Some(&scene), x, y, PRIMARY_BUTTON, true), None);
+        assert_eq!(
+            ui.pointer(Some(&scene), -1.0, -1.0, PRIMARY_BUTTON, false),
+            None
+        );
+        ui.pointer(Some(&scene), x, y, PRIMARY_BUTTON, true);
+        assert_eq!(
+            ui.pointer(Some(&scene), x, y, PRIMARY_BUTTON, false),
+            Some("clear-all".into())
+        );
+    }
+
+    #[test]
+    fn multitouch_cancels_activation_until_all_fingers_lift() {
+        let scene = test_scene();
+        let (x, y) = hit_center(&scene, "clear-all");
+        let mut ui = UiState::default();
+        ui.touch_down(Some(&scene), 1, x, y);
+        ui.touch_down(Some(&scene), 2, x, y);
+        assert_eq!(ui.touch_up(Some(&scene), 1), None);
+        assert_eq!(ui.touch_up(Some(&scene), 2), None);
+        ui.touch_down(Some(&scene), 3, x, y);
+        assert_eq!(ui.touch_move(3, x, y), None);
+        assert_eq!(ui.touch_up(Some(&scene), 3), Some("clear-all".into()));
+        ui.touch_down(Some(&scene), 4, x, y);
+        ui.touch_cancel(&[4]);
+        assert_eq!(ui.touch_up(Some(&scene), 4), None);
+    }
+
+    fn test_scene() -> Scene {
+        let snapshot = fixture();
+        let ui = UiState::default();
+        let menu = model(&snapshot, &ui);
+        let state = MenuState::new(&menu);
+        let renderer = CairoRenderer::default();
+        let (scene, _) = render_menu_with_glyphs(
+            &renderer,
+            &menu,
+            &state,
+            Viewport::new(448.0, 720.0, 1.0),
+            &DARK_THEME,
+            RenderOptions::default(),
+            None,
+            None,
+        )
+        .unwrap();
+        scene
+    }
+
+    fn hit_center(scene: &Scene, id: &str) -> (f64, f64) {
+        let hit = scene.hits.iter().find(|h| h.item_id == id).unwrap();
+        assert!(hit.rect.height >= 48.0);
+        (
+            hit.rect.x + hit.rect.width / 2.0,
+            hit.rect.y + hit.rect.height / 2.0,
+        )
     }
 }
