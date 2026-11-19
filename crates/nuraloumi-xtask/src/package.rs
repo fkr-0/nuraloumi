@@ -227,23 +227,53 @@ pub fn stage_package(
         if !bundle.is_absolute() || !bundle.is_dir() {
             return Err("video bundle must be an existing absolute directory".into());
         }
-        for (relative, expected) in [
-            (
-                "lib/libnuraloumi-video.so",
-                "848386bbbd2042c7a881a079368a5368e85a2040d8a3b847abba3d557c19add6",
-            ),
-            (
-                "lib/libgallium-25.0.7.so",
-                "84af7822128f8a08a03c460164b00cd92b9058f22fdbe094f2811119d1d13cf8",
-            ),
-            (
-                "gst/libgstv4l2codecs.so",
-                "79ee247faf6397829d908136ad16e04dc936437a1c71b6d49120e470ec452608",
-            ),
-        ] {
-            let actual = sha256(root, &bundle.join(relative))?;
-            if actual != expected {
-                return Err(format!("native video bundle SHA mismatch: {relative}"));
+        let source_verified = env::var("NURALOUMI_VIDEO_BUNDLE_SOURCE_VERIFIED")
+            .ok()
+            .as_deref()
+            == Some("1");
+        if source_verified && !bundle.join("provenance.json").is_file() {
+            return Err("source-verified bundle requires producer provenance.json".into());
+        }
+        if source_verified {
+            let revision = env::var("NURALOUMI_VIDEO_PRODUCER_REVISION")
+                .map_err(|_| "missing pinned NURALOUMI_VIDEO_PRODUCER_REVISION")?;
+            let archive_sha = env::var("NURALOUMI_VIDEO_ARCHIVE_SHA256")
+                .map_err(|_| "missing pinned NURALOUMI_VIDEO_ARCHIVE_SHA256")?;
+            let status = std::process::Command::new("python3")
+                .arg(root.join("scripts/verify_sl101_video_bundle.py"))
+                .arg(&bundle)
+                .args([
+                    "--producer-revision",
+                    &revision,
+                    "--archive-sha256",
+                    &archive_sha,
+                ])
+                .current_dir(root)
+                .status()
+                .map_err(|e| format!("invoke source-bundle verifier: {e}"))?;
+            if !status.success() {
+                return Err("source-bundle verifier rejected private GPU libraries".into());
+            }
+        }
+        if !source_verified {
+            for (relative, expected) in [
+                (
+                    "lib/libnuraloumi-video.so",
+                    "848386bbbd2042c7a881a079368a5368e85a2040d8a3b847abba3d557c19add6",
+                ),
+                (
+                    "lib/libgallium-25.0.7.so",
+                    "84af7822128f8a08a03c460164b00cd92b9058f22fdbe094f2811119d1d13cf8",
+                ),
+                (
+                    "gst/libgstv4l2codecs.so",
+                    "79ee247faf6397829d908136ad16e04dc936437a1c71b6d49120e470ec452608",
+                ),
+            ] {
+                let actual = sha256(root, &bundle.join(relative))?;
+                if actual != expected {
+                    return Err(format!("native video bundle SHA mismatch: {relative}"));
+                }
             }
         }
         let engine = bundle.join("lib/libnuraloumi-video.so");
@@ -259,6 +289,12 @@ pub fn stage_package(
             &bundle.join("gst/libgstv4l2codecs.so"),
             &dest.join("gst/libgstv4l2codecs.so"),
         )?;
+        if source_verified {
+            copy_required(
+                &bundle.join("provenance.json"),
+                &dest.join("provenance.json"),
+            )?;
+        }
     }
 
     let commit = git_commit(root)?;

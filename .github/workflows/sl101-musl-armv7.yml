@@ -2,6 +2,19 @@ name: SL101 Alpine armv7 musl package
 
 on:
   workflow_dispatch:
+    inputs:
+      gpu_producer_run_id:
+        description: 'Optional exact sl101_linux producer workflow run ID (blank = software only)'
+        required: false
+        type: string
+      gpu_producer_revision:
+        description: 'Full 40-character sl101_linux source commit (required for GPU)'
+        required: false
+        type: string
+      gpu_archive_sha256:
+        description: 'Full SHA256 of producer video-bundle.tar.gz (required for GPU)'
+        required: false
+        type: string
   push:
     branches:
       - main
@@ -22,6 +35,8 @@ on:
       - scripts/test_native_packages_ci.py
       - packaging/alpine/**
       - scripts/test_musl_ci.py
+      - scripts/verify_sl101_video_bundle.py
+      - scripts/test_verify_sl101_video_bundle.py
 
 permissions:
   contents: read
@@ -72,6 +87,7 @@ jobs:
           python3 -m unittest scripts/test_musl_ci.py -v
           python3 -m unittest scripts/test_native_packages_ci.py -v
           python3 -m unittest scripts/test_verify_ci_artifact.py -v
+          python3 -m unittest scripts/test_verify_sl101_video_bundle.py -v
 
       - name: Prepare signed Alpine armv7 sysroot (never accesses tablet)
         shell: bash
@@ -189,5 +205,79 @@ jobs:
             target/gha-artifact/ELF-AUDIT.txt
             target/gha-artifact/BUILD-LOG.txt
             target/gha-artifact/BINARY-LIST.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      # The ordinary artifact above is intentionally software-only. This
+      # independent artifact is emitted only after an exact producer transfer.
+      - name: Validate GPU producer selection
+        if: ${{ inputs.gpu_producer_run_id != '' }}
+        shell: bash
+        env:
+          PRODUCER_RUN: ${{ inputs.gpu_producer_run_id }}
+          PRODUCER_REV: ${{ inputs.gpu_producer_revision }}
+          PRODUCER_SHA: ${{ inputs.gpu_archive_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$PRODUCER_RUN" =~ ^[1-9][0-9]*$ ]]
+          [[ "$PRODUCER_REV" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$PRODUCER_SHA" =~ ^[0-9a-f]{64}$ ]]
+          test -n '${{ vars.SL101_GPU_PRODUCER_REPOSITORY }}'
+
+      - name: Retrieve independently built GPU source artifact
+        if: ${{ inputs.gpu_producer_run_id != '' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: sl101-gpu-video-bundle
+          repository: ${{ vars.SL101_GPU_PRODUCER_REPOSITORY }}
+          run-id: ${{ inputs.gpu_producer_run_id }}
+          github-token: ${{ secrets.SL101_GPU_PRODUCER_READ_TOKEN }}
+          path: target/gpu-producer-download
+
+      - name: Verify archive digest, producer source and all ELF modules
+        if: ${{ inputs.gpu_producer_run_id != '' }}
+        shell: bash
+        env:
+          NURALOUMI_VIDEO_PRODUCER_REVISION: ${{ inputs.gpu_producer_revision }}
+          NURALOUMI_VIDEO_ARCHIVE_SHA256: ${{ inputs.gpu_archive_sha256 }}
+        run: |
+          set -euo pipefail
+          archive=target/gpu-producer-download/video-bundle.tar.gz
+          test -f "$archive"
+          printf '%s  %s\n' "$NURALOUMI_VIDEO_ARCHIVE_SHA256" "$archive" | sha256sum --check --status
+          mkdir -p target/verified-gpu-video
+          # Reject archive escape, links and other non-regular members before extraction.
+          python3 -m tarfile -l "$archive"
+          python3 scripts/extract_sl101_video_bundle.py "$archive" target/verified-gpu-video
+          python3 scripts/verify_sl101_video_bundle.py target/verified-gpu-video \
+            --producer-revision "$NURALOUMI_VIDEO_PRODUCER_REVISION" \
+            --archive-sha256 "$NURALOUMI_VIDEO_ARCHIVE_SHA256"
+
+      - name: Package and audit GPU-video variant
+        if: ${{ inputs.gpu_producer_run_id != '' }}
+        shell: bash
+        env:
+          NURALOUMI_VIDEO_PRODUCER_REVISION: ${{ inputs.gpu_producer_revision }}
+          NURALOUMI_VIDEO_ARCHIVE_SHA256: ${{ inputs.gpu_archive_sha256 }}
+          NURALOUMI_VIDEO_BUNDLE_SOURCE_VERIFIED: '1'
+        run: |
+          set -euo pipefail
+          export NURALOUMI_VIDEO_BUNDLE_DIR="$PWD/target/verified-gpu-video"
+          cargo xtask package --target "$TARGET" --out target/gha-artifact/nuraloumi-gpu-ci
+          cargo xtask package-check --dir target/gha-artifact/nuraloumi-gpu-ci
+          test "$(find target/gha-artifact/nuraloumi-gpu-ci/bin -name nuraloumi-player -type f | wc -l)" -eq 1
+          test "$(find target/gha-artifact/nuraloumi-gpu-ci/bin -name nuraloumi-playerd -type f | wc -l)" -eq 1
+          test -f target/gha-artifact/nuraloumi-gpu-ci/lib/nuraloumi/video/provenance.json
+          (cd target/gha-artifact && sha256sum nuraloumi-gpu-ci.tar > GPU-SHA256SUMS.txt)
+
+      - name: Upload verified GPU-video variant (device qualification pending)
+        if: ${{ inputs.gpu_producer_run_id != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuraloumi-gpu-source-verified-armv7-${{ github.run_number }}-${{ github.sha }}
+          path: |
+            target/gha-artifact/nuraloumi-gpu-ci.tar
+            target/gha-artifact/nuraloumi-gpu-ci/MANIFEST.txt
+            target/gha-artifact/GPU-SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 14
