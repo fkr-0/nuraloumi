@@ -171,9 +171,10 @@ jobs:
             fi
             # Keep Debian control Depends synchronized with actual NEEDED
             # libraries; new SONAMEs must be explicitly reviewed.
+            # glibc may also record its own loader as DT_NEEDED; libc6 owns it.
             while IFS= read -r soname; do
               case "$soname" in
-                libc.so.6|libm.so.6|libcairo.so.2|libgcc_s.so.1|libxkbcommon.so.0|libwayland-client.so.0) ;;
+                libc.so.6|ld-linux-armhf.so.3|libm.so.6|libcairo.so.2|libgcc_s.so.1|libxkbcommon.so.0|libwayland-client.so.0) ;;
                 *) echo "FAIL: unmapped Debian dependency $soname in $bin" >&2; exit 1 ;;
               esac
             done < <(readelf -d "$bin" | sed -n 's/.*Shared library: \[\([^]]*\)\].*/\1/p')

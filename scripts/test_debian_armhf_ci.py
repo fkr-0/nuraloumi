@@ -49,6 +49,12 @@ class DebianArmhfCiTests(unittest.TestCase):
             self.assertIn(part, self.ci)
         self.assertNotIn("musleabihf", self.ci)
 
+    def test_glibc_loader_needed_is_mapped_to_libc6(self):
+        # Some armhf glibc-linked binaries list the interpreter in DT_NEEDED.
+        self.assertIn("libc.so.6|ld-linux-armhf.so.3|libm.so.6", self.ci)
+        package_script = (ROOT / "scripts/build-ci-debian-deb.sh").read_text()
+        self.assertIn("Depends: libc6 (>= 2.41)", package_script)
+
     def test_packaging_all_declared_runtime_surfaces(self):
         for part in (
             "cargo -Z build-std=std,panic_abort build --locked --release --workspace --bins",
