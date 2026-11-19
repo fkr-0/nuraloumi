@@ -24,6 +24,15 @@ These checks ran against the shared current working tree, **not** a clean commit
 
 The sole remaining Rustfmt failure in `src/bin/panel.rs` was corrected with an import-only change, committed separately as `1f27b72`. Afterward the shared working tree passed `cargo fmt --all -- --check`, `cargo test --workspace --offline -q`, and `cargo clippy --workspace --all-targets --offline -- -D warnings` with exit 0. Browser Python discovery passed 75 tests (2 fixture/runtime skips), and the four additional CI script modules passed 25 tests. This does **not** replace a fresh CI run of the exact integrated commit or ARMHF runtime qualification.
 
+### Isolated committed Rust snapshot
+
+- `git archive aada576` was extracted to a fresh temporary directory (no shared-worktree sources included).
+- `cargo fmt --manifest-path <snapshot>/Cargo.toml --all -- --check`: **PASS**, exit 0.
+- `cargo clippy --manifest-path <snapshot>/Cargo.toml --workspace --all-targets --offline -- -D warnings`: **PASS**, exit 0.
+- `TMPDIR=/var/tmp CARGO_TARGET_DIR=/var/tmp/nuraloumi-rust-ci-7754cb CARGO_BUILD_JOBS=2 cargo test --manifest-path <snapshot>/Cargo.toml --workspace --offline -q`: **PASS**, exit 0.
+
+Initial isolated tests failed because the snapshot's build directory occupied RAM-backed `/tmp` and a subsequent test fixture hit `EDQUOT` (disk quota exceeded). The RAM-backed build output was removed and the tests were rerun with both build and temporary test files on `/var/tmp`; no source change or test suppression was needed. This provides a green, pinned Rust source gate, but not remote CI, native ARMHF, or device evidence.
+
 ## Handoff
 
 The player marker fix was already present in the shared worktree before the Rust source task started, and its original author remains unverified. The notification lint/format changes belong to the task. The follow-up locally commits these exact reviewed source paths and this qualification note together; no other concurrent work is staged or published.
