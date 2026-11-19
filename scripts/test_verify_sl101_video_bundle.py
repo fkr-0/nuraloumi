@@ -25,6 +25,7 @@ class BundleConsumerTests(unittest.TestCase):
             'lib/libnuraloumi-video.so', 'gst/libgstv4l2codecs.so',
             'lib/libgallium-25.0.7.so', 'lib/libEGL.so.1',
             'lib/libGLESv2.so.2', 'lib/libgbm.so.1', 'lib/libdrm.so.2',
+            'lib/libdrm_tegra.so.0',
         )
         for name in names:
             path = root / name
@@ -90,6 +91,17 @@ class BundleConsumerTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'missing ELF closure'):
                     verify(Path(tmp), REV, DIGEST, 'armv7-unknown-linux-gnueabihf')
 
+    def test_missing_tegra_drm_module_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._fake_bundle(Path(tmp), 'armv7-unknown-linux-musleabihf')
+            meta_path = Path(tmp) / 'provenance.json'
+            meta = json.loads(meta_path.read_text())
+            meta['files'].pop('lib/libdrm_tegra.so.0')
+            meta_path.write_text(json.dumps(meta))
+            (Path(tmp) / 'lib/libdrm_tegra.so.0').unlink()
+            with self.assertRaisesRegex(ValueError, 'missing required private GPU-video module'):
+                verify(Path(tmp), REV, DIGEST)
+
     def test_missing_bundle_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaises(ValueError):
@@ -110,7 +122,7 @@ class BundleConsumerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             meta = {'schema':'sl101-gpu-video-bundle-v1', 'project':'sl101_linux', 'git_revision':REV, 'target':'armv7-unknown-linux-musleabihf', 'abi':'armv7-musleabihf-vfpv3-d16-no-neon-no-idiv', 'files':{}}
             Path(tmp, 'provenance.json').write_text(json.dumps(meta))
-            with self.assertRaisesRegex(ValueError, 'missing engine'):
+            with self.assertRaisesRegex(ValueError, 'missing required private GPU-video module'):
                 verify(Path(tmp), REV, DIGEST)
 
     def test_archive_path_traversal_fails(self):

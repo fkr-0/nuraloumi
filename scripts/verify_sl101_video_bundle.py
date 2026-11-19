@@ -12,7 +12,16 @@ ABIS = {
     'armv7-unknown-linux-musleabihf': 'armv7-musleabihf-vfpv3-d16-no-neon-no-idiv',
     'armv7-unknown-linux-gnueabihf': 'armv7-gnueabihf-vfpv3-d16-no-neon-no-idiv',
 }
-REQUIRED = ('lib/libnuraloumi-video.so', 'gst/libgstv4l2codecs.so')
+REQUIRED = (
+    'lib/libnuraloumi-video.so',
+    'lib/libgallium-25.0.7.so',
+    'lib/libEGL.so.1',
+    'lib/libGLESv2.so.2',
+    'lib/libgbm.so.1',
+    'lib/libdrm.so.2',
+    'lib/libdrm_tegra.so.0',
+    'gst/libgstv4l2codecs.so',
+)
 SYSTEM = {
     'armv7-unknown-linux-musleabihf': {'libc.musl-armv7.so.1', 'libgcc_s.so.1'},
     'armv7-unknown-linux-gnueabihf': {'libc.so.6', 'ld-linux-armhf.so.3', 'libm.so.6', 'libgcc_s.so.1'},
@@ -32,10 +41,7 @@ def verify(root, revision, digest, target='armv7-unknown-linux-musleabihf'):
             raise ValueError(f'provenance mismatch: {key}')
     files = meta.get('files')
     if not isinstance(files, dict) or not all(x in files for x in REQUIRED):
-        raise ValueError('missing engine or GStreamer plugin')
-    for family in ('libgallium', 'libEGL', 'libGLES', 'libgbm', 'libdrm'):
-        if not any(Path(x).name.startswith(family) for x in files):
-            raise ValueError(f'missing private {family}')
+        raise ValueError('missing required private GPU-video module')
     if {p.relative_to(root).as_posix() for p in root.rglob('*') if p.is_file()} != set(files) | {'provenance.json'}:
         raise ValueError('unlisted or missing files')
     sonames, needed = set(), set()
