@@ -35,6 +35,9 @@ NEON_INTEGER = re.compile(r"^v[a-z0-9]+\.(?:i|u)(?:8|16|32|64)$", re.I)
 NEON_FLOAT_D = re.compile(r"^v(?:add|sub|mul|mla|mls|max|min|abs|neg|recpe|rsqrte|recps|rsqrts)\.f32$", re.I)
 VECTOR_REGS = re.compile(r"\b(?:q(?:[0-9]|[12][0-9]|3[01])|d(?:1[6-9]|2[0-9]|3[01]))\b", re.I)
 DISASM_RE = re.compile(r"^\s*[0-9a-f]+:\s+(?:[0-9a-f]{2,8}\s+)+([a-z]\S*)\s*(.*)$", re.I)
+DISASM_ADDRESS_RE = re.compile(r"^\s*([0-9a-f]+):\s+(?:[0-9a-f]{2,8}\s+)+([a-z]\S*)\s*(.*)$", re.I)
+DISASM_SECTION_RE = re.compile(r"^Disassembly of section (.+):$")
+DISASM_SYMBOL_RE = re.compile(r"^([0-9a-f]+) <(.+)>:$", re.I)
 LIB_DIRS = (
     "lib/arm-linux-gnueabihf", "usr/lib/arm-linux-gnueabihf",
     "usr/local/lib/arm-linux-gnueabihf", "lib", "usr/lib",
@@ -96,6 +99,50 @@ def full_disassembly(path: Path, objdump: str) -> str | None:
             process.kill()
             process.communicate()
         raise
+
+
+def disassembly_suspects(path: Path, objdump: str) -> list[dict]:
+    """Collect every suspicious decode with reproducible section/function context.
+
+    Objdump mode is not authoritative for stripped Thumb code. Every entry
+    remains unresolved until independently verified mapping and CFG evidence
+    establishes its instruction set and code/data status.
+    """
+    result = []
+    section = None
+    symbol = None
+    process = subprocess.Popen([objdump, "-d", str(path)], stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, text=True, bufsize=1)
+    assert process.stdout is not None
+    try:
+        for line in process.stdout:
+            stripped = line.strip()
+            section_match = DISASM_SECTION_RE.match(stripped)
+            function_match = DISASM_SYMBOL_RE.match(stripped)
+            if section_match:
+                section = section_match.group(1)
+                symbol = None
+            elif function_match:
+                symbol = function_match.group(2)
+            hit = DISASM_ADDRESS_RE.match(line)
+            if hit and flagged_disassembly_line(line):
+                result.append({
+                    "address": "0x" + hit.group(1),
+                    "section": section,
+                    "function": symbol,
+                    "decode": hit.group(2) + " " + hit.group(3).strip(),
+                    "arm_thumb": "unverified",
+                    "code_or_data": "unverified",
+                    "verdict": "unresolved",
+                })
+        _, err = process.communicate(timeout=120)
+        if process.returncode:
+            raise RuntimeError(f"objdump failed for {path}: {err[:180]}")
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate()
+    return result
 
 
 def safe_target(root: Path, path: Path) -> Path | None:
@@ -196,15 +243,16 @@ def scan(root: Path, binary: Path, full: bool, objdump: str,
                 else:
                     missing.append({"required_by": relative, "interpreter": interpreter_name})
         if full:
-            instruction = full_disassembly(path, objdump)
-            item["disassembly"] = "fail" if instruction else "pass"
-            if instruction:
+            suspects = disassembly_suspects(path, objdump)
+            item["disassembly"] = "unresolved" if suspects else "no-heuristic-hit"
+            item["suspects"] = suspects
+            if suspects:
                 # objdump -d can incorrectly choose ARM for Thumb-2 text
                 # when mapping symbols are stripped (observed libwebp at
                 # .text+0). A suspicious mnemonic is a conservative blocker,
                 # *not* proof that a real, reachable instruction was decoded.
                 forbidden.append({"path": relative, "reason":
-                                  f"potential forbidden ISA decode (ARM/Thumb mode unverified): {instruction}"})
+                                  f"{len(suspects)} potential forbidden ISA decodes (ARM/Thumb mode unverified)"})
         dependencies = parse_needed(run("readelf", "-dW", str(path)))
         item["needed"] = dependencies
         files.append(item)

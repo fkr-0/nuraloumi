@@ -3,7 +3,7 @@
 # Offline ARMHF QEMU probe, deliberately fail-closed and network-isolated.
 # Requires the already prepared WPE 2.54.0-2 development Docker image.
 set -eu
-root=$(CDPATH='' cd -- "$(dirname -- "$0")/../../.." && pwd)
+root=$(CDPATH='' cd -- "$(dirname -- "$0")/../../../.." && pwd)
 image=sl101-nurabrowser-wpe-dev:2.54.0-2
 expected=sha256:5d7f46c14a1667aa77a7bc17fcbef9e0910e15fa6dd360540dfebdcb33553a17
 command -v docker >/dev/null 2>&1 || {
@@ -21,7 +21,7 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 
 docker run --rm --network none --user "$(id -u):$(id -g)" \
-    -v "$root/nura-browser/tests/isa:/src:ro" \
+    -v "$root/components/nura-browser-engine/tests/isa:/src:ro" \
     -v "$tmp:/out" \
     --entrypoint sh "$image" -ec '
         arm-linux-gnueabihf-gcc -std=c11 -O0 -Wall -Wextra -Werror \

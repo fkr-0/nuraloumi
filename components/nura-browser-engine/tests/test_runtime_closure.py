@@ -1,6 +1,7 @@
 """CPU-only tests for the offline ARMHF DT_NEEDED/ISA release gate."""
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
+from io import StringIO
 import tempfile
 from unittest import TestCase
 from unittest.mock import patch
@@ -14,6 +15,34 @@ SPEC.loader.exec_module(AUDIT)
 
 
 class RuntimeClosureTests(TestCase):
+    def test_all_disassembly_suspects_preserve_context_and_remain_unresolved(self):
+        class FakeProcess:
+            stdout = StringIO(
+                "Disassembly of section .text:\n"
+                "00001000 <webp_decode>:\n"
+                "    1000: f2020804     vadd.i8 d0, d2, d4\n"
+                "    1004: e1a00000     mov r0, r0\n"
+                "00002000 <thumb_candidate>:\n"
+                "    2000: f420070f     vld1.8 {d0}, [r0]\n"
+            )
+            returncode = 0
+
+            def communicate(self, timeout=None):
+                return "", ""
+
+            def poll(self):
+                return 0
+
+        with patch.object(AUDIT.subprocess, "Popen", return_value=FakeProcess()):
+            hits = AUDIT.disassembly_suspects(Path("/fixture/libwebp.so"), "objdump")
+        self.assertEqual(len(hits), 2)
+        self.assertEqual([h["address"] for h in hits], ["0x1000", "0x2000"])
+        self.assertEqual([h["function"] for h in hits],
+                         ["webp_decode", "thumb_candidate"])
+        self.assertTrue(all(h["section"] == ".text" for h in hits))
+        self.assertTrue(all(h["verdict"] == "unresolved" and
+                            h["arm_thumb"] == "unverified" for h in hits))
+
     def test_explicit_dlopen_module_is_a_transitive_seed(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()
