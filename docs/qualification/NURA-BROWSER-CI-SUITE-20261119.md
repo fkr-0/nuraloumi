@@ -50,6 +50,16 @@ The CI artifact verifier now permits SemVer -rc.N and maps release candidate
 package names to Alpine _rcN and Debian ~rc.N. The Debian package constructor
 uses ~rc.N. The same invalid/unrelated release cases remain rejected.
 
+## Public push safety boundary
+
+The remote repository is public. The local ahead-of-origin commit history
+contains 53 added documentation/prompt lines matching a private absolute
+workspace-path pattern. A top-of-branch redaction does not erase those lines
+from the ancestor commit objects. Therefore the current full local main
+history has **not** been pushed. The owner must choose between a reviewed,
+sanitized squash/CI branch and an explicitly reviewed history policy; neither
+is presumed here. Do not force-push or rewrite shared history silently.
+
 ## Deployment preparation for SL101 .106
 
 The name "23106" is tentatively interpreted as the established SL101 .106.
