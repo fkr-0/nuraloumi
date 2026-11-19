@@ -8,18 +8,26 @@ import re
 import subprocess
 import sys
 
-ABI = 'armv7-musleabihf-vfpv3-d16-no-neon-no-idiv'
+ABIS = {
+    'armv7-unknown-linux-musleabihf': 'armv7-musleabihf-vfpv3-d16-no-neon-no-idiv',
+    'armv7-unknown-linux-gnueabihf': 'armv7-gnueabihf-vfpv3-d16-no-neon-no-idiv',
+}
 REQUIRED = ('lib/libnuraloumi-video.so', 'gst/libgstv4l2codecs.so')
-SYSTEM = {'libc.musl-armv7.so.1', 'libgcc_s.so.1'}
+SYSTEM = {
+    'armv7-unknown-linux-musleabihf': {'libc.musl-armv7.so.1', 'libgcc_s.so.1'},
+    'armv7-unknown-linux-gnueabihf': {'libc.so.6', 'ld-linux-armhf.so.3', 'libm.so.6', 'libgcc_s.so.1'},
+}
 
 
-def verify(root, revision, digest):
+def verify(root, revision, digest, target='armv7-unknown-linux-musleabihf'):
+    if target not in ABIS:
+        raise ValueError(f'unsupported bundle target: {target}')
     if not re.fullmatch('[a-f0-9]{40}', revision) or not re.fullmatch('[a-f0-9]{64}', digest):
         raise ValueError('unpinned producer revision or archive digest')
     if not root.is_dir() or root.is_symlink():
         raise ValueError('bundle directory absent or symlinked')
     meta = json.loads((root / 'provenance.json').read_text())
-    for key, value in {'schema':'sl101-gpu-video-bundle-v1', 'project':'sl101_linux', 'git_revision':revision, 'target':'armv7-unknown-linux-musleabihf', 'abi':ABI}.items():
+    for key, value in {'schema':'sl101-gpu-video-bundle-v1', 'project':'sl101_linux', 'git_revision':revision, 'target':target, 'abi':ABIS[target]}.items():
         if meta.get(key) != value:
             raise ValueError(f'provenance mismatch: {key}')
     files = meta.get('files')
@@ -38,22 +46,32 @@ def verify(root, revision, digest):
         path = root / rel
         if path.is_symlink() or not re.fullmatch('[a-f0-9]{64}', str(sha)) or hashlib.sha256(path.read_bytes()).hexdigest() != sha:
             raise ValueError(f'file SHA mismatch: {name}')
-        data = path.open('rb').read(20)
+        with path.open('rb') as stream:
+            data = stream.read(20)
         if data[:5] != b'\x7fELF\x01' or data[18:20] != b'\x28\x00':
             raise ValueError(f'not ELF32 ARM: {name}')
         h, a, d = (subprocess.run(('readelf', flag, str(path)), capture_output=True, text=True, check=True).stdout for flag in ('-h', '-A', '-d'))
-        if 'hard-float ABI' not in h or 'Tag_ABI_VFP_args: VFP registers' not in a or 'NEON' in a or 'Advanced_SIMD' in a:
+        if ('hard-float ABI' not in h or 'Tag_ABI_VFP_args: VFP registers' not in a
+                or 'Tag_FP_arch: VFPv3-D16' not in a or 'NEON' in a or 'Advanced_SIMD' in a):
             raise ValueError(f'wrong ARM ABI: {name}')
-        if any(x in d for x in ('(RPATH)', '(RUNPATH)', 'libc.so.6')):
+        if any(x in d for x in ('(RPATH)', '(RUNPATH)')):
             raise ValueError(f'unsafe loader: {name}')
+        # The two ARM hard-float targets share an instruction set, not a
+        # dynamic linker or libc. Reject cross-ABI contamination explicitly.
+        forbidden_libc = 'libc.so.6' if target.endswith('musleabihf') else 'libc.musl-armv7.so.1'
+        if forbidden_libc in d:
+            raise ValueError(f'wrong libc ABI: {name}')
         for soname in re.findall(r'\(SONAME\).*\[([^]]+)\]', d):
             if soname in sonames:
                 raise ValueError(f'duplicate SONAME: {soname}')
             sonames.add(soname)
         needed.update(re.findall(r'\(NEEDED\).*\[([^]]+)\]', d))
         subprocess.run(('sh', 'scripts/inspect-armv7-elf.sh', str(path)), check=True, capture_output=True)
-    if needed - sonames - SYSTEM:
-        raise ValueError(f'missing ELF closure: {sorted(needed - sonames - SYSTEM)}')
+    if needed - sonames - SYSTEM[target]:
+        raise ValueError(f'missing ELF closure: {sorted(needed - sonames - SYSTEM[target])}')
+    required_libc = 'libc.musl-armv7.so.1' if target.endswith('musleabihf') else 'libc.so.6'
+    if required_libc not in needed:
+        raise ValueError(f'bundle has no {required_libc} dependency')
     return meta
 
 
@@ -62,9 +80,10 @@ if __name__ == '__main__':
     parser.add_argument('bundle', type=Path)
     parser.add_argument('--producer-revision', required=True)
     parser.add_argument('--archive-sha256', required=True)
+    parser.add_argument('--target', choices=tuple(ABIS), default='armv7-unknown-linux-musleabihf')
     args = parser.parse_args()
     try:
-        verify(args.bundle, args.producer_revision, args.archive_sha256)
+        verify(args.bundle, args.producer_revision, args.archive_sha256, args.target)
     except (OSError, ValueError, subprocess.CalledProcessError, json.JSONDecodeError) as exc:
         sys.exit(f'GPU_VIDEO_BUNDLE=FAIL: {exc}')
     print('GPU_VIDEO_BUNDLE=PASS; physical hardware qualification pending')

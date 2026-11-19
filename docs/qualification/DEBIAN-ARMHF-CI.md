@@ -50,6 +50,31 @@ GitHub Actions uploads a downloadable artifact containing:
 Fetch the artifact through the GitHub Actions run page. Verify SHA256
 before extracting. Artifact retention is 14 days.
 
+## Optional independently sourced glibc GPU-video tarball
+
+The standard CI tarball and Debian .deb intentionally remain software-only.
+Manual `workflow_dispatch` supports an additional **glibc-only** video tarball,
+provided an independent `sl101_linux` producer has published the exact
+`sl101-gpu-video-bundle-glibc` artifact containing `video-bundle.tar.gz`.
+The caller must supply all three pins: numeric `gpu_producer_run_id`, full
+40-character `gpu_producer_revision`, and SHA256 `gpu_archive_sha256`.
+Configure `SL101_GPU_PRODUCER_REPOSITORY` and a read-only
+`SL101_GPU_PRODUCER_READ_TOKEN` in GitHub repository settings. Partial pins
+fail the run; a blank selection keeps the normal software-only build.
+
+The consumer checks the archive SHA, safe extraction, producer provenance,
+every private ELF32 ARM module, VFPv3-D16 instruction audit, glibc loader
+dependencies and complete bundled ELF SONAME closure. It explicitly rejects
+musl dependencies. `cargo xtask package-check` verifies the resulting
+`nuraloumi-gpu-glibc-ci.tar` and its manifest and hash list. This is an
+additional artifact, **not** an implicit replacement for the .deb, and is
+not hardware-qualified or automatically deployed. It is incompatible with
+the Alpine `.106` tablet: that target requires its separate musl bundle.
+
+As of 2026-11-19, the pinned glibc GPU producer workflow and full dependency
+closure have **not** been qualified; this opt-in lane must not be described
+as a successful GPU release until an actual producer run passes it.
+
 ## Reversible qualification on Debian .100
 
 No CI step accesses the tablet, systemd, a compositor, the bootloader

@@ -16,6 +16,8 @@ class VideoBundleStageTests(unittest.TestCase):
         src = (ROOT / "crates/nuraloumi-xtask/src/package.rs").read_text()
         self.assertIn('env::var_os("NURALOUMI_VIDEO_BUNDLE_DIR")', src)
         self.assertIn('resolved_target != "armv7-unknown-linux-musleabihf"', src)
+        self.assertIn('source_verified && resolved_target == "armv7-unknown-linux-gnueabihf"', src)
+        self.assertIn('"--target",', src)
         self.assertIn('stage.join("lib/nuraloumi/video")', src)
         self.assertIn('copy_tree(&bundle.join("lib")', src)
         self.assertIn('copy_required(', src)

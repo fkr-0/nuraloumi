@@ -220,17 +220,19 @@ pub fn stage_package(
     // pinned, target-qualified native bundle was explicitly provided.
     // Never silently package host/glibc or unpinned system Mesa here.
     if let Some(bundle) = env::var_os("NURALOUMI_VIDEO_BUNDLE_DIR") {
-        if resolved_target != "armv7-unknown-linux-musleabihf" {
-            return Err("NURALOUMI_VIDEO_BUNDLE_DIR requires armv7/musl target".into());
+        let source_verified = env::var("NURALOUMI_VIDEO_BUNDLE_SOURCE_VERIFIED")
+            .ok()
+            .as_deref()
+            == Some("1");
+        if resolved_target != "armv7-unknown-linux-musleabihf"
+            && !(source_verified && resolved_target == "armv7-unknown-linux-gnueabihf")
+        {
+            return Err("video bundle requires armv7/musl, or source-verified armv7/glibc".into());
         }
         let bundle = PathBuf::from(bundle);
         if !bundle.is_absolute() || !bundle.is_dir() {
             return Err("video bundle must be an existing absolute directory".into());
         }
-        let source_verified = env::var("NURALOUMI_VIDEO_BUNDLE_SOURCE_VERIFIED")
-            .ok()
-            .as_deref()
-            == Some("1");
         if source_verified && !bundle.join("provenance.json").is_file() {
             return Err("source-verified bundle requires producer provenance.json".into());
         }
@@ -247,6 +249,8 @@ pub fn stage_package(
                     &revision,
                     "--archive-sha256",
                     &archive_sha,
+                    "--target",
+                    &resolved_target,
                 ])
                 .current_dir(root)
                 .status()

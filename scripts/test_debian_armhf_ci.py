@@ -55,6 +55,29 @@ class DebianArmhfCiTests(unittest.TestCase):
         package_script = (ROOT / "scripts/build-ci-debian-deb.sh").read_text()
         self.assertIn("Depends: libc6 (>= 2.41)", package_script)
 
+    def test_independent_opt_in_glibc_gpu_artifact(self):
+        for part in (
+            'gpu_producer_run_id:',
+            'gpu_producer_revision:',
+            'gpu_archive_sha256:',
+            'sl101-gpu-video-bundle-glibc',
+            'SL101_GPU_PRODUCER_REPOSITORY',
+            'SL101_GPU_PRODUCER_READ_TOKEN',
+            'scripts/extract_sl101_video_bundle.py',
+            'scripts/verify_sl101_video_bundle.py target/verified-gpu-video',
+            '--target "$TARGET"',
+            'NURALOUMI_VIDEO_BUNDLE_SOURCE_VERIFIED: \'1\'',
+            'target/gha-artifact/nuraloumi-gpu-glibc-ci.tar',
+            'GPU-GLIBC-SHA256SUMS.txt',
+            'nuraloumi-gpu-source-verified-glibc-armhf-',
+        ):
+            self.assertIn(part, self.ci)
+        self.assertIn('test -z "$PRODUCER_REV"', self.ci)
+        self.assertIn('test -z "$PRODUCER_SHA"', self.ci)
+        self.assertIn('sha256sum --check --status', self.ci)
+        # The native Debian DEB is software-only, no private musl blobs.
+        self.assertLess(self.ci.index('Assemble a Debian 13 armhf .deb'), self.ci.index('Retrieve independently built glibc GPU'))
+
     def test_packaging_all_declared_runtime_surfaces(self):
         for part in (
             "cargo -Z build-std=std,panic_abort build --locked --release --workspace --bins",
