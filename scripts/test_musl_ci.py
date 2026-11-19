@@ -29,6 +29,21 @@ class MuslCiContractTests(unittest.TestCase):
             self.assertIn(part, self.ci)
         self.assertNotIn("armv7-unknown-linux-gnueabihf", self.ci)
 
+    def test_gpu_consumer_fails_closed_on_partial_pins_and_wrong_abi(self):
+        for part in (
+            'gpu_producer_run_id:',
+            'gpu_producer_revision:',
+            'gpu_archive_sha256:',
+            'test -z "$PRODUCER_REV"',
+            'test -z "$PRODUCER_SHA"',
+            'SL101_GPU_PRODUCER_READ_TOKEN',
+            'sl101-gpu-video-bundle\n',
+            '--target "$TARGET"',
+            'NURALOUMI_VIDEO_BUNDLE_SOURCE_VERIFIED: \'1\'',
+            'nuraloumi-gpu-ci.tar',
+        ):
+            self.assertIn(part, self.ci)
+
     def test_host_ci_installs_xkbcommon_needed_by_tests(self):
         self.assertIn("libxkbcommon-dev", HOST_CI.read_text())
 

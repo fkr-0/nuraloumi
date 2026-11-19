@@ -211,7 +211,7 @@ jobs:
       # The ordinary artifact above is intentionally software-only. This
       # independent artifact is emitted only after an exact producer transfer.
       - name: Validate GPU producer selection
-        if: ${{ inputs.gpu_producer_run_id != '' }}
+        if: ${{ github.event_name == 'workflow_dispatch' }}
         shell: bash
         env:
           PRODUCER_RUN: ${{ inputs.gpu_producer_run_id }}
@@ -219,10 +219,16 @@ jobs:
           PRODUCER_SHA: ${{ inputs.gpu_archive_sha256 }}
         run: |
           set -euo pipefail
+          if [[ -z "$PRODUCER_RUN" ]]; then
+            test -z "$PRODUCER_REV"
+            test -z "$PRODUCER_SHA"
+            exit 0
+          fi
           [[ "$PRODUCER_RUN" =~ ^[1-9][0-9]*$ ]]
           [[ "$PRODUCER_REV" =~ ^[0-9a-f]{40}$ ]]
           [[ "$PRODUCER_SHA" =~ ^[0-9a-f]{64}$ ]]
           test -n '${{ vars.SL101_GPU_PRODUCER_REPOSITORY }}'
+          test -n '${{ secrets.SL101_GPU_PRODUCER_READ_TOKEN }}'
 
       - name: Retrieve independently built GPU source artifact
         if: ${{ inputs.gpu_producer_run_id != '' }}
@@ -250,6 +256,7 @@ jobs:
           python3 -m tarfile -l "$archive"
           python3 scripts/extract_sl101_video_bundle.py "$archive" target/verified-gpu-video
           python3 scripts/verify_sl101_video_bundle.py target/verified-gpu-video \
+            --target "$TARGET" \
             --producer-revision "$NURALOUMI_VIDEO_PRODUCER_REVISION" \
             --archive-sha256 "$NURALOUMI_VIDEO_ARCHIVE_SHA256"
 
