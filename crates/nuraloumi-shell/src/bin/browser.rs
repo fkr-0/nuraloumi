@@ -5,11 +5,12 @@
 //! companion surface uses the existing NuraLoumi Wayland/Cairo contracts.
 
 use nuraloumi_core::{MenuAction, MenuModel, MenuState, SemanticInput};
-use nuraloumi_render_cairo::{CairoRenderer, RenderOptions, Scene, Viewport};
+use nuraloumi_render_cairo::{CairoRenderer, Scene, Viewport};
+use nuraloumi_shell::browser::scene::browser_scene;
 use nuraloumi_shell::browser::{
     Bookmark, BrowserRpc, BrowserUi, NativeBrowser, PageStatus, Tab, MAX_BOOKMARK_PAGE, MAX_TABS,
 };
-use nuraloumi_shell::{load_config_or_default, render_menu_with_glyphs, ShellConfig, Theme};
+use nuraloumi_shell::{load_config_or_default, ShellConfig, Theme};
 use nuraloumi_wayland::{
     BackendError, Frame, Key, MenuConfig, PixelFormat, PlatformEvent, SurfaceId, WaylandBackend,
 };
@@ -21,6 +22,46 @@ struct Options {
     config: Option<PathBuf>,
     fixture: bool,
     headless: bool,
+}
+
+/// Swipe the lower list without changing fixed chrome or activating the row
+/// that received the initial contact. The touch ID is compositor-owned.
+#[derive(Default)]
+struct BrowserScrollDrag {
+    touch: Option<(i32, f64, f64)>,
+}
+
+impl BrowserScrollDrag {
+    fn down(&mut self, id: i32, y: f64, scene: Option<&Scene>) {
+        if let Some(scene) = scene {
+            if self.touch.is_none()
+                && scene.scroll.max_offset > 0.0
+                && scene.scroll.viewport.contains(1.0, y)
+            {
+                self.touch = Some((id, y, y));
+            }
+        }
+    }
+
+    fn motion(&mut self, id: i32, y: f64, offset: f64, limit: f64) -> Option<f64> {
+        let (active, start, previous) = self.touch.as_mut()?;
+        if *active != id {
+            return None;
+        }
+        let delta = *previous - y;
+        *previous = y;
+        ((y - *start).abs() > 8.0).then(|| (offset + delta).clamp(0.0, limit))
+    }
+
+    fn end(&mut self, id: i32) {
+        if self
+            .touch
+            .as_ref()
+            .is_some_and(|(active, _, _)| *active == id)
+        {
+            self.touch = None;
+        }
+    }
 }
 
 fn parse_options(args: impl IntoIterator<Item = String>) -> Result<Option<Options>, String> {
@@ -164,9 +205,9 @@ fn draw(
     config: &ShellConfig,
     menu: &MenuModel,
     state: &MenuState,
-    geometry: (u32, u32, i32),
+    layout: ((u32, u32, i32), f64),
 ) -> Result<Scene, String> {
-    let (w, h, scale) = geometry;
+    let ((w, h, scale), scroll_offset) = layout;
     let tokens = config
         .palette
         .map(|palette| palette.tokens())
@@ -174,16 +215,14 @@ fn draw(
             Theme::Dark => &nuraloumi_core::DARK_THEME,
             Theme::Light => &nuraloumi_core::LIGHT_THEME,
         });
-    let (scene, mut buffer) = render_menu_with_glyphs(
-        renderer,
+    let scene = browser_scene(
         menu,
         state,
         Viewport::new(f64::from(w), f64::from(h), f64::from(scale.max(1))),
         tokens,
-        RenderOptions::default(),
-        None,
-        None,
-    )?;
+        scroll_offset,
+    );
+    let mut buffer = renderer.render_scene(&scene).map_err(|e| e.to_string())?;
     let info = buffer.info();
     let result = buffer
         .with_argb32_bytes(|pixels, _| {
@@ -318,7 +357,25 @@ fn run(
             ui.tabs.tabs.len(),
             ui.bookmarks.total
         );
-        nuraloumi_core::validate_menu(&ui.menu()).map_err(|e| e.to_string())?;
+        let menu = ui.menu();
+        nuraloumi_core::validate_menu(&menu).map_err(|e| e.to_string())?;
+        let tokens = config
+            .palette
+            .map(|palette| palette.tokens())
+            .unwrap_or(match config.theme {
+                Theme::Dark => &nuraloumi_core::DARK_THEME,
+                Theme::Light => &nuraloumi_core::LIGHT_THEME,
+            });
+        let scene = browser_scene(
+            &menu,
+            &MenuState::new(&menu),
+            Viewport::new(720.0, 312.0, 1.0),
+            tokens,
+            0.0,
+        );
+        CairoRenderer::default()
+            .render_scene(&scene)
+            .map_err(|e| e.to_string())?;
         return Ok(());
     }
     let mut backend = WaylandBackend::connect().map_err(|e| e.to_string())?;
@@ -344,6 +401,8 @@ fn run(
     let mut scene = None;
     let mut geometry = None;
     let mut press = BrowserPress::default();
+    let mut drag = BrowserScrollDrag::default();
+    let mut scroll_offset = 0.0;
     loop {
         let tick = dispatch_until_event(&mut backend, ui.page.is_loading)?;
         let mut redraw = tick;
@@ -422,12 +481,31 @@ fn run(
                 PlatformEvent::PointerLeave => press.pointer = None,
                 PlatformEvent::TouchDown { id, x, y } => {
                     press.touch_down(id, hit(&scene, &menu, x, y));
+                    drag.down(id, y, scene.as_ref());
                 }
                 PlatformEvent::TouchMotion { id, x, y } => {
                     press.touch_motion(id, hit(&scene, &menu, x, y));
+                    if let Some(active) = scene.as_ref() {
+                        if let Some(next) =
+                            drag.motion(id, y, scroll_offset, active.scroll.max_offset)
+                        {
+                            // A swipe may never turn into a same-row tap.
+                            press.touch_motion(id, None);
+                            scroll_offset = next;
+                            redraw = true;
+                        }
+                    }
                 }
-                PlatformEvent::TouchUp { id } => action = press.touch_up(id),
-                PlatformEvent::TouchCancel { ids } => press.touch_cancel(&ids),
+                PlatformEvent::TouchUp { id } => {
+                    action = press.touch_up(id);
+                    drag.end(id);
+                }
+                PlatformEvent::TouchCancel { ids } => {
+                    press.touch_cancel(&ids);
+                    for id in ids {
+                        drag.end(id);
+                    }
+                }
                 _ => {}
             }
             if let Some(action) = action {
@@ -453,15 +531,17 @@ fn run(
                 }
             }
             if let Some(geometry) = geometry {
-                scene = Some(draw(
+                let new_scene = draw(
                     &mut backend,
                     surface,
                     &renderer,
                     &config,
                     &menu,
                     &state,
-                    geometry,
-                )?);
+                    (geometry, scroll_offset),
+                )?;
+                scroll_offset = new_scene.scroll.offset;
+                scene = Some(new_scene);
             }
         }
     }
@@ -541,6 +621,32 @@ mod tests {
         press.touch_down(7, Some(first.clone()));
         press.reset();
         assert_eq!(press.touch_up(7), None);
+    }
+
+    #[test]
+    fn browser_scroll_drag_requires_matching_contact_and_threshold() {
+        let ui = BrowserUi::fixture();
+        let menu = ui.menu();
+        let state = MenuState::new(&menu);
+        let scene = browser_scene(
+            &menu,
+            &state,
+            Viewport::new(720.0, 312.0, 1.0),
+            &nuraloumi_core::DARK_THEME,
+            0.0,
+        );
+        let mut drag = BrowserScrollDrag::default();
+        let mut press = BrowserPress::default();
+        press.touch_down(3, Some(tab_action(1)));
+        let y = scene.scroll.viewport.y + 20.0;
+        drag.down(3, y, Some(&scene));
+        assert_eq!(drag.motion(4, y - 20.0, 0.0, 300.0), None);
+        assert_eq!(drag.motion(3, y - 4.0, 0.0, 300.0), None);
+        assert_eq!(drag.motion(3, y - 20.0, 0.0, 300.0), Some(16.0));
+        press.touch_motion(3, None); // the scroll path cancels pending activation
+        assert_eq!(press.touch_up(3), None);
+        drag.end(3);
+        assert_eq!(drag.motion(3, y - 40.0, 16.0, 300.0), None);
     }
 
     #[test]
