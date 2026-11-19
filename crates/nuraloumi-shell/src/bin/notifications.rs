@@ -44,7 +44,10 @@ impl BackdropPress {
     fn handle(&mut self, event: &WaylandEvent) -> bool {
         match event {
             WaylandEvent::PointerButton {
-                x, y, button, pressed,
+                x,
+                y,
+                button,
+                pressed,
             } => {
                 if *button != PRIMARY_BUTTON {
                     return false;
@@ -90,11 +93,9 @@ impl BackdropPress {
             }
             WaylandEvent::TouchUp { id } => {
                 self.touches.remove(id);
-                let was_tap = self
-                    .touch_origin
+                self.touch_origin
                     .take()
-                    .is_some_and(|(tid, _, _)| tid == *id && self.touches.is_empty());
-                was_tap
+                    .is_some_and(|(tid, _, _)| tid == *id && self.touches.is_empty())
             }
             WaylandEvent::TouchCancel { .. } => {
                 self.touches.clear();
@@ -748,7 +749,10 @@ fn perform(
                                 "Clear not verified: {} ID(s) still present; {result:?}",
                                 expected
                                     .iter()
-                                    .filter(|id| snapshot.notifications.iter().any(|n| n.id == **id))
+                                    .filter(|id| snapshot
+                                        .notifications
+                                        .iter()
+                                        .any(|n| n.id == **id))
                                     .count()
                             ));
                         }
@@ -1328,38 +1332,76 @@ mod tests {
     fn backdrop_drag_does_not_dismiss_but_tap_does() {
         let mut bp = BackdropPress::default();
         assert!(!bp.handle(&WaylandEvent::PointerButton {
-            x: 10.0, y: 10.0, button: PRIMARY_BUTTON, pressed: true,
+            x: 10.0,
+            y: 10.0,
+            button: PRIMARY_BUTTON,
+            pressed: true,
         }));
         assert!(!bp.handle(&WaylandEvent::PointerMove { x: 100.0, y: 100.0 }));
         assert!(!bp.handle(&WaylandEvent::PointerButton {
-            x: 100.0, y: 100.0, button: PRIMARY_BUTTON, pressed: false,
+            x: 100.0,
+            y: 100.0,
+            button: PRIMARY_BUTTON,
+            pressed: false,
         }));
         assert!(!bp.handle(&WaylandEvent::PointerButton {
-            x: 10.0, y: 10.0, button: PRIMARY_BUTTON, pressed: true,
+            x: 10.0,
+            y: 10.0,
+            button: PRIMARY_BUTTON,
+            pressed: true,
         }));
         assert!(bp.handle(&WaylandEvent::PointerButton {
-            x: 11.0, y: 11.0, button: PRIMARY_BUTTON, pressed: false,
+            x: 11.0,
+            y: 11.0,
+            button: PRIMARY_BUTTON,
+            pressed: false,
         }));
         assert!(!bp.handle(&WaylandEvent::PointerButton {
-            x: 10.0, y: 10.0, button: 0x111, pressed: true,
+            x: 10.0,
+            y: 10.0,
+            button: 0x111,
+            pressed: true,
         }));
         assert!(!bp.handle(&WaylandEvent::PointerButton {
-            x: 10.0, y: 10.0, button: 0x111, pressed: false,
+            x: 10.0,
+            y: 10.0,
+            button: 0x111,
+            pressed: false,
         }));
     }
 
     #[test]
     fn backdrop_touch_drag_does_not_dismiss() {
         let mut bp = BackdropPress::default();
-        assert!(!bp.handle(&WaylandEvent::TouchDown { id: 1, x: 10.0, y: 10.0 }));
-        assert!(!bp.handle(&WaylandEvent::TouchMotion { id: 1, x: 100.0, y: 100.0 }));
+        assert!(!bp.handle(&WaylandEvent::TouchDown {
+            id: 1,
+            x: 10.0,
+            y: 10.0
+        }));
+        assert!(!bp.handle(&WaylandEvent::TouchMotion {
+            id: 1,
+            x: 100.0,
+            y: 100.0
+        }));
         assert!(!bp.handle(&WaylandEvent::TouchUp { id: 1 }));
         let mut bp2 = BackdropPress::default();
-        assert!(!bp2.handle(&WaylandEvent::TouchDown { id: 2, x: 10.0, y: 10.0 }));
+        assert!(!bp2.handle(&WaylandEvent::TouchDown {
+            id: 2,
+            x: 10.0,
+            y: 10.0
+        }));
         assert!(bp2.handle(&WaylandEvent::TouchUp { id: 2 }));
         let mut bp3 = BackdropPress::default();
-        assert!(!bp3.handle(&WaylandEvent::TouchDown { id: 3, x: 10.0, y: 10.0 }));
-        assert!(!bp3.handle(&WaylandEvent::TouchDown { id: 4, x: 20.0, y: 20.0 }));
+        assert!(!bp3.handle(&WaylandEvent::TouchDown {
+            id: 3,
+            x: 10.0,
+            y: 10.0
+        }));
+        assert!(!bp3.handle(&WaylandEvent::TouchDown {
+            id: 4,
+            x: 20.0,
+            y: 20.0
+        }));
         assert!(!bp3.handle(&WaylandEvent::TouchUp { id: 3 }));
         assert!(!bp3.handle(&WaylandEvent::TouchUp { id: 4 }));
     }

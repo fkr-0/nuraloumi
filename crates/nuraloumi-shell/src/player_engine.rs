@@ -790,7 +790,6 @@ impl Player {
         self.duration_ms = 0;
     }
     pub fn tick(&mut self) {
-<<<<<<< HEAD
         if self.status != "Playing" && self.status != "Paused" {
             return;
         }
