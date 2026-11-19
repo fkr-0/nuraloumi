@@ -29,7 +29,7 @@ jobs:
         run: |
           python3 -m unittest scripts/test_nuraloumi_video_browser_isolation_20261114.py -v
           python3 -m unittest discover -s components/nura-browser-engine/tests -p 'test_integration_contract.py' -v
-          python3 -m unittest discover -s components/nura-browser-engine/tests -p 'test_migration_contract.py' -v
+          python3 -m unittest discover -s components/nura-browser-engine/tests -p 'test_*.py' -v
       - name: Test
         run: cargo test --workspace --locked
       - name: Clippy
