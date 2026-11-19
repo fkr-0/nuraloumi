@@ -133,7 +133,8 @@ def sha256(path: Path) -> str:
 
 def scan(root: Path, binary: Path, full: bool, objdump: str,
          library_dirs: tuple[str, ...] = LIB_DIRS,
-         max_files: int = 2048) -> dict:
+         max_files: int = 2048,
+         extra_roots: tuple[Path, ...] = ()) -> dict:
     root = root.resolve(strict=True)
     executable = safe_target(root, binary)
     if executable is None:
@@ -142,7 +143,13 @@ def scan(root: Path, binary: Path, full: bool, objdump: str,
     if not tool or (full and not shutil.which(objdump)):
         raise ValueError("required target ELF inspection tools are missing")
 
-    queue = deque([executable])
+    seeds = [executable]
+    for extra in extra_roots:
+        target = safe_target(root, extra)
+        if target is None:
+            raise ValueError(f"dynamic module absent or outside sysroot: {extra}")
+        seeds.append(target)
+    queue = deque(seeds)
     traversed: set[Path] = set()
     files: list[dict] = []
     missing: list[dict] = []
@@ -216,11 +223,12 @@ def scan(root: Path, binary: Path, full: bool, objdump: str,
         "root": str(root),
         "binary": str(binary),
         "files_scanned": len(files),
+        "seed_files": [str(path.relative_to(root)) for path in seeds],
         "missing": missing,
         "forbidden": forbidden,
         "files": files,
         "limitations": [
-            "DT_NEEDED graph only; dlopen, GStreamer modules, WPEPlatform modules and child executables are NOT traversed",
+            "Only explicitly seeded dlopen modules/child executables are traversed; complete runtime module discovery requires independent process tracing",
             "ELF flags and disassembly are static evidence, not sandbox or runtime qualification",
             "Sysroot is rolling Debian unstable except the two exact WPE .deb archives",
         ],
@@ -236,13 +244,15 @@ def main() -> int:
     parser.add_argument("--libdir", action="append", type=str,
                         help="Override target sysroot library search dirs")
     parser.add_argument("--max-files", type=int, default=2048)
+    parser.add_argument("--extra-elf", action="append", type=Path, default=[],
+                        help="Explicit dlopen module or child executable to include in DT_NEEDED closure")
     args = parser.parse_args()
     try:
         if args.max_files < 1:
             raise ValueError("--max-files must be positive")
         report = scan(args.root, args.binary, args.full_disassembly, args.objdump,
                       tuple(args.libdir) if args.libdir else LIB_DIRS,
-                      args.max_files)
+                      args.max_files, tuple(args.extra_elf))
     except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
         print(json.dumps({"pass": False, "status": "audit-error", "error": str(exc)}))
         return 2

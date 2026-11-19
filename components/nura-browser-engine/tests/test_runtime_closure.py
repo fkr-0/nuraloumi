@@ -14,6 +14,37 @@ SPEC.loader.exec_module(AUDIT)
 
 
 class RuntimeClosureTests(TestCase):
+    def test_explicit_dlopen_module_is_a_transitive_seed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            app = root / "bin/nura"
+            module = root / "usr/lib/arm-linux-gnueabihf/gstreamer-1.0/libgsttest.so"
+            module.parent.mkdir(parents=True)
+            app.parent.mkdir(parents=True)
+            app.write_bytes(b"\x7fELF")
+            module.write_bytes(b"\x7fELF")
+            def readelf(*argv):
+                if "-hW" in argv:
+                    return "Machine: ARM\nFlags: hard-float ABI"
+                if "-A" in argv:
+                    return "Tag_FP_arch: VFPv3-D16"
+                if "-dW" in argv and argv[-1] == str(module):
+                    return "(NEEDED) Shared library: [libabsent.so]"
+                return ""
+            with patch.object(AUDIT, "run", side_effect=readelf):
+                result = AUDIT.scan(root, app, False, "unused", extra_roots=(module,))
+            self.assertEqual(result["files_scanned"], 2)
+            self.assertEqual(len(result["missing"]), 1)
+            self.assertEqual(result["missing"][0]["required_by"], str(module.relative_to(root)))
+
+    def test_missing_explicit_module_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            app = root / "nura"
+            app.write_bytes(b"\x7fELF")
+            with self.assertRaisesRegex(ValueError, "dynamic module absent"):
+                AUDIT.scan(root, app, False, "unused", extra_roots=(root / "missing.so",))
+
     def test_needed_parser(self):
         text = (
             " 0x00000001 (NEEDED) Shared library: [libwebp.so.7]\n"
