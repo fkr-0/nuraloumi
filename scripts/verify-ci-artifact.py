@@ -113,10 +113,10 @@ def verify_downloaded(folder: Path, lane: str, sha: str) -> dict:
         embedded = archive.extractfile(members[0])
         require(embedded is not None and embedded.read() == manifest, "tar manifest mismatch")
     version = fields.get("version", "")
-    require(bool(re.fullmatch(r"[0-9]+(?:\.[0-9]+){2}(?:-dev\.[0-9]+)?", version)), "bad version")
+    require(bool(re.fullmatch(r"[0-9]+(?:\.[0-9]+){2}(?:-(?:dev|rc)\.[0-9]+)?", version)), "bad version")
     if lane == "alpine":
         base = folder / "native-apk"
-        pkg_version = version.replace("-dev.", "_pre")
+        pkg_version = version.replace("-dev.", "_pre").replace("-rc.", "_rc")
         native_name = f"nuraloumi-{pkg_version}-r0.apk"
         packages = list(base.rglob(native_name))
         require(len(packages) == 1, "expected exactly one APK")
@@ -138,7 +138,7 @@ def verify_downloaded(folder: Path, lane: str, sha: str) -> dict:
         )
     else:
         base = folder / "native-deb"
-        pkg_version = version.replace("-dev.", "~dev.")
+        pkg_version = version.replace("-dev.", "~dev.").replace("-rc.", "~rc.")
         native_name = f"nuraloumi_{pkg_version}_armhf.deb"
         packages = list(base.glob(native_name))
         require(len(packages) == 1, "expected exactly one DEB")

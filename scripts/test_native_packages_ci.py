@@ -153,7 +153,7 @@ class NativePackageCiContract(unittest.TestCase):
         self.assertIn("armv7-unknown-linux-gnueabihf", DEB_SCRIPT)
         self.assertIn("unmapped Debian dependency", DEB)
         self.assertIn("armv7-unknown-linux-musleabihf", APK_SCRIPT)
-        self.assertRegex(DEB_SCRIPT, r"sed 's/-dev\\\./~dev\./'")
+        self.assertIn(r"s/-dev\./~dev./;s/-rc\./~rc./", DEB_SCRIPT)
 
     def test_no_flatpak_or_apk_cross_abi_masquerade(self):
         self.assertNotIn("flatpak", MUSL + DEB)

@@ -15,8 +15,8 @@ version=$(sed -n 's/^version=//p' "$manifest")
 case "$version" in
   *[!0-9a-zA-Z.+-]*|'') echo 'invalid version' >&2; exit 1;;
 esac
-# Debian orders "~dev" before the eventual stable 0.0.4 release.
-deb_version=$(printf '%s' "$version" | sed 's/-dev\./~dev./')
+# Debian orders "~dev" and "~rc" before the corresponding stable release.
+deb_version=$(printf '%s' "$version" | sed 's/-dev\./~dev./;s/-rc\./~rc./')
 mkdir -p "$out"
 out=$(cd "$out" && pwd)
 tmp=$(mktemp -d "$out/.deb-stage.XXXXXXXX")

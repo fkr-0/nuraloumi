@@ -18,11 +18,11 @@ spec.loader.exec_module(verifier)
 SHA = "a" * 40
 
 
-def sample(folder: Path, target: str = "debian") -> None:
+def sample(folder: Path, target: str = "debian", version: str = "0.0.4-dev.2") -> None:
     triple = verifier.LANES[target][2]
     manifest = (
         "schema=nuraloumi-package-manifest-v1\n"
-        "version=0.0.4-dev.2\n"
+        f"version={version}\n"
         f"target={triple}\n"
         f"git_commit={SHA}\n"
         "git_dirty=false\n"
@@ -42,14 +42,16 @@ def sample(folder: Path, target: str = "debian") -> None:
     if target == "debian":
         dest = folder / "native-deb"
         dest.mkdir()
-        pkg = dest / "nuraloumi_0.0.4~dev.2_armhf.deb"
+        deb_version = version.replace("-dev.", "~dev.").replace("-rc.", "~rc.")
+        pkg = dest / f"nuraloumi_{deb_version}_armhf.deb"
         pkg.write_bytes(b"dummy test package, not installable")
         digest = hashlib.sha256(pkg.read_bytes()).hexdigest()
         (dest / f"{pkg.name}.sha256").write_text(f"{digest}  {pkg.name}\n")
     else:
         dest = folder / "native-apk"
         (dest / "tmp/armv7").mkdir(parents=True)
-        pkg = dest / "tmp/armv7/nuraloumi-0.0.4_pre2-r0.apk"
+        apk_version = version.replace("-dev.", "_pre").replace("-rc.", "_rc")
+        pkg = dest / f"tmp/armv7/nuraloumi-{apk_version}-r0.apk"
         pkg.write_bytes(b"dummy test signed package")
         digest = hashlib.sha256(pkg.read_bytes()).hexdigest()
         (dest / "NURALOUMI-APK-SHA256SUMS.txt").write_text(
@@ -73,6 +75,14 @@ class VerifierTests(unittest.TestCase):
                 result = verifier.verify_downloaded(path, lane, SHA)
                 self.assertEqual(result["sha"], SHA)
                 self.assertEqual(result["version"], "0.0.4-dev.2")
+
+    def test_rc1_debian_and_alpine_artifacts_are_verified(self):
+        for lane in ("debian", "alpine"):
+            with self.subTest(lane=lane), tempfile.TemporaryDirectory() as d:
+                path = Path(d)
+                sample(path, lane, version="0.0.8-rc.1")
+                result = verifier.verify_downloaded(path, lane, SHA)
+                self.assertEqual(result["version"], "0.0.8-rc.1")
 
     def test_tampered_native_package_or_manifest_fails_closed(self):
         with tempfile.TemporaryDirectory() as d:
