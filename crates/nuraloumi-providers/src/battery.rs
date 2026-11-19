@@ -212,8 +212,11 @@ fn capacity_from_counters(path: &Path) -> Result<Option<u8>, ProviderError> {
         let (Ok(now), Ok(full)) = (now.parse::<u128>(), full.parse::<u128>()) else {
             continue;
         };
-        if full > 0 {
-            let percent = now.saturating_mul(100).saturating_add(full / 2) / full;
+        if let Some(percent) = now
+            .saturating_mul(100)
+            .saturating_add(full / 2)
+            .checked_div(full)
+        {
             return Ok(Some(percent.min(100) as u8));
         }
     }
