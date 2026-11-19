@@ -126,7 +126,9 @@ impl Notifications {
             ));
         }
         let pairs = actions
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| pair[0].clone())
             .collect::<Vec<_>>();
         // Freedesktop default timeout -1: choose a bounded five-second lifetime.
