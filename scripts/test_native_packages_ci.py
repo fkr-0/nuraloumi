@@ -1,6 +1,7 @@
 """Fail closed when either native-package CI lane loses provenance or ABI gates."""
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import unittest
 
@@ -154,6 +155,36 @@ class NativePackageCiContract(unittest.TestCase):
         self.assertIn("unmapped Debian dependency", DEB)
         self.assertIn("armv7-unknown-linux-musleabihf", APK_SCRIPT)
         self.assertIn(r"s/-dev\./~dev./;s/-rc\./~rc./", DEB_SCRIPT)
+
+    def test_debian_rc_package_versions_sort_before_stable(self):
+        conversion = re.search(
+            r"^deb_version=\$\(printf '%s' \"\$version\" \| sed '([^']+)'\)$",
+            DEB_SCRIPT, re.MULTILINE,
+        )
+        self.assertIsNotNone(conversion)
+        for source, expected in (
+            ("0.0.8-dev.1", "0.0.8~dev.1"),
+            ("0.0.8-rc.1", "0.0.8~rc.1"),
+            ("0.0.8", "0.0.8"),
+        ):
+            with self.subTest(source=source):
+                result = subprocess.run(
+                    ["sed", conversion.group(1)], input=source + "\n",
+                    text=True, check=True, capture_output=True,
+                )
+                self.assertEqual(result.stdout.strip(), expected)
+        for earlier, later in (
+            ("0.0.8~dev.1", "0.0.8~rc.1"),
+            ("0.0.8~rc.1", "0.0.8"),
+        ):
+            # The development host may be non-Debian; the CI runner has dpkg.
+            if shutil.which("dpkg") is None:
+                break
+            result = subprocess.run(
+                ["dpkg", "--compare-versions", earlier, "lt", later],
+                check=False, timeout=5,
+            )
+            self.assertEqual(result.returncode, 0)
 
     def test_no_flatpak_or_apk_cross_abi_masquerade(self):
         self.assertNotIn("flatpak", MUSL + DEB)
