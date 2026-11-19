@@ -128,11 +128,14 @@ impl Provider for BatteryProvider {
                     Ok(value) if value <= 100 => Some(value),
                     Ok(_) | Err(_) => {
                         issues.push(format!("{name}: invalid capacity"));
-                        None
+                        capacity_from_counters(&path)?
                     }
                 },
-                None => None,
+                None => capacity_from_counters(&path)?,
             };
+            if kind == PowerSupplyKind::Battery && capacity_percent.is_none() {
+                issues.push(format!("{name}: capacity unavailable"));
+            }
             let status = read_optional(&path.join("status"))?;
             let charging = status.as_deref().and_then(|value| {
                 if value.eq_ignore_ascii_case("charging") {
@@ -195,6 +198,28 @@ fn read_optional(path: &Path) -> Result<Option<String>, ProviderError> {
     }
 }
 
+/// Some ARM boards report charge_now/charge_full or energy_now/energy_full
+/// instead of capacity. Use matched counter units only, with u128 arithmetic
+/// and explicit zero-denominator handling.
+fn capacity_from_counters(path: &Path) -> Result<Option<u8>, ProviderError> {
+    for (now_field, full_field) in [("energy_now", "energy_full"), ("charge_now", "charge_full")] {
+        let Some(now) = read_optional(&path.join(now_field))? else {
+            continue;
+        };
+        let Some(full) = read_optional(&path.join(full_field))? else {
+            continue;
+        };
+        let (Ok(now), Ok(full)) = (now.parse::<u128>(), full.parse::<u128>()) else {
+            continue;
+        };
+        if full > 0 {
+            let percent = now.saturating_mul(100).saturating_add(full / 2) / full;
+            return Ok(Some(percent.min(100) as u8));
+        }
+    }
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,5 +275,35 @@ mod tests {
             .unwrap();
         assert_eq!(snapshot.meta.health, Health::Unavailable);
         assert!(snapshot.supplies.is_empty());
+    }
+
+    #[test]
+    fn battery_capacity_falls_back_to_energy_or_charge_counters() {
+        let root = temp_root();
+        let bat = root.join("BAT0");
+        fs::create_dir_all(&bat).unwrap();
+        fs::write(bat.join("type"), "Battery\n").unwrap();
+        fs::write(bat.join("energy_now"), "2400\n").unwrap();
+        fs::write(bat.join("energy_full"), "4800\n").unwrap();
+        assert_eq!(
+            BatteryProvider::new(&root).snapshot().unwrap().supplies[0].capacity_percent,
+            Some(50)
+        );
+        fs::remove_file(bat.join("energy_now")).unwrap();
+        fs::write(bat.join("charge_now"), "333\n").unwrap();
+        fs::write(bat.join("charge_full"), "1000\n").unwrap();
+        assert_eq!(
+            BatteryProvider::new(&root).snapshot().unwrap().supplies[0].capacity_percent,
+            Some(33)
+        );
+        fs::write(bat.join("charge_full"), "0\n").unwrap();
+        let empty = BatteryProvider::new(&root).snapshot().unwrap();
+        assert_eq!(empty.meta.health, Health::Degraded);
+        assert_eq!(empty.supplies[0].capacity_percent, None);
+        assert!(empty
+            .issues
+            .iter()
+            .any(|issue| issue.contains("capacity unavailable")));
+        fs::remove_dir_all(root).unwrap();
     }
 }

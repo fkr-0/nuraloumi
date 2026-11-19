@@ -111,6 +111,17 @@ fn probe_renderer_with(
         .trim()
         .parse::<u32>()
         .map_err(|_| io::Error::other("invalid desktop pid"))?;
+    probe_renderer_pid_with(&mut read, pid, proc_root)
+}
+
+fn probe_renderer_pid_with(
+    mut read: impl FnMut(&Path, u64) -> io::Result<Vec<u8>>,
+    pid: u32,
+    proc_root: &Path,
+) -> io::Result<&'static str> {
+    if pid == 0 {
+        return Err(io::Error::other("invalid compositor pid"));
+    }
     let base = proc_root.join(pid.to_string());
     let name = read(&base.join("comm"), 128)?;
     if !is_supported_compositor(&name) {
@@ -132,13 +143,58 @@ fn probe_renderer_with(
     Ok(classify(&environment, &String::from_utf8_lossy(&maps)))
 }
 
-pub fn running_renderer() -> &'static str {
-    probe_renderer_with(
-        bounded,
-        Path::new("/run/sl101-desktop.pid"),
-        Path::new("/proc"),
+/// The service PID file is optional in user-owned Sway sessions. When it is
+/// missing or stale, accept an observed compositor only if it is the *sole*
+/// supported compositor in /proc. Multiple sessions must not be guessed.
+/// Candidate PID discovery and probing are separate for deterministic tests.
+fn sole_compositor_with(
+    candidates: impl IntoIterator<Item = u32>,
+    mut read: impl FnMut(&Path, u64) -> io::Result<Vec<u8>>,
+    proc_root: &Path,
+) -> io::Result<&'static str> {
+    let mut selected = None;
+    for pid in candidates {
+        if let Ok(comm) = read(&proc_root.join(pid.to_string()).join("comm"), 128) {
+            if is_supported_compositor(&comm) && selected.replace(pid).is_some() {
+                return Err(io::Error::other("ambiguous compositor sessions"));
+            }
+        }
+    }
+    probe_renderer_pid_with(
+        &mut read,
+        selected.ok_or_else(|| io::Error::other("no compositor"))?,
+        proc_root,
     )
-    .unwrap_or("Unknown")
+}
+
+fn observed_compositor_pids(proc_root: &Path) -> io::Result<Vec<u32>> {
+    // Bound /proc discovery even on unusually busy machines.
+    let mut pids = Vec::new();
+    for (index, entry) in std::fs::read_dir(proc_root)?.enumerate() {
+        if index >= 8192 {
+            return Err(io::Error::other("process enumeration exceeded limit"));
+        }
+        let entry = entry?;
+        if let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|value| value.parse().ok())
+        {
+            pids.push(pid);
+        }
+    }
+    Ok(pids)
+}
+
+pub fn running_renderer() -> &'static str {
+    let pid_file = Path::new("/run/sl101-desktop.pid");
+    let proc_root = Path::new("/proc");
+    if let Ok(renderer) = probe_renderer_with(bounded, pid_file, proc_root) {
+        return renderer;
+    }
+    observed_compositor_pids(proc_root)
+        .and_then(|pids| sole_compositor_with(pids, bounded, proc_root))
+        .unwrap_or("Unknown")
 }
 
 /// Request an installed switch helper; completion is observed by a new session.
@@ -248,6 +304,29 @@ mod tests {
     fn measured_sway_session_is_grate() {
         assert_eq!(classify(SWAY_ENV, SWAY_MAPS), "Grate");
         assert_eq!(FixtureProc::measured().run(), "Grate");
+    }
+
+    #[test]
+    fn sole_sway_fallback_requires_unambiguous_live_process() {
+        let fixture = FixtureProc::measured();
+        let run = |pids| {
+            sole_compositor_with(
+                pids,
+                |path, _| {
+                    fixture
+                        .entries
+                        .get(path)
+                        .cloned()
+                        .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))
+                },
+                Path::new("/fixture/proc"),
+            )
+        };
+        assert_eq!(run(vec![23991]).unwrap(), "Grate");
+        assert!(run(vec![]).is_err());
+        assert!(run(vec![12]).is_err());
+        assert_eq!(run(vec![12, 23991]).unwrap(), "Grate");
+        assert!(run(vec![23991, 23991]).is_err());
     }
 
     #[test]

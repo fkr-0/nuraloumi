@@ -1,7 +1,8 @@
 use nuraloumi_providers::{
     session::OwnedDesktopSession, ActionProvider, ActionResult, ApplicationProvider,
     ApplicationSnapshot, AudioAction, AudioProvider, BacklightAction, BacklightProvider,
-    BluetoothAction, BluetoothProvider, Health, MediaAction, MediaProvider, NetworkAction,
+    BatterySnapshot, BluetoothAction, BluetoothProvider, ClockProvider, Health, MediaAction,
+    MediaProvider, NetworkAction,
     NetworkProvider, NotificationAction, NotificationProvider, ProbeSnapshot, ProcessProvider,
     ProcessSnapshot, Provider, SessionAction, SessionProvider, SnapshotMeta, SystemCommandRunner,
 };
@@ -11,6 +12,7 @@ use nuraloumi_render_cairo::{
 };
 use nuraloumi_shell::config_reload::{prepare_from_file, PreparedConfigReload};
 use nuraloumi_shell::ipc::IpcResponse;
+use nuraloumi_shell::panel_status::{PanelStatusSample, PanelStatusSchedule};
 use nuraloumi_shell::surface_catalog::{IpcRuntime, SurfaceCatalog, SurfaceObservation};
 use nuraloumi_shell::{
     apply_launcher_preferences, blank_press_requests_dismiss, build_family,
@@ -813,8 +815,14 @@ fn run_live(
         std::thread::JoinHandle<Result<ThumbnailHelperReport, String>>,
     > = None;
     let mut thumbnail_probe_started = false;
-    let mut last_status_probe = std::time::Instant::now();
-    let mut periodic_status_probe: Option<std::thread::JoinHandle<ProbeSnapshot>> = None;
+    let mut status_schedule =
+        PanelStatusSchedule::new(std::time::Instant::now(), std::time::SystemTime::now());
+    let mut periodic_status_probe: Option<std::thread::JoinHandle<PanelStatusSample>> = None;
+    let mut clock_status_probe: Option<
+        std::thread::JoinHandle<
+            Result<nuraloumi_providers::ClockSnapshot, nuraloumi_providers::ProviderError>,
+        >,
+    > = None;
 
     if let Some(family) = initial_family {
         active_menu = Some(open_live_menu(
@@ -867,8 +875,8 @@ fn run_live(
                 .roundtrip()
                 .map_err(|error| format!("Wayland startup roundtrip failed: {error}"))?;
         } else if panel_first_frame_presented {
-            // Idle dispatch is event-driven on both Wayland and IPC owner-wake
-            // descriptors. There is no periodic roundtrip/polling timer.
+            // The bounded one-second wait also detects minute transitions
+            // and resume/time jumps without busy-polling or blocking on IO.
             wait_for_panel_events(&mut backend, &ipc_runtime)?;
         } else {
             backend
@@ -1855,26 +1863,134 @@ fn run_live(
             eprintln!("nuraloumi-panel-provider-refresh: initial live snapshot ready");
         }
 
-        // Periodic snapshots are asynchronous: neither the 2-second clock helper
-        // nor the battery/network probes may stall Wayland input handling.
-        if policy.execute_provider_actions
-            && live_provider_probe.is_none()
-            && periodic_status_probe.is_none()
-            && last_status_probe.elapsed() >= std::time::Duration::from_secs(30)
-        {
-            last_status_probe = std::time::Instant::now();
-            periodic_status_probe = Some(std::thread::spawn(ProbeSnapshot::live));
+        if policy.execute_provider_actions && live_provider_probe.is_none() {
+            let now = std::time::Instant::now();
+            if status_schedule.start_full(now, periodic_status_probe.is_some()) {
+                periodic_status_probe = Some(std::thread::spawn(PanelStatusSample::live));
+            }
+            if status_schedule.start_clock(
+                now,
+                std::time::SystemTime::now(),
+                clock_status_probe.is_some(),
+            ) {
+                clock_status_probe =
+                    Some(std::thread::spawn(|| ClockProvider::system().snapshot()));
+            }
         }
+        if clock_status_probe
+            .as_ref()
+            .is_some_and(|worker| worker.is_finished())
+        {
+            let result = clock_status_probe
+                .take()
+                .expect("finished clock worker exists")
+                .join();
+            let refreshed = match result {
+                Ok(Ok(clock)) => {
+                    status_schedule.clock_finished(clock.meta.health == Health::Healthy);
+                    probe_value(&clock.meta, Some(clock.time_label), &clock.issues)
+                }
+                Ok(Err(error)) => {
+                    status_schedule.clock_finished(false);
+                    ProviderValue {
+                        state: ValueState::Error,
+                        value: None,
+                        message: Some(error.diagnostic()),
+                    }
+                }
+                Err(_) => {
+                    status_schedule.clock_finished(false);
+                    ProviderValue {
+                        state: ValueState::Error,
+                        value: None,
+                        message: Some("clock probe thread panicked".into()),
+                    }
+                }
+            };
+            if snapshot.clock != refreshed {
+                snapshot.clock = refreshed;
+                panel_scene = None;
+                if let Some(menu) = active_menu.as_mut() {
+                    menu.shell.refresh_family(menu.family, &snapshot)?;
+                    if let Some(geometry) = menu.geometry {
+                        menu.scene = Some(render_menu_and_present(
+                            &mut backend,
+                            menu.surface,
+                            &renderer,
+                            &menu.shell,
+                            &snapshot,
+                            &config,
+                            (geometry, None),
+                        )?);
+                    }
+                }
+            }
+        }
+        let mut status_failure_needs_menu_refresh = false;
         if periodic_status_probe
             .as_ref()
-            .is_some_and(|probe| probe.is_finished())
+            .is_some_and(|worker| worker.is_finished())
         {
-            let probe = periodic_status_probe
+            status_schedule.full_finished();
+            match periodic_status_probe
                 .take()
-                .expect("finished periodic probe exists")
+                .expect("finished status worker exists")
                 .join()
-                .map_err(|_| "periodic provider probe panicked".to_owned())?;
-            refresh_probe_snapshot(&mut snapshot, &probe, policy.enable_renderer_switch);
+            {
+                Ok(sample) => {
+                    let old_battery = snapshot.battery.clone();
+                    let old_renderer = snapshot.renderer.clone();
+                    snapshot.renderer = Some(sample.renderer.into());
+                    snapshot.battery = match sample.battery {
+                        Ok(battery) => battery_provider_value(&battery),
+                        Err(error) => ProviderValue {
+                            state: ValueState::Error,
+                            value: None,
+                            message: Some(error.diagnostic()),
+                        },
+                    };
+                    if snapshot.battery != old_battery || snapshot.renderer != old_renderer {
+                        if let Some(menu) = active_menu.as_mut() {
+                            menu.shell.refresh_family(menu.family, &snapshot)?;
+                            if let Some(geometry) = menu.geometry {
+                                menu.scene = Some(render_menu_and_present(
+                                    &mut backend,
+                                    menu.surface,
+                                    &renderer,
+                                    &menu.shell,
+                                    &snapshot,
+                                    &config,
+                                    (geometry, None),
+                                )?);
+                            }
+                        }
+                        panel_scene = None;
+                    }
+                }
+                Err(_) => {
+                    snapshot.battery.state = ValueState::Error;
+                    snapshot.battery.message = Some("status probe thread panicked".into());
+                    snapshot.renderer = Some("Unknown".into());
+                    panel_scene = None;
+                    status_failure_needs_menu_refresh = true;
+                }
+            }
+        }
+        let now = std::time::Instant::now();
+        if status_schedule.full_hung(now, periodic_status_probe.is_some()) {
+            snapshot.battery.state = ValueState::Stale;
+            snapshot.battery.message = Some("full status probe stalled (>120 s)".into());
+            snapshot.renderer = Some("Unknown".into());
+            panel_scene = None;
+            status_failure_needs_menu_refresh = true;
+        }
+        if status_schedule.clock_hung(now, clock_status_probe.is_some()) {
+            snapshot.clock.state = ValueState::Stale;
+            snapshot.clock.message = Some("clock probe stalled (>10 s)".into());
+            panel_scene = None;
+            status_failure_needs_menu_refresh = true;
+        }
+        if status_failure_needs_menu_refresh {
             if let Some(menu) = active_menu.as_mut() {
                 menu.shell.refresh_family(menu.family, &snapshot)?;
                 if let Some(geometry) = menu.geometry {
@@ -1889,7 +2005,6 @@ fn run_live(
                     )?);
                 }
             }
-            panel_scene = None;
         }
 
         if thumbnail_probe
@@ -2969,6 +3084,33 @@ fn shell_hit_region(scene: &Scene, x: f64, y: f64) -> Option<ShellHitRegion> {
     })
 }
 
+fn battery_label(battery: &BatterySnapshot) -> Option<String> {
+    battery
+        .supplies
+        .iter()
+        .filter(|supply| supply.kind == nuraloumi_providers::battery::PowerSupplyKind::Battery)
+        .find_map(|supply| {
+            supply
+                .capacity_percent
+                .map(|capacity| (capacity, supply.status.as_deref()))
+        })
+        .map(|(capacity, status)| match status {
+            Some(status) if !status.is_empty() => format!("{capacity}% · {status}"),
+            _ => format!("{capacity}%"),
+        })
+}
+
+fn battery_provider_value(battery: &BatterySnapshot) -> ProviderValue {
+    let mut value = probe_value(&battery.meta, battery_label(battery), &battery.issues);
+    if value.value.is_none() && matches!(value.state, ValueState::Ready | ValueState::Stale) {
+        // AC adapters often expose a field named capacity too. That isn't
+        // evidence of a battery percentage and must not show as healthy.
+        value.state = ValueState::Unavailable;
+        value.message = Some("no battery capacity available".into());
+    }
+    value
+}
+
 fn fixture_snapshot_from_probe(probe: &ProbeSnapshot) -> FixtureSnapshot {
     let network_value = if probe.network.connected {
         let mut value = probe
@@ -3009,24 +3151,10 @@ fn fixture_snapshot_from_probe(probe: &ProbeSnapshot) -> FixtureSnapshot {
         .or_else(|| probe.backlight.devices.first());
     let brightness_value = preferred_backlight.map(|device| format!("{}%", device.percent));
     let brightness_writable = preferred_backlight.is_some_and(|device| device.writable);
-    let battery_value = probe
-        .battery
-        .supplies
-        .iter()
-        .find_map(|supply| {
-            supply
-                .capacity_percent
-                .map(|capacity| (capacity, supply.status.as_deref()))
-        })
-        .map(|(capacity, status)| match status {
-            Some(status) => format!("{capacity}% · {status}"),
-            None => format!("{capacity}%"),
-        });
-
     FixtureSnapshot {
         network: probe_value(&probe.network.meta, network_value, &probe.network.issues),
         audio: probe_value(&probe.audio.meta, audio_value, &probe.audio.issues),
-        battery: probe_value(&probe.battery.meta, battery_value, &probe.battery.issues),
+        battery: battery_provider_value(&probe.battery),
         clock: probe_value(
             &probe.clock.meta,
             Some(probe.clock.time_label.clone()),
@@ -3933,17 +4061,13 @@ mod tests {
             y: 16.0,
         };
         guard.down(7, apps);
-        // Spurious pointer press while the finger is still down.
         assert!(guard.suppress_pointer(apps, true, t0));
         assert!(guard.suppress_pointer(apps, false, t0 + Duration::from_millis(2)));
         guard.up(7, t0 + Duration::from_millis(10));
-        // The emulated click following touch-up must not re-open the menu.
         assert!(guard.suppress_pointer(apps, true, t0 + Duration::from_millis(20)));
         assert!(guard.suppress_pointer(apps, false, t0 + Duration::from_millis(21)));
-        // Real mouse targeting a *different* widget works immediately.
         assert!(!guard.suppress_pointer(network, true, t0 + Duration::from_millis(22)));
         assert!(!guard.suppress_pointer(network, false, t0 + Duration::from_millis(23)));
-        // Even at the same spot the mouse works after the bounded window.
         assert!(!guard.suppress_pointer(apps, true, t0 + Duration::from_millis(220)));
         assert!(!guard.suppress_pointer(apps, false, t0 + Duration::from_millis(221)));
     }
@@ -4032,6 +4156,44 @@ mod tests {
         assert_eq!(display("battery", Some("75% · Not charging")), "75%");
         assert_eq!(display("battery", None), "--%");
         assert_eq!(battery_presentation(Some("101% · Charging")), (None, true));
+    }
+
+    #[test]
+    fn battery_status_never_uses_adapter_capacity_as_battery_level() {
+        use nuraloumi_providers::battery::{PowerSupply, PowerSupplyKind};
+        let mut battery = BatterySnapshot {
+            meta: SnapshotMeta::new(12, Health::Healthy, false, "fixture"),
+            supplies: vec![PowerSupply {
+                name: "AC".into(),
+                kind: PowerSupplyKind::Adapter,
+                capacity_percent: Some(100),
+                status: None,
+                charging: None,
+                online: Some(true),
+            }],
+            issues: vec![],
+        };
+        let unknown = battery_provider_value(&battery);
+        assert_eq!(unknown.state, ValueState::Unavailable);
+        assert_eq!(unknown.value, None);
+        battery.supplies.push(PowerSupply {
+            name: "BAT0".into(),
+            kind: PowerSupplyKind::Battery,
+            capacity_percent: Some(74),
+            status: Some("Charging".into()),
+            charging: Some(true),
+            online: None,
+        });
+        assert_eq!(
+            battery_provider_value(&battery).value.as_deref(),
+            Some("74% · Charging")
+        );
+        battery.supplies[1].capacity_percent = None;
+        battery.meta.health = Health::Degraded;
+        assert_eq!(
+            battery_provider_value(&battery).state,
+            ValueState::Unavailable
+        );
     }
 
     #[test]
