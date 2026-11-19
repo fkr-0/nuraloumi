@@ -1,0 +1,91 @@
+name: NuraBrowser ARMHF WPE engine build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - .github/workflows/nurabrowser-engine-armhf.yml
+      - components/nura-browser-engine/**
+      - scripts/ci-build-nurabrowser-engine.sh
+      - scripts/test_browser_engine_ci.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  private-wpe-engine:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check integrated browser CI contracts
+        run: python3 -m unittest scripts/test_browser_engine_ci.py -v
+
+      # SHA-256 pins are inherited from the prior NuraBrowser ARMHF builder.
+      - name: Fetch and verify pinned ARMHF WPE development packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/browser-wpe-debs"
+          cd "$RUNNER_TEMP/browser-wpe-debs"
+          curl --fail --location --retry 3 --max-time 120 \
+            --output libwpewebkit-2.0-1_2.54.0-2_armhf.deb \
+            https://snapshot.debian.org/archive/debian/20260919T000000Z/pool/main/w/wpewebkit/libwpewebkit-2.0-1_2.54.0-2_armhf.deb
+          curl --fail --location --retry 3 --max-time 120 \
+            --output libwpewebkit-2.0-dev_2.54.0-2_armhf.deb \
+            https://snapshot.debian.org/archive/debian/20260919T000000Z/pool/main/w/wpewebkit/libwpewebkit-2.0-dev_2.54.0-2_armhf.deb
+          printf '%s  %s\n' \
+            0b3713cae5520fb44a6fcb099b0b23b8f2802bf3e3a57415fc36b9616bc84ffb \
+            libwpewebkit-2.0-1_2.54.0-2_armhf.deb \
+            8fe43cebac76de223b5e181eaa049bb21f788fb935dd620fdc640e3b440486f9 \
+            libwpewebkit-2.0-dev_2.54.0-2_armhf.deb | sha256sum -c -
+
+      - name: Build pinned ARMHF cross-toolchain environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build --pull=false \
+            --file components/nura-browser-engine/packaging/Dockerfile.ci-armhf \
+            --tag nuraloumi-browser-engine-ci:local \
+            "$RUNNER_TEMP/browser-wpe-debs"
+
+      - name: Cross-compile private WPE engine and hash verified artifact
+        shell: bash
+        env:
+          CI_SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/browser-engine-out"
+          docker run --rm --network none \
+            --user "$(id -u):$(id -g)" \
+            --mount "type=bind,src=$PWD/components/nura-browser-engine,dst=/src,readonly" \
+            --mount "type=bind,src=$PWD/scripts,dst=/repo-scripts,readonly" \
+            --mount "type=bind,src=$RUNNER_TEMP/browser-engine-out,dst=/out" \
+            --env "CI_SOURCE_SHA=$CI_SOURCE_SHA" \
+            nuraloumi-browser-engine-ci:local \
+            sh /repo-scripts/ci-build-nurabrowser-engine.sh
+          cd "$RUNNER_TEMP/browser-engine-out"
+          sha256sum -c SHA256SUMS.txt
+          test -s ELF-NEEDED.txt
+          test -s WPE-PACKAGES.tsv
+          test -s release/CI-PROVENANCE.txt
+          grep -Fx 'device_deployment=forbidden' release/CI-PROVENANCE.txt
+
+      - name: Upload private browser engine (not release qualified)
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuraloumi-browser-engine-armhf-${{ github.run_number }}-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/browser-engine-out/nurabrowser-engine-armhf.tar
+            ${{ runner.temp }}/browser-engine-out/SHA256SUMS.txt
+            ${{ runner.temp }}/browser-engine-out/ELF-HEADER.txt
+            ${{ runner.temp }}/browser-engine-out/ELF-ATTRIBUTES.txt
+            ${{ runner.temp }}/browser-engine-out/ELF-NEEDED.txt
+            ${{ runner.temp }}/browser-engine-out/WPE-PACKAGES.tsv
+          if-no-files-found: error
+          retention-days: 14
