@@ -31,6 +31,87 @@ const MAX_QUERY_CHARS: usize = 80;
 const BODY_LINE_CHARS: usize = 46;
 const BODY_VISIBLE_LINES: usize = 5;
 const PRIMARY_BUTTON: u32 = 0x110; // Linux BTN_LEFT
+const BACKDROP_TAP_TOLERANCE: f64 = 12.0;
+
+#[derive(Default)]
+struct BackdropPress {
+    pointer_origin: Option<(f64, f64)>,
+    touch_origin: Option<(i32, f64, f64)>,
+    touches: BTreeSet<i32>,
+}
+
+impl BackdropPress {
+    fn handle(&mut self, event: &WaylandEvent) -> bool {
+        match event {
+            WaylandEvent::PointerButton {
+                x, y, button, pressed,
+            } => {
+                if *button != PRIMARY_BUTTON {
+                    return false;
+                }
+                if *pressed {
+                    self.pointer_origin = Some((*x, *y));
+                    false
+                } else {
+                    let start = self.pointer_origin.take();
+                    start.is_some_and(|s| !moved_beyond_tap(s, (*x, *y)))
+                }
+            }
+            WaylandEvent::PointerMove { x, y } => {
+                if self
+                    .pointer_origin
+                    .is_some_and(|s| moved_beyond_tap(s, (*x, *y)))
+                {
+                    self.pointer_origin = None;
+                }
+                false
+            }
+            WaylandEvent::PointerLeave => {
+                self.pointer_origin = None;
+                false
+            }
+            WaylandEvent::TouchDown { id, x, y } => {
+                self.touches.insert(*id);
+                if self.touches.len() == 1 {
+                    self.touch_origin = Some((*id, *x, *y));
+                } else {
+                    self.touch_origin = None;
+                }
+                false
+            }
+            WaylandEvent::TouchMotion { id, x, y } => {
+                if self
+                    .touch_origin
+                    .is_some_and(|(tid, sx, sy)| tid == *id && moved_beyond_tap((sx, sy), (*x, *y)))
+                {
+                    self.touch_origin = None;
+                }
+                false
+            }
+            WaylandEvent::TouchUp { id } => {
+                self.touches.remove(id);
+                let was_tap = self
+                    .touch_origin
+                    .take()
+                    .is_some_and(|(tid, _, _)| tid == *id && self.touches.is_empty());
+                was_tap
+            }
+            WaylandEvent::TouchCancel { .. } => {
+                self.touches.clear();
+                self.touch_origin = None;
+                false
+            }
+            WaylandEvent::Close => true,
+            _ => false,
+        }
+    }
+}
+
+fn moved_beyond_tap(start: (f64, f64), point: (f64, f64)) -> bool {
+    let dx = (point.0 - start.0).abs();
+    let dy = (point.1 - start.1).abs();
+    !dx.is_finite() || !dy.is_finite() || dx.max(dy) > BACKDROP_TAP_TOLERANCE
+}
 
 #[derive(Default)]
 struct Args {
@@ -653,9 +734,24 @@ fn perform(
                         return;
                     }
                 }
-                match provider.execute(NotificationAction::Clear) {
-                    Ok(_) => {
+                match provider.execute(NotificationAction::ClearKnown {
+                    ids: expected.clone(),
+                }) {
+                    Ok(result) => {
                         refresh(provider, snapshot, ui);
+                        if snapshot
+                            .notifications
+                            .iter()
+                            .any(|n| expected.contains(&n.id))
+                        {
+                            ui.error = Some(format!(
+                                "Clear not verified: {} ID(s) still present; {result:?}",
+                                expected
+                                    .iter()
+                                    .filter(|id| snapshot.notifications.iter().any(|n| n.id == **id))
+                                    .count()
+                            ));
+                        }
                         ui.detail = None;
                     }
                     Err(error) => ui.error = Some(format!("Clear failed: {error:?}")),
@@ -853,6 +949,7 @@ fn run(config: ShellConfig, fixture_mode: bool) -> Result<(), String> {
     let mut state = MenuState::new(&menu);
     let mut geometry = None;
     let mut scene: Option<Scene> = None;
+    let mut backdrop_press = BackdropPress::default();
     loop {
         // Blocking event dispatch, not a busy polling/animation loop.
         backend
@@ -872,9 +969,7 @@ fn run(config: ShellConfig, fixture_mode: bool) -> Result<(), String> {
                         height,
                         scale,
                     )?,
-                    WaylandEvent::PointerButton { pressed: true, .. }
-                    | WaylandEvent::TouchDown { .. }
-                    | WaylandEvent::Close => {
+                    ref evt if backdrop_press.handle(evt) => {
                         close(&mut backend, surface, backdrop)?;
                         return Ok(());
                     }
@@ -1227,6 +1322,46 @@ mod tests {
         ui.touch_down(Some(&scene), 4, x, y);
         ui.touch_cancel(&[4]);
         assert_eq!(ui.touch_up(Some(&scene), 4), None);
+    }
+
+    #[test]
+    fn backdrop_drag_does_not_dismiss_but_tap_does() {
+        let mut bp = BackdropPress::default();
+        assert!(!bp.handle(&WaylandEvent::PointerButton {
+            x: 10.0, y: 10.0, button: PRIMARY_BUTTON, pressed: true,
+        }));
+        assert!(!bp.handle(&WaylandEvent::PointerMove { x: 100.0, y: 100.0 }));
+        assert!(!bp.handle(&WaylandEvent::PointerButton {
+            x: 100.0, y: 100.0, button: PRIMARY_BUTTON, pressed: false,
+        }));
+        assert!(!bp.handle(&WaylandEvent::PointerButton {
+            x: 10.0, y: 10.0, button: PRIMARY_BUTTON, pressed: true,
+        }));
+        assert!(bp.handle(&WaylandEvent::PointerButton {
+            x: 11.0, y: 11.0, button: PRIMARY_BUTTON, pressed: false,
+        }));
+        assert!(!bp.handle(&WaylandEvent::PointerButton {
+            x: 10.0, y: 10.0, button: 0x111, pressed: true,
+        }));
+        assert!(!bp.handle(&WaylandEvent::PointerButton {
+            x: 10.0, y: 10.0, button: 0x111, pressed: false,
+        }));
+    }
+
+    #[test]
+    fn backdrop_touch_drag_does_not_dismiss() {
+        let mut bp = BackdropPress::default();
+        assert!(!bp.handle(&WaylandEvent::TouchDown { id: 1, x: 10.0, y: 10.0 }));
+        assert!(!bp.handle(&WaylandEvent::TouchMotion { id: 1, x: 100.0, y: 100.0 }));
+        assert!(!bp.handle(&WaylandEvent::TouchUp { id: 1 }));
+        let mut bp2 = BackdropPress::default();
+        assert!(!bp2.handle(&WaylandEvent::TouchDown { id: 2, x: 10.0, y: 10.0 }));
+        assert!(bp2.handle(&WaylandEvent::TouchUp { id: 2 }));
+        let mut bp3 = BackdropPress::default();
+        assert!(!bp3.handle(&WaylandEvent::TouchDown { id: 3, x: 10.0, y: 10.0 }));
+        assert!(!bp3.handle(&WaylandEvent::TouchDown { id: 4, x: 20.0, y: 20.0 }));
+        assert!(!bp3.handle(&WaylandEvent::TouchUp { id: 3 }));
+        assert!(!bp3.handle(&WaylandEvent::TouchUp { id: 4 }));
     }
 
     fn test_scene() -> Scene {
