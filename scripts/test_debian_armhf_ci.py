@@ -73,6 +73,15 @@ class DebianArmhfCiTests(unittest.TestCase):
         self.assertIn("-Z build-std=std,panic_abort", self.ci)
         self.assertIn("-C target-feature=-neon,-d32,-hwdiv,-hwdiv-arm", self.ci)
 
+    def test_mapping_symbols_survive_release_strip_for_strict_opcode_audit(self):
+        # Without ARM mapping symbols objdump may interpret inline data as
+        # executable VFP D16-D31 instructions. Do not loosen the opcode guard.
+        self.assertIn("CARGO_PROFILE_RELEASE_STRIP: debuginfo", self.ci)
+        self.assertIn("rustup component list --installed | grep -Fx 'rust-src'", self.ci)
+        inspector = (ROOT / "scripts/inspect-armv7-elf.sh").read_text()
+        self.assertIn("upper-VFP-register-d16-d31-detected", inspector)
+        self.assertIn("possible-NEON-opcode-or-q-register", inspector)
+
     def test_disassembly_gate_is_enforced_for_sized_neon_and_upper_d(self):
         import re
 
