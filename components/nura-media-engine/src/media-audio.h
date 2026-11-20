@@ -16,4 +16,8 @@ typedef struct {
 /* Discover, but never decode, a local file. On failure leave *out unchanged. */
 int nura_media_probe(const char *path, NuraMediaInfo *out);
 
+/* This is the sole source-only VDE qualification profile. Other sizes and
+ * framerates must not be passed to the fixed-pitch Grate renderer. */
+int nura_media_is_qualified_video(const NuraMediaInfo *media);
+
 #endif

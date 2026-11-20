@@ -3,6 +3,11 @@
 #include <gst/pbutils/pbutils.h>
 #include <stdio.h>
 
+int nura_media_is_qualified_video(const NuraMediaInfo *media) {
+    return media && media->width == 854 && media->height == 480 &&
+           media->fps_n == 24 && media->fps_d == 1;
+}
+
 int nura_media_probe(const char *path, NuraMediaInfo *out) {
     if (!path || !out) return 0;
     GError *error = NULL;
