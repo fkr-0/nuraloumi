@@ -22,8 +22,15 @@ owner-only `nuraloumi-playerd` Unix socket. No additional socket,
 window controller, CLI, or shell command is created.
 
 When a video track is selected, the single daemon stops its audio-only
-playbin, opens the same-file H.264 VDE/AAC native pipeline, and reuses
+playbin, opens the same-file H.264 VDE pipeline, and reuses
 its existing Play/Pause/Seek/Volume/Mute/Stop/Next/Previous/EOS model.
+It discovers whether the MP4 contains an audio stream: AAC tracks use
+the same-pipeline PulseAudio branch, while silent MP4 files do not
+create a nonexistent AAC branch. The V4L2 decoder has an explicit
+name, because GStreamer increments automatically generated names
+between clips in a long-lived daemon.
+An unsupported resolution or frame rate is rejected immediately with
+the actual detected geometry rather than a generic GPU error.
 Audio-only tracks remain serviced by the same daemon's GStreamer
 audio playbin. There is **no video backend selector**, no CPU YUV
 conversion, no `glimagesink`, no generic software-video fallback.
@@ -67,11 +74,21 @@ packager installs it under `/usr/lib/nuraloumi/video`.
 Without that explicit bundle, the normal CI artifact remains
 software-only; it does **not** claim device video availability.
 The Debian/glibc version requires separate native qualification.
+The independent `.github/workflows/nura-media-video-armv7.yml`
+tests the audio probe and compiles the native library against Alpine
+ARMv7/musl and Debian ARMHF/glibc distribution headers. Those
+CI-produced libraries are ABI smoke artifacts only, carry
+`device_deployment=forbidden`, and lack the pinned hardware producer
+stack. They must **not** be installed on the tablet. Only the pinned
+producer build plus an on-device end-to-end qualification can promote
+a renderer to a device release.
 
 ## Remaining limits
 
 Only the exact tested 854×480/24fps BT.709 linear YU12 hardware
 capture (coded width 896, pitches 896/448/448) is presently supported.
+The existing 640×360 and 720×404 MP4 clips on the tablet cannot
+be shown by this path yet; audio presence alone is not sufficient.
 The audio output phase is tied to the GStreamer pipeline clock, but
 has not had an acoustic/PCM loopback lip-sync measurement.
 No system-level player UI, seek-storm, fault-injection or arbitrary

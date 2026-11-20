@@ -1,0 +1,103 @@
+name: Nura media ARMv7 ABI smoke (non-deployable)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/nura-media-video-armv7.yml
+      - components/nura-media-engine/**
+  pull_request:
+    paths:
+      - .github/workflows/nura-media-video-armv7.yml
+      - components/nura-media-engine/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-video-abi:
+    name: ARMv7 ${{ matrix.abi }} compile and media regression
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - abi: musl
+            image: alpine:3.22
+          - abi: glibc
+            image: debian:trixie
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm
+
+      # Build against *distribution* headers only. The hardware-qualified
+      # private Grate/GStreamer producer bundle is intentionally NOT present.
+      # These two ABI artifacts must never replace the SL101 video engine.
+      - name: Compile native renderer and test MP4 audio detection
+        shell: bash
+        env:
+          ABI: ${{ matrix.abi }}
+          IMAGE: ${{ matrix.image }}
+        run: |
+          set -euo pipefail
+          mkdir -p "target/media-ci/$ABI"
+          docker run --rm --platform linux/arm/v7 \
+            --mount "type=bind,src=$PWD,dst=/repo,readonly" \
+            --mount "type=bind,src=$PWD/target/media-ci/$ABI,dst=/out" \
+            --workdir /repo \
+            --env "ABI=$ABI" --env "SOURCE_SHA=$GITHUB_SHA" \
+            "$IMAGE" sh -eu -c '
+              if [ "$ABI" = musl ]; then
+                apk add --no-cache build-base pkgconf binutils file \
+                  gstreamer-dev gst-plugins-base-dev gst-plugins-good \
+                  gst-plugins-bad gst-libav \
+                  mesa-dev libdrm-dev wayland-dev wayland-protocols ffmpeg
+              else
+                apt-get update
+                DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+                  gcc libc6-dev pkg-config binutils file ffmpeg \
+                  libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+                  gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+                  gstreamer1.0-libav \
+                  libegl-dev libgles-dev libgbm-dev libdrm-dev \
+                  libwayland-dev wayland-protocols
+              fi
+              sh components/nura-media-engine/tests/run-media-audio-tests.sh
+              sh components/nura-media-engine/build.sh /tmp/nura-video-build
+              cp /tmp/nura-video-build/libnuraloumi-video.so /out/
+              readelf -h /out/libnuraloumi-video.so | grep -Eq "Class:[[:space:]]+ELF32"
+              readelf -h /out/libnuraloumi-video.so | grep -Eq "Machine:[[:space:]]+ARM"
+              readelf -A /out/libnuraloumi-video.so | grep -Fq "Tag_ABI_VFP_args: VFP registers"
+              if readelf -A /out/libnuraloumi-video.so | grep -Eiq "Advanced_SIMD|NEON"; then
+                echo "FAIL: ARMv7 artifact requires NEON" >&2
+                exit 1
+              fi
+              readelf -d /out/libnuraloumi-video.so > /out/ELF-NEEDED.txt
+              if [ "$ABI" = musl ]; then
+                grep -Fq "[libc.musl-armv7.so.1]" /out/ELF-NEEDED.txt
+                ! grep -Fq "[libc.so.6]" /out/ELF-NEEDED.txt
+              else
+                grep -Fq "[libc.so.6]" /out/ELF-NEEDED.txt
+              fi
+              printf "source_sha=%s\nabi=%s\nbuild=distribution_abi_smoke\ndevice_deployment=forbidden\n" \
+                "$SOURCE_SHA" "$ABI" > /out/CI-PROVENANCE.txt
+              (cd /out && sha256sum libnuraloumi-video.so > SHA256SUMS.txt)
+              echo "MEDIA_ABI_SMOKE_PASS target=armv7-$ABI device_deployment=forbidden"
+            '
+          test -s "target/media-ci/$ABI/libnuraloumi-video.so"
+          grep -Fx "device_deployment=forbidden" "target/media-ci/$ABI/CI-PROVENANCE.txt"
+
+      - name: Upload non-deployable ABI smoke evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: nura-media-armv7-${{ matrix.abi }}-abi-smoke-${{ github.sha }}
+          path: target/media-ci/${{ matrix.abi }}/
+          if-no-files-found: error
+          retention-days: 14
