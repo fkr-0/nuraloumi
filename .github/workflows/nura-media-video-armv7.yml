@@ -6,18 +6,46 @@ on:
     paths:
       - .github/workflows/nura-media-video-armv7.yml
       - components/nura-media-engine/**
+      - scripts/build-nuraloumi-player-video.sh
   pull_request:
     paths:
       - .github/workflows/nura-media-video-armv7.yml
       - components/nura-media-engine/**
+      - scripts/build-nuraloumi-player-video.sh
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
+  host-regressions:
+    name: GStreamer media state and audio tests (ASan/UBSan)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install host GStreamer and MP4 test tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            gcc pkg-config ffmpeg libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev \
+            gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+            gstreamer1.0-libav
+      - name: Test silent/AAC media, exact VDE profile and sticky bus status
+        shell: bash
+        run: |
+          set -euo pipefail
+          NURA_MEDIA_SANITIZERS=1 ASAN_OPTIONS=detect_leaks=0 \
+            sh components/nura-media-engine/tests/run-media-audio-tests.sh
+
   native-video-abi:
     name: ARMv7 ${{ matrix.abi }} compile and media regression
+    needs: host-regressions
     runs-on: ubuntu-24.04
     timeout-minutes: 50
     strategy:

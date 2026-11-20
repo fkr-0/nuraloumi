@@ -31,6 +31,9 @@ name, because GStreamer increments automatically generated names
 between clips in a long-lived daemon.
 An unsupported resolution or frame rate is rejected immediately with
 the actual detected geometry rather than a generic GPU error.
+The bus monitor latches EOS and GStreamer errors across intermediate
+polls, so an early-consumed EOS cannot become a false timeout and an
+early-consumed error cannot disappear from the final qualification result.
 Audio-only tracks remain serviced by the same daemon's GStreamer
 audio playbin. There is **no video backend selector**, no CPU YUV
 conversion, no `glimagesink`, no generic software-video fallback.

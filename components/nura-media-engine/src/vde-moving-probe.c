@@ -8,6 +8,7 @@
 #include "wayland-stream.h"
 #include "video-bridge.h"
 #include "media-audio.h"
+#include "media-bus.h"
 
 static int verify_plugin(GstElement *pipeline){
     /* GStreamer auto-names increase on each pipeline in the long-lived
@@ -24,21 +25,6 @@ static int verify_plugin(GstElement *pipeline){
     printf("STREAM_GST_PROVENANCE stride_align=%u private=%d\n",pad,ok);
     if(plugin)gst_object_unref(plugin);
     return ok;
-}
-static int check_bus(GstBus *bus){
-    GstMessage *msg;
-    int bad=0;
-    while((msg=gst_bus_pop_filtered(bus,GST_MESSAGE_ERROR|GST_MESSAGE_EOS))){
-        if(GST_MESSAGE_TYPE(msg)==GST_MESSAGE_ERROR){
-            GError *e=NULL;gchar *dbg=NULL;
-            gst_message_parse_error(msg,&e,&dbg);
-            printf("STREAM_GST_ERROR source=%s reason=%s\n",
-                    GST_OBJECT_NAME(msg->src),e?e->message:"unknown");
-            g_clear_error(&e);g_free(dbg);bad++;
-        }else puts("STREAM_EOS received=1");
-        gst_message_unref(msg);
-    }
-    return bad;
 }
 static int validate(GstSample *sample,int strides[3],int fds[3],
                     unsigned frame){
@@ -154,6 +140,7 @@ int nura_video_render_loop(NuraVideo *handle){
     unsigned count=0,changed=0,pts_bad=0,pts_gap=0,checks=0;
     unsigned color_oracles=0,color_failures=0;
     int video_eos=0,pipeline_eos=0;
+    NuraMediaBusState bus_state={0};
     GstClockTime firstpts=GST_CLOCK_TIME_NONE,lastpts=GST_CLOCK_TIME_NONE;
     uint64_t held_position_ms=0;
     gint64 first_us=0,last_us=0;
@@ -168,8 +155,7 @@ int nura_video_render_loop(NuraVideo *handle){
     }
     /* The present VDE/GPU path has fixed frame and DMA-BUF geometry.
      * Fail before allocating GPU resources, with an actionable error. */
-    if(media.width!=W || media.height!=H || !media.fps_d ||
-       media.fps_n/media.fps_d!=24 || media.fps_n%media.fps_d) {
+    if(!nura_media_is_qualified_video(&media)) {
         char message[192];
         snprintf(message,sizeof(message),
                  "unsupported video %ux%u %u/%u fps (need 854x480 24fps)",
@@ -338,8 +324,10 @@ int nura_video_render_loop(NuraVideo *handle){
                 printf("STREAM_VIDEO_EOS after_frames=%u\n",count);
                 break;
             }
-            if(check_bus(bus) || ++idle_ticks>=100){
-                nura_video_error(handle,"VDE pipeline stalled or failed");
+            nura_media_bus_drain(bus,&bus_state);
+            if(bus_state.errors || ++idle_ticks>=100){
+                nura_video_error(handle,bus_state.errors ?
+                    bus_state.error : "VDE pipeline stalled or failed");
                 failed=1;break;
             }
             continue;
@@ -347,10 +335,16 @@ int nura_video_render_loop(NuraVideo *handle){
         idle_ticks=0;
         GstBuffer *buf=gst_sample_get_buffer(sample);
         GstClockTime pts=GST_BUFFER_PTS(buf);
-        if(!GST_CLOCK_TIME_IS_VALID(pts)||
-           (GST_CLOCK_TIME_IS_VALID(lastpts)&&pts<=lastpts))pts_bad++;
+        if(!GST_CLOCK_TIME_IS_VALID(pts)){
+            nura_video_error(handle,"invalid video presentation timestamp");
+            pts_bad++;failed=1;gst_sample_unref(sample);break;
+        }
+        if(GST_CLOCK_TIME_IS_VALID(lastpts)&&pts<=lastpts){
+            nura_video_error(handle,"non-increasing video presentation timestamp");
+            pts_bad++;failed=1;gst_sample_unref(sample);break;
+        }
         if(GST_CLOCK_TIME_IS_VALID(lastpts)&&
-           GST_CLOCK_TIME_IS_VALID(pts)&&
+           pts>lastpts&&
            pts-lastpts>GST_SECOND/16)pts_gap++;
         if(frame==1)firstpts=pts;
         lastpts=pts;
@@ -452,7 +446,11 @@ int nura_video_render_loop(NuraVideo *handle){
                    " gpu_ms=%.3f clock_audio=%d wayland_callback=%u released=%u\n",
                    frame,pts,(gpu_end-gpu_start)/1000.0,audio,
                    sl101_stream_callbacks(stream),sl101_stream_releases(stream));
-        if(check_bus(bus))break;
+        nura_media_bus_drain(bus,&bus_state);
+        if(bus_state.errors){
+            nura_video_error(handle,bus_state.error);
+            failed=1;break;
+        }
     }
     const double sec=(first_us&&last_us>first_us)?
                   (last_us-first_us)/1000000.0:0.0;
@@ -460,27 +458,24 @@ int nura_video_render_loop(NuraVideo *handle){
     const double media_sec=GST_CLOCK_TIME_IS_VALID(firstpts)&&
                   GST_CLOCK_TIME_IS_VALID(lastpts)&&lastpts>=firstpts?
                   (lastpts-firstpts)/(double)GST_SECOND:0.0;
-    if(until_eos&&video_eos){
+    if(until_eos&&video_eos&&!bus_state.eos&&!bus_state.errors){
         GstMessage *m=gst_bus_timed_pop_filtered(bus,4*GST_SECOND,
                          GST_MESSAGE_EOS|GST_MESSAGE_ERROR);
         if(m){
-            if(GST_MESSAGE_TYPE(m)==GST_MESSAGE_EOS) {
-                pipeline_eos=1;
-                if(audio)
-                    puts("STREAM_PIPELINE_EOS video_and_audio_drained=1");
-                else
-                    puts("STREAM_PIPELINE_EOS video_drained=1 audio_branch=0");
-            }else{
-                GError *e=NULL;gchar *details=NULL;
-                gst_message_parse_error(m,&e,&details);
-                printf("STREAM_GST_ERROR after_video_eos=%s\n",
-                       e?e->message:"unknown");
-                g_clear_error(&e);g_free(details);
-            }
+            nura_media_bus_consume(&bus_state,m);
             gst_message_unref(m);
         }else puts("STREAM_PIPELINE_EOS_TIMEOUT");
     }
-    int bus_bad=check_bus(bus);
+    nura_media_bus_drain(bus,&bus_state);
+    pipeline_eos=bus_state.eos;
+    if(video_eos&&pipeline_eos){
+        if(audio)
+            puts("STREAM_PIPELINE_EOS video_and_audio_drained=1");
+        else
+            puts("STREAM_PIPELINE_EOS video_drained=1 audio_branch=0");
+    }
+    if(bus_state.errors)nura_video_error(handle,bus_state.error);
+    const unsigned bus_bad=bus_state.errors;
     const unsigned released=stream?sl101_stream_releases(stream):0;
     const unsigned callbacks=stream?sl101_stream_callbacks(stream):0;
     const int stream_clean=sl101_stream_close(stream);

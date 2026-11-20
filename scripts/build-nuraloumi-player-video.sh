@@ -33,7 +33,7 @@ docker run --rm --platform linux/amd64 --network none \
     /cc -std=gnu11 -O2 -fPIC -shared -pthread -Wall -Wextra -Werror \
       -I/out -I/source \
       $(pkg-config --cflags gstreamer-app-1.0 gstreamer-video-1.0 gstreamer-allocators-1.0 gstreamer-pbutils-1.0 egl glesv2 gbm wayland-client) \
-      /source/vde-moving-probe.c /source/video-bridge.c /source/media-audio.c \
+      /source/vde-moving-probe.c /source/video-bridge.c /source/media-audio.c /source/media-bus.c \
       /source/wayland-present.c /source/wayland-stream.c \
       /out/linux-dmabuf.c /out/xdg-shell-protocol.c \
       -L"$sys/opt/grate/lib" -Wl,-rpath-link,"$sys/opt/grate/lib" \
