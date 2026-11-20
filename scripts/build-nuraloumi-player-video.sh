@@ -32,13 +32,13 @@ docker run --rm --platform linux/amd64 --network none \
     wayland-scanner private-code "$sys/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml" /out/xdg-shell-protocol.c
     /cc -std=gnu11 -O2 -fPIC -shared -pthread -Wall -Wextra -Werror \
       -I/out -I/source \
-      $(pkg-config --cflags gstreamer-app-1.0 gstreamer-video-1.0 gstreamer-allocators-1.0 egl glesv2 gbm wayland-client) \
-      /source/vde-moving-probe.c /source/video-bridge.c \
+      $(pkg-config --cflags gstreamer-app-1.0 gstreamer-video-1.0 gstreamer-allocators-1.0 gstreamer-pbutils-1.0 egl glesv2 gbm wayland-client) \
+      /source/vde-moving-probe.c /source/video-bridge.c /source/media-audio.c \
       /source/wayland-present.c /source/wayland-stream.c \
       /out/linux-dmabuf.c /out/xdg-shell-protocol.c \
       -L"$sys/opt/grate/lib" -Wl,-rpath-link,"$sys/opt/grate/lib" \
       -Wl,-soname,libnuraloumi-video.so \
-      $(pkg-config --libs gstreamer-app-1.0 gstreamer-video-1.0 gstreamer-allocators-1.0 egl glesv2 gbm wayland-client) \
+      $(pkg-config --libs gstreamer-app-1.0 gstreamer-video-1.0 gstreamer-allocators-1.0 gstreamer-pbutils-1.0 egl glesv2 gbm wayland-client) \
       -o /out/lib/libnuraloumi-video.so
   '
 cp -a "$mesa"/. "$out/lib/"

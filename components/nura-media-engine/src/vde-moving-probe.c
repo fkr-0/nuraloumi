@@ -7,9 +7,12 @@
 #undef main
 #include "wayland-stream.h"
 #include "video-bridge.h"
+#include "media-audio.h"
 
 static int verify_plugin(GstElement *pipeline){
-    GstElement *dec=gst_bin_get_by_name(GST_BIN(pipeline),"v4l2slh264dec0");
+    /* GStreamer auto-names increase on each pipeline in the long-lived
+     * playerd; pin the decoder name so second/subsequent clips also work. */
+    GstElement *dec=gst_bin_get_by_name(GST_BIN(pipeline),"video_decoder");
     if(!dec){puts("STREAM_GATE_BLOCKED decoder-not-found");return 0;}
     guint pad=0;g_object_get(dec,"capture-stride-align",&pad,NULL);
     gst_object_unref(dec);
@@ -132,7 +135,7 @@ int nura_video_render_loop(NuraVideo *handle){
     setvbuf(stdout,NULL,_IONBF,0);
     const int until_eos=1;
     const unsigned target=24U*3600U*10U; /* bounded ten-hour session */
-    const int audio=1;
+    int audio=0;
     int interrupted=0,failed=0;
     unsigned idle_ticks=0;
     uint64_t duration_ms=0;
@@ -158,10 +161,28 @@ int nura_video_render_loop(NuraVideo *handle){
     uint64_t previous_hash=0;
 
     gst_init(NULL,NULL);
+    NuraMediaInfo media={0};
+    if(!nura_media_probe(nura_video_path(handle),&media)){
+        nura_video_error(handle,"could not discover the media video stream");
+        goto done;
+    }
+    /* The present VDE/GPU path has fixed frame and DMA-BUF geometry.
+     * Fail before allocating GPU resources, with an actionable error. */
+    if(media.width!=W || media.height!=H || !media.fps_d ||
+       media.fps_n/media.fps_d!=24 || media.fps_n%media.fps_d) {
+        char message[192];
+        snprintf(message,sizeof(message),
+                 "unsupported video %ux%u %u/%u fps (need 854x480 24fps)",
+                 media.width,media.height,media.fps_n,media.fps_d);
+        nura_video_error(handle,message);
+        goto done;
+    }
+    audio=media.has_audio;
+    printf("STREAM_AUDIO_BRANCH present=%d\n",audio);
     const char *base=
       "filesrc name=media_source ! qtdemux name=d "
       "d.video_0 ! queue max-size-buffers=4 max-size-bytes=0 max-size-time=0 "
-      "! h264parse ! v4l2slh264dec capture-stride-align=64 "
+      "! h264parse ! v4l2slh264dec name=video_decoder capture-stride-align=64 "
       "! video/x-raw(memory:DMABuf),format=DMA_DRM,drm-format=YU12 "
       "! appsink name=probe sync=true max-buffers=3 drop=false ";
     const char *audio_desc=
@@ -193,7 +214,7 @@ int nura_video_render_loop(NuraVideo *handle){
                       video_meta_query,NULL,NULL);
     gst_object_unref(pad);
     amplifier=gst_bin_get_by_name(GST_BIN(pipeline),"amplifier");
-    if(!amplifier){
+    if(audio&&!amplifier){
         nura_video_error(handle,"missing unified audio volume control");
         goto done;
     }
@@ -258,8 +279,9 @@ int nura_video_render_loop(NuraVideo *handle){
     if(!check("stream-program-uniform"))goto done;
     stream=sl101_stream_open();
     if(!stream)goto done;
-    printf("STREAM_MODE requested=%u audio_requested=%d audio_sink=pulsesink "
-           "video_sync=1 audio_sync=1 cpu_yuv_map=0\n",target,audio);
+    printf("STREAM_MODE requested=%u audio_requested=%d audio_sink=%s "
+           "video_sync=1 audio_sync=1 cpu_yuv_map=0\n",
+           target,audio,audio?"pulsesink":"none");
     if(gst_element_set_state(pipeline,GST_STATE_PLAYING)==GST_STATE_CHANGE_FAILURE){
         nura_video_error(handle,"GStreamer could not start VDE pipeline");
         goto done;
@@ -269,7 +291,7 @@ int nura_video_render_loop(NuraVideo *handle){
     for(unsigned frame=1;frame<=target;){
         NuraVideoControls controls=nura_video_controls(handle);
         if(controls.stop){interrupted=1;break;}
-        if(controls.volume_dirty){
+        if(controls.volume_dirty&&amplifier){
             g_object_set(amplifier,"volume",controls.volume,
                          "mute",(gboolean)controls.muted,NULL);
         }
@@ -444,7 +466,10 @@ int nura_video_render_loop(NuraVideo *handle){
         if(m){
             if(GST_MESSAGE_TYPE(m)==GST_MESSAGE_EOS) {
                 pipeline_eos=1;
-                puts("STREAM_PIPELINE_EOS video_and_audio_drained=1");
+                if(audio)
+                    puts("STREAM_PIPELINE_EOS video_and_audio_drained=1");
+                else
+                    puts("STREAM_PIPELINE_EOS video_drained=1 audio_branch=0");
             }else{
                 GError *e=NULL;gchar *details=NULL;
                 gst_message_parse_error(m,&e,&details);
@@ -502,7 +527,12 @@ done:
     if(sink)gst_object_unref(sink);
     if(amplifier)gst_object_unref(amplifier);
     if(pipeline)gst_object_unref(pipeline);
-    if(ret && !interrupted && !video_eos)
-        nura_video_error(handle,"VDE/GPU/Wayland video setup or rendering failed");
+    if(ret && !interrupted && !video_eos){
+        NuraVideoStatus current;
+        nura_video_status(handle,&current);
+        if(current.state!=-1)
+            nura_video_error(handle,
+                    "VDE/GPU/Wayland video setup or rendering failed");
+    }
     return ret;
 }

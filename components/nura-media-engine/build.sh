@@ -13,12 +13,12 @@ wayland-scanner client-header "$protocols/stable/xdg-shell/xdg-shell.xml" "$out/
 wayland-scanner private-code "$protocols/stable/xdg-shell/xdg-shell.xml" "$out/xdg-shell-protocol.c"
 ${CC:-cc} -std=gnu11 -O2 -fPIC -shared -pthread -Wall -Wextra -Werror \
   -I"$out" -I"$src" \
-  $(pkg-config --cflags gstreamer-app-1.0 gstreamer-video-1.0 gstreamer-allocators-1.0 egl glesv2 gbm wayland-client) \
-  "$src/vde-moving-probe.c" "$src/video-bridge.c" \
+  $(pkg-config --cflags gstreamer-app-1.0 gstreamer-video-1.0 gstreamer-allocators-1.0 gstreamer-pbutils-1.0 egl glesv2 gbm wayland-client) \
+  "$src/vde-moving-probe.c" "$src/video-bridge.c" "$src/media-audio.c" \
   "$src/wayland-present.c" "$src/wayland-stream.c" \
   "$out/linux-dmabuf.c" "$out/xdg-shell-protocol.c" \
   -Wl,-soname,libnuraloumi-video.so \
-  $(pkg-config --libs gstreamer-app-1.0 gstreamer-video-1.0 gstreamer-allocators-1.0 egl glesv2 gbm wayland-client) \
+  $(pkg-config --libs gstreamer-app-1.0 gstreamer-video-1.0 gstreamer-allocators-1.0 gstreamer-pbutils-1.0 egl glesv2 gbm wayland-client) \
   -o "$out/libnuraloumi-video.so"
 file "$out/libnuraloumi-video.so"
 sha256sum "$out/libnuraloumi-video.so"
