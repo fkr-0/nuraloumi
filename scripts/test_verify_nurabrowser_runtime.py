@@ -64,6 +64,16 @@ class BrowserRuntimeContract(unittest.TestCase):
                     self.assertIn("components/nura-browser-engine/**", text)
                     self.assertIn("scripts/verify_nurabrowser_runtime.py", text)
 
+    def test_musl_package_consumes_only_exact_qualified_same_commit_producer(self):
+        repository = Path(__file__).resolve().parents[1]
+        workflow = (repository / ".github/workflows/sl101-musl-armv7.yml").read_text()
+        self.assertIn("browser_producer_run_id", workflow)
+        self.assertIn("browser_runtime_manifest_sha256", workflow)
+        self.assertIn("nurabrowser-wpe-musl-qualified-${{ github.sha }}", workflow)
+        self.assertIn(".path == \".github/workflows/nurabrowser-wpe-musl-producer.yml\"", workflow)
+        self.assertIn(".head_sha == $sha", workflow)
+        self.assertIn("verify_nurabrowser_runtime.py target/browser-producer-download", workflow)
+
     def test_complete_contract_accepts_offline_fixture(self):
         self.assertEqual(len(self.verify()["files"]), 9)
 

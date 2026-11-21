@@ -15,6 +15,14 @@ on:
         description: 'Full SHA256 of producer video-bundle.tar.gz (required for GPU)'
         required: false
         type: string
+      browser_producer_run_id:
+        description: 'Exact GitHub Actions run ID that produced the qualified WPE musl runtime for this same commit'
+        required: false
+        type: string
+      browser_runtime_manifest_sha256:
+        description: 'SHA256 of runtime.json from the qualified same-commit WPE producer artifact'
+        required: false
+        type: string
   push:
     branches:
       - main
@@ -113,8 +121,55 @@ jobs:
           python3 scripts/package-binaries.py > target/gha-artifact/BINARY-LIST.txt
           test "$(wc -l < target/gha-artifact/BINARY-LIST.txt)" -ge 4
 
+      - name: Validate qualified same-commit WPE producer selection
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BROWSER_PRODUCER_RUN: ${{ inputs.browser_producer_run_id }}
+          BROWSER_MANIFEST_SHA: ${{ inputs.browser_runtime_manifest_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$BROWSER_PRODUCER_RUN" =~ ^[1-9][0-9]*$ ]]
+          [[ "$BROWSER_MANIFEST_SHA" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          run_json="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BROWSER_PRODUCER_RUN")"
+          jq -e --arg sha "$GITHUB_SHA" '
+            .path == ".github/workflows/nurabrowser-wpe-musl-producer.yml" and
+            .event == "workflow_dispatch" and
+            .status == "completed" and
+            .conclusion == "success" and
+            .head_sha == $sha
+          ' <<<"$run_json" >/dev/null
+
+      - name: Download exact qualified same-commit WPE runtime
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: nurabrowser-wpe-musl-qualified-${{ github.sha }}
+          run-id: ${{ inputs.browser_producer_run_id }}
+          github-token: ${{ github.token }}
+          path: target/browser-producer-download
+
+      - name: Verify WPE runtime manifest, exact source and ELF closure
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        shell: bash
+        env:
+          BROWSER_MANIFEST_SHA: ${{ inputs.browser_runtime_manifest_sha256 }}
+        run: |
+          set -euo pipefail
+          test -s target/browser-producer-download/runtime.json
+          printf '%s  %s\n' "$BROWSER_MANIFEST_SHA" target/browser-producer-download/runtime.json | sha256sum --check --status
+          python3 scripts/verify_nurabrowser_runtime.py target/browser-producer-download \
+            --source-sha "$GITHUB_SHA" \
+            --target "$TARGET" \
+            --producer-revision "$GITHUB_SHA"
+
       - name: Package the exact committed build
         shell: bash
+        env:
+          NURALOUMI_BROWSER_RUNTIME_DIR: ${{ github.workspace }}/target/browser-producer-download
+          NURALOUMI_BROWSER_PRODUCER_REVISION: ${{ github.sha }}
         run: |
           set -euo pipefail
           # Ordinary packages now require the fully qualified native WPE

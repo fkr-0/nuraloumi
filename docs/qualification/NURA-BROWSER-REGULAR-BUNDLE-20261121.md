@@ -102,3 +102,23 @@ on `.106`.
 Offline Python contract fixtures are intentionally *synthetic* and use a
 mock ELF inspector. They test acceptance/rejection logic only, not WebKit
 boot, secure process containment, actual ARM execution, or tablet behavior.
+
+## RC2 musl CI hand-off contract
+
+The musl package workflow now accepts two explicit `workflow_dispatch`
+inputs: the exact WPE producer run ID and the SHA256 of that run's `runtime.json`.
+It downloads only `nurabrowser-wpe-musl-qualified-<app-source-sha>` from that
+run, then verifies that the run belongs to
+`.github/workflows/nurabrowser-wpe-musl-producer.yml`, is a successful completed
+`workflow_dispatch`, and has the exact same `head_sha` as the application build.
+It verifies the pinned manifest digest and runs the production runtime verifier
+against the extracted tree before setting `NURALOUMI_BROWSER_RUNTIME_DIR`.
+The producer revision is pinned to that same source SHA; cross-revision browser
+runtimes are rejected.
+
+The current WPE workflow still publishes only
+`nurabrowser-wpe-musl-unqualified-<sha>` with `runtime_qualification=UNQUALIFIED`.
+It deliberately does **not** publish the required `nurabrowser-wpe-musl-qualified-<sha>`
+artifact. The new consumer interface is therefore fail-closed but cannot yet
+produce the ordinary package until the producer's real sandbox, process-spawn,
+ISA and dynamic-loader qualification is complete and independently reviewed.
