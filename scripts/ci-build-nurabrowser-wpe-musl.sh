@@ -20,7 +20,7 @@ apk add --no-cache \
   build-base binutils cmake ninja pkgconf python3 perl ruby bison flex gperf \
   git curl tar xz meson linux-headers \
   glib-dev harfbuzz-dev icu-dev libjpeg-turbo-dev libepoxy-dev \
-  libgcrypt-dev libsoup3-dev libtasn1-dev libxkbcommon-dev libxml2-dev \
+  libgcrypt-dev libsoup3-dev libtasn1-dev libxkbcommon-dev libxml2-dev libxslt-dev \
   libpng-dev sqlite-dev libwebp-dev zlib-dev freetype-dev \
   json-glib-dev wayland-dev wayland-protocols mesa-dev libdrm-dev \
   bubblewrap xdg-dbus-proxy
