@@ -337,13 +337,21 @@ fn serialized_updates_reconcile_two_independent_process_like_writers() {
             let known = known.clone();
             std::thread::spawn(move || {
                 gate.wait();
-                favorites::update_serialized(
-                    &path,
-                    &[],
-                    FavoriteAction::Pin(id.to_owned()),
-                    &known,
-                )
-                .unwrap();
+                // Slow CI storage can outlast a single production lock attempt.
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                loop {
+                    match favorites::update_serialized(
+                        &path,
+                        &[],
+                        FavoriteAction::Pin(id.to_owned()),
+                        &known,
+                    ) {
+                        Err(error)
+                            if error.kind() == ErrorKind::WouldBlock
+                                && std::time::Instant::now() < deadline => {}
+                        result => return result.expect("persist favorite"),
+                    }
+                }
             })
         })
         .collect::<Vec<_>>();
