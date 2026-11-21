@@ -52,6 +52,16 @@ class BrowserRuntimeContract(unittest.TestCase):
     def verify(self):
         return gate.verify(self.root, SHA, TARGET, REV, inspector=lambda path, abi: None)
 
+    def test_all_official_ci_lanes_run_runtime_contract_tests(self):
+        repository = Path(__file__).resolve().parents[1]
+        for workflow in ("ci.yml", "sl101-musl-armv7.yml", "sl101-debian-armhf.yml"):
+            with self.subTest(workflow=workflow):
+                text = (repository / ".github/workflows" / workflow).read_text()
+                self.assertIn("scripts/test_verify_nurabrowser_runtime.py", text)
+                if workflow != "ci.yml":
+                    self.assertIn("components/nura-browser-engine/**", text)
+                    self.assertIn("scripts/verify_nurabrowser_runtime.py", text)
+
     def test_complete_contract_accepts_offline_fixture(self):
         self.assertEqual(len(self.verify()["files"]), 7)
 
