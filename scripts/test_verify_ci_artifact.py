@@ -71,6 +71,10 @@ def sample(folder: Path, target: str = "debian", version: str = "0.0.4-dev.2") -
         for name, data in records.items():
             info = tarfile.TarInfo("./" + name)
             info.size = len(data)
+            if name.startswith(prefix):
+                role = browser_payload.get(name.removeprefix(prefix))
+                if role in {"engine", "webprocess", "bwrap", "xdg-dbus-proxy", "loader"}:
+                    info.mode = 0o755
             archive.addfile(info, io.BytesIO(data))
     digest = hashlib.sha256((folder / "nuraloumi-ci.tar").read_bytes()).hexdigest()
     (folder / "SHA256SUMS.txt").write_text(f"{digest}  nuraloumi-ci.tar\n")
@@ -160,6 +164,25 @@ class VerifierTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "tar manifest SHA256 mismatch"):
                 verifier.verify_downloaded(path, "debian", SHA)
+    def test_non_executable_browser_engine_tar_fails(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d)
+            sample(path)
+            tar = path / "nuraloumi-ci.tar"
+            with tarfile.open(tar) as archive:
+                members = [(member, archive.extractfile(member).read())
+                           for member in archive.getmembers() if member.isfile()]
+            with tarfile.open(tar, "w") as archive:
+                for member, data in members:
+                    if member.name == "./libexec/nuraloumi/browser/nurabrowser-core":
+                        member.mode = 0o644
+                    archive.addfile(member, io.BytesIO(data))
+            (path / "SHA256SUMS.txt").write_text(
+                f"{hashlib.sha256(tar.read_bytes()).hexdigest()}  nuraloumi-ci.tar\n"
+            )
+            with self.assertRaisesRegex(ValueError, "not executable in tar"):
+                verifier.verify_downloaded(path, "debian", SHA)
+
     def test_valid_debian_and_alpine_fixtures(self):
         for lane in ("debian", "alpine"):
             with self.subTest(lane=lane), tempfile.TemporaryDirectory() as d:

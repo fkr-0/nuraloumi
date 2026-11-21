@@ -35,6 +35,8 @@ class BrowserRuntimeContract(unittest.TestCase):
             file = self.root / path
             file.parent.mkdir(parents=True, exist_ok=True)
             file.write_bytes(b"offline fixture " + path.encode())
+            if role in gate.EXECUTABLE_ROLES:
+                file.chmod(0o755)
             entries.append({"path": path, "role": role,
                             "sha256": hashlib.sha256(file.read_bytes()).hexdigest()})
         self.document = {"schema": "nuraloumi-browser-runtime-v1", "source_sha": SHA,
@@ -52,6 +54,17 @@ class BrowserRuntimeContract(unittest.TestCase):
 
     def test_complete_contract_accepts_offline_fixture(self):
         self.assertEqual(len(self.verify()["files"]), 7)
+
+    def test_executable_processes_and_loader_required(self):
+        for name, role in ROLES.items():
+            if role not in gate.EXECUTABLE_ROLES:
+                continue
+            with self.subTest(name=name):
+                file = self.root / name
+                file.chmod(0o644)
+                with self.assertRaisesRegex(ValueError, "not executable"):
+                    self.verify()
+                file.chmod(0o755)
 
     def test_absent_engine_rejects(self):
         (self.root / "nurabrowser-core").unlink()

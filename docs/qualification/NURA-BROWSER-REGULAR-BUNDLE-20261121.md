@@ -24,8 +24,10 @@ paths, SHA256 and semantic roles. Required roles: `engine` at
 `xdg-dbus-proxy`, `loader`, `library`, `module`. All five qualification
 fields (`sandbox`, `instruction_closure`, `dlopen_closure`, `webprocess`,
 `review`) must be `PASS`. The tree may not contain symlinks or unlisted
-files. The verifier checks ELF32 ARM hardfloat, VFPv3-D16, NEON attributes,
-selected forbidden opcode patterns and loader ABI. Producer evidence must
+files. The verifier checks executable permissions for the engine, WebProcess,
+sandbox helpers and loader, plus ELF32 ARM hardfloat, VFPv3-D16, NEON attributes,
+selected forbidden opcode patterns and loader ABI. The downloaded tar verifier
+also rejects missing executable modes. Producer evidence must
 add a complete `DT_NEEDED` **and** dynamic `dlopen` closure audit; a textual
 `PASS` is not proof of runtime correctness.
 
@@ -36,6 +38,17 @@ unqualified, mixes host-architecture sandbox helpers and cannot be substituted
 into this release. The isolated glibc approach would require its own pinned
 ARMHF loader, full library/process tree and sandbox namespace proof without
 polluting musl/GStreamer search paths. A native musl producer is preferred.
+
+The new desktop entry starts `nuraloumi-browser`, the Rust control UI. Its
+native RPC client expects an already-running same-UID engine socket at
+`$XDG_RUNTIME_DIR/nura-browser.sock`; this package change does **not** install
+or activate the engine service. The older `,browse` script is exclusively for
+the separately prepared glibc/private-root lane and points to
+`/usr/libexec/nura-browser/nurabrowser-core`, not the ordinary release path
+`/usr/libexec/nuraloumi/browser/nurabrowser-core`. A native musl/regular-bundle
+engine activation, sandbox path mapping and end-to-end launcher test are still
+required. Neither desktop visibility nor the manifest is evidence that a page
+can render on the tablet.
 
 ## Remaining gates before an artifact can pass
 

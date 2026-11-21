@@ -13,7 +13,8 @@ import re
 import subprocess
 
 ROLES = {"engine", "webprocess", "bwrap", "xdg-dbus-proxy", "loader", "library", "module"}
-REQUIRED = ROLES - {"library", "module"}
+EXECUTABLE_ROLES = {"engine", "webprocess", "bwrap", "xdg-dbus-proxy", "loader"}
+REQUIRED = EXECUTABLE_ROLES
 TARGETS = {
     "armv7-unknown-linux-musleabihf": "musl",
     "armv7-unknown-linux-gnueabihf": "glibc",
@@ -96,8 +97,10 @@ def verify(root, source_sha, target, producer_revision, inspector=inspect_elf):
                 f"missing regular browser file: {name}")
         require(hashlib.sha256(file.read_bytes()).hexdigest() == digest,
                 f"browser SHA256 mismatch: {name}")
-        if role in ROLES:
-            inspector(file, TARGETS[target])
+        if role in EXECUTABLE_ROLES:
+            require(bool(file.stat().st_mode & 0o111),
+                    f"browser process or loader is not executable: {name}")
+        inspector(file, TARGETS[target])
     require(REQUIRED <= roles and {"library", "module"} <= roles,
             "missing engine, WPEWebProcess, sandbox helper, loader, library or dlopen module")
     require(any(e["role"] == "engine" and e["path"] == "nurabrowser-core" for e in entries),
