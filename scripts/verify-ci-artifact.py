@@ -97,6 +97,8 @@ def verify_downloaded(folder: Path, lane: str, sha: str, expected_version: str |
         ("target", target),
     ):
         require(fields.get(key) == expected, f"manifest {key} mismatch")
+    require(fields.get("browser_runtime") == "required",
+            "ordinary ARMv7 artifact omits required browser runtime declaration")
     binaries = fields.get("binaries", "").split(",")
     require(len(binaries) >= 4 and len(set(binaries)) == len(binaries)
             and all(re.fullmatch(r"nuraloumi-[a-z0-9-]+", name) for name in binaries)
@@ -141,6 +143,42 @@ def verify_downloaded(folder: Path, lane: str, sha: str, expected_version: str |
         for name, digest in records.items():
             require(hashlib.sha256(files[name]).hexdigest() == digest,
                     f"tar manifest SHA256 mismatch: {name}")
+        browser_prefix = "libexec/nuraloumi/browser/"
+        browser_document = files.get(browser_prefix + "runtime.json")
+        require(browser_document is not None, "ordinary release missing browser runtime.json")
+        browser = json.loads(browser_document)
+        require(browser.get("schema") == "nuraloumi-browser-runtime-v1" and
+                browser.get("source_sha") == sha and browser.get("target") == target and
+                browser.get("abi") == expected_abi and
+                SHA.fullmatch(browser.get("producer_revision", "")),
+                "browser runtime provenance/ABI mismatch")
+        qualifications = browser.get("qualification", {})
+        require(isinstance(qualifications, dict) and
+                set(qualifications) == {"sandbox", "instruction_closure", "dlopen_closure", "webprocess", "review"} and
+                all(value == "PASS" for value in qualifications.values()),
+                "browser sandbox, ISA, dlopen or review is unqualified")
+        browser_records = browser.get("files", [])
+        require(isinstance(browser_records, list) and browser_records,
+                "browser runtime has no file inventory")
+        roles, names = set(), set()
+        for entry in browser_records:
+            require(isinstance(entry, dict) and set(entry) == {"path", "sha256", "role"},
+                    "malformed browser runtime inventory entry")
+            name = entry["path"]
+            path = PurePosixPath(name)
+            require(name and not path.is_absolute() and ".." not in path.parts and
+                    not name.startswith("./") and name not in names and
+                    bool(HEXDIGEST.fullmatch(entry["sha256"])),
+                    "unsafe browser runtime path/digest")
+            names.add(name)
+            roles.add(entry["role"])
+            require(hashlib.sha256(files.get(browser_prefix + name, b"")).hexdigest() == entry["sha256"],
+                    f"missing or altered browser runtime payload: {name}")
+        require({"engine", "webprocess", "bwrap", "xdg-dbus-proxy", "loader", "library", "module"} <= roles and
+                "nurabrowser-core" in names and
+                any(name.endswith("/WPEWebProcess") for name in names) and
+                {name.removeprefix(browser_prefix) for name in files if name.startswith(browser_prefix)} == names | {"runtime.json"},
+                "browser runtime missing mandatory process/helper/module or partial archive")
         for name in binaries:
             data = files.get("bin/" + name, b"")
             require(len(data) >= 52 and data[:5] == b"\x7fELF\x01"
