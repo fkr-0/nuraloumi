@@ -4,9 +4,11 @@
 //! WebKit is a separate, same-UID native engine: it never draws the toolbar
 //! and never accepts page-controlled JavaScript for chrome actions.
 
+mod activation;
 pub mod scene;
 mod transport;
 
+pub use activation::connect_or_start_default;
 use nuraloumi_core::{MenuAction, MenuItem, MenuModel};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

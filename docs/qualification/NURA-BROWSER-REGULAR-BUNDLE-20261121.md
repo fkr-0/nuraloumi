@@ -39,16 +39,33 @@ into this release. The isolated glibc approach would require its own pinned
 ARMHF loader, full library/process tree and sandbox namespace proof without
 polluting musl/GStreamer search paths. A native musl producer is preferred.
 
-The new desktop entry starts `nuraloumi-browser`, the Rust control UI. Its
-native RPC client expects an already-running same-UID engine socket at
-`$XDG_RUNTIME_DIR/nura-browser.sock`; this package change does **not** install
-or activate the engine service. The older `,browse` script is exclusively for
-the separately prepared glibc/private-root lane and points to
-`/usr/libexec/nura-browser/nurabrowser-core`, not the ordinary release path
-`/usr/libexec/nuraloumi/browser/nurabrowser-core`. A native musl/regular-bundle
-engine activation, sandbox path mapping and end-to-end launcher test are still
-required. Neither desktop visibility nor the manifest is evidence that a page
-can render on the tablet.
+The desktop entry runs `nuraloumi-browser`, the native Rust control UI.
+Its regular-bundle activation code now checks the qualified manifest and
+root-owned, non-writable bundle, then attaches to an existing same-UID,
+private, authenticated `$XDG_RUNTIME_DIR/nura-browser.sock`, or attempts one
+engine start from `/usr/libexec/nuraloumi/browser/nurabrowser-core`.
+The child uses `--platform=wayland` and `WPE_PLATFORM=wayland`; WebKit
+sandbox disabling is rejected and software rendering is selected. Bundled
+helpers, libraries and WebProcess search paths are scoped to that engine
+process, never exported to the NuraLoumi shell, player, GStreamer or VDE.
+Startup waits at most 12 seconds for a valid RPC reply; the UI owns and reaps
+only an engine process it started, and an existing IPC server is neither
+removed nor killed on failure. A missing or unqualified bundle fails closed.
+
+This is **host-tested activation logic only**, not a musl WPE runtime
+qualification or a successful device run. The producer still needs to prove
+that its ELF interpreter, sandbox helper and WebProcess spawn paths work in
+the **installed layout**, including indirect subprocess lookups, dynamic
+modules, sandbox namespaces, Wayland and real pixels. In upstream WebKit,
+`WEBKIT_EXEC_PATH` is consulted only in developer-mode builds; release builds
+normally use compiled-in `PKGLIBEXECDIR`, so the producer must prove the
+compiled process paths match the actual regular-bundle installation. An
+embedded loader file in the bundle alone does not prove the target kernel's
+requested
+absolute ELF interpreter is available. The older `,browse` script remains
+exclusive to the unrelated glibc/private-root lane. Neither desktop
+visibility, synthetic tests, nor the manifest proves that a page renders
+on `.106`.
 
 ## Remaining gates before an artifact can pass
 
@@ -63,8 +80,9 @@ can render on the tablet.
    `dlopen`/child-process closure. Test real pixels, navigation and touch on
    the SL101 separately. Do not set `WEBKIT_USE_SANDBOX=0`.
 4. Pin producer revision/SHA in normal CI; validate final tar and an
-   extracted signed APK for byte identity. Add explicit loader-search-path and
-   desktop launcher tests before owner release/deploy.
+   extracted signed APK for byte identity. Run explicit loader-search-path,
+   WebProcess, sandbox and desktop-launcher checks **against the installed
+   target layout** before owner release/deploy.
 
 Offline Python contract fixtures are intentionally *synthetic* and use a
 mock ELF inspector. They test acceptance/rejection logic only, not WebKit
