@@ -103,6 +103,17 @@ class NativePackageCiContract(unittest.TestCase):
             for forbidden in ("ssh ", "scp ", "192.168.", "reboot", "systemctl "):
                 self.assertNotIn(forbidden, ci)
 
+    def test_combined_gpu_package_contains_same_wpe_runtime_and_signed_apk(self):
+        gpu_step = MUSL.split("- name: Package and audit GPU-video variant", 1)[1]
+        self.assertIn("NURALOUMI_BROWSER_RUNTIME_DIR", gpu_step)
+        self.assertIn("NURALOUMI_BROWSER_PRODUCER_REVISION", gpu_step)
+        self.assertIn("NURALOUMI_VIDEO_BUNDLE_DIR", gpu_step)
+        self.assertIn("NURALOUMI_VIDEO_BUNDLE_SOURCE_VERIFIED", gpu_step)
+        self.assertLess(gpu_step.index("cargo xtask package --target"), gpu_step.index("verify_packaged_sl101_video.py"))
+        self.assertIn("/output/native-gpu-apk", gpu_step)
+        self.assertIn("native-gpu-apk/**", gpu_step)
+        self.assertIn("GPU-SHA256SUMS.txt", gpu_step)
+
     def test_apk_is_native_armv7_and_signed_but_never_auto_trusted(self):
         self.assertIn("docker run --rm --platform linux/arm/v7", MUSL)
         self.assertIn("alpine:3.22", MUSL)

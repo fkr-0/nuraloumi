@@ -338,6 +338,8 @@ jobs:
         if: ${{ inputs.gpu_producer_run_id != '' }}
         shell: bash
         env:
+          NURALOUMI_BROWSER_RUNTIME_DIR: ${{ github.workspace }}/target/browser-producer-download
+          NURALOUMI_BROWSER_PRODUCER_REVISION: ${{ github.sha }}
           NURALOUMI_VIDEO_PRODUCER_REVISION: ${{ inputs.gpu_producer_revision }}
           NURALOUMI_VIDEO_ARCHIVE_SHA256: ${{ inputs.gpu_archive_sha256 }}
           NURALOUMI_VIDEO_BUNDLE_SOURCE_VERIFIED: '1'
@@ -356,6 +358,23 @@ jobs:
           test -f target/gha-artifact/nuraloumi-gpu-ci/lib/nuraloumi/video/provenance.json
           (cd target/gha-artifact && sha256sum nuraloumi-gpu-ci.tar > GPU-SHA256SUMS.txt)
 
+      - name: Sign combined browser and GPU-video Alpine APK
+        if: ${{ inputs.gpu_producer_run_id != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --platform linux/arm/v7 \\
+            -v "$PWD:/work:ro" \\
+            -v "$PWD/target/gha-artifact:/output" \\
+            alpine:3.22 /bin/sh -ec '
+              apk add --no-cache abuild openssl tar coreutils
+              sh /work/scripts/build-ci-alpine-apk.sh \\
+                /work/target/gha-artifact/nuraloumi-gpu-ci /output/native-gpu-apk "$1"
+            ' sh "$GITHUB_SHA"
+          test -s target/gha-artifact/native-gpu-apk/NURALOUMI-APK-SHA256SUMS.txt
+          find target/gha-artifact/native-gpu-apk -name 'nuraloumi-*.apk' -type f -size +0c | grep -q .
+          test -s target/gha-artifact/native-gpu-apk/CI-EPHEMERAL-KEY.rsa.pub
+
       - name: Upload verified GPU-video variant (device qualification pending)
         if: ${{ inputs.gpu_producer_run_id != '' }}
         uses: actions/upload-artifact@v4
@@ -364,6 +383,7 @@ jobs:
           path: |
             target/gha-artifact/nuraloumi-gpu-ci.tar
             target/gha-artifact/nuraloumi-gpu-ci/MANIFEST.txt
+            target/gha-artifact/native-gpu-apk/**
             target/gha-artifact/GPU-SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 14
