@@ -55,6 +55,7 @@ cmake -S /out/src/wpewebkit-2.54.2 -B /out/build/webkit -G Ninja \
   -DENABLE_JOURNALD_LOG=OFF -DENABLE_JIT=OFF \
   -DUSE_ATK=OFF -DUSE_FLITE=OFF -DUSE_LIBHYPHEN=OFF -DUSE_LIBBACKTRACE=OFF -DUSE_JPEGXL=OFF \
   -DUSE_AVIF=OFF -DUSE_LCMS=OFF -DUSE_WOFF2=OFF \
+  -DUSE_SYSPROF_CAPTURE=OFF -DUSE_SYSTEM_SYSPROF_CAPTURE=OFF \
   -DUSE_SYSTEM_UNIFDEF=OFF
 cmake --build /out/build/webkit --parallel 2
 cmake --install /out/build/webkit
