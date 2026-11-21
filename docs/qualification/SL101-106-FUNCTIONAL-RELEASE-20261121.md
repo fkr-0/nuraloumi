@@ -10,7 +10,9 @@ The working tree originally had unrelated shell/Sway functionality, archived OCP
 - `4c77b4a`, `7ac05e7`, `9f4dc1c`, `5544883`, `7fec73a`: legacy OCP prompts and finite fix-closure campaign provenance; these do not constitute execution or dispatch.
 - `d53f119`: historical browser/CI and 339-item triage ledger plus Cairo terminal-lifetime diagnostic (not a product memory leak fix).
 - `abc985b`: make the stale private-video power-policy test assert the existing AC/battery/root-lock guards, while passive userspace release remains threshold-free. No device safety guard was removed.
-- Fix-closure lane 07's `scripts/verify-ci-artifact.py` / tests / packaging README / ARM gate note are **still reserved by a separate active path claim** at initial review; integrate only after that claim ends.
+- `7f04a0c`: fix-closure lane 07's exact-version and complete-tar/ELF CI artifact verifier, regression tests, packaging README and ARM gate note, integrated after its independent claim expired. All 22 scoped package tests passed; the already-fetched real `fb47cfc` artifact passed the updated offline validator at its correct version, and an intentionally wrong expected version failed closed.
+
+**Final integrated local source SHA:** `7f04a0c3bb3375ae5f66af5c683f8a80614ddce8` (not yet a production CI source SHA).
 
 ## Verified host checks
 
