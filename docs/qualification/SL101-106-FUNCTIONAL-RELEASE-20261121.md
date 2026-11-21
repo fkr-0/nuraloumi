@@ -12,7 +12,7 @@ The working tree originally had unrelated shell/Sway functionality, archived OCP
 - `abc985b`: make the stale private-video power-policy test assert the existing AC/battery/root-lock guards, while passive userspace release remains threshold-free. No device safety guard was removed.
 - `7f04a0c`: fix-closure lane 07's exact-version and complete-tar/ELF CI artifact verifier, regression tests, packaging README and ARM gate note, integrated after its independent claim expired. All 22 scoped package tests passed; the already-fetched real `fb47cfc` artifact passed the updated offline validator at its correct version, and an intentionally wrong expected version failed closed.
 
-**Final integrated local source SHA:** `7f04a0c3bb3375ae5f66af5c683f8a80614ddce8` (not yet a production CI source SHA).
+**Last code/verifier integration commit:** `7f04a0c3bb3375ae5f66af5c683f8a80614ddce8`; subsequent report-only commits change Git HEAD but not binaries. The actual final HEAD must be frozen anew before any approved production CI run.
 
 ## Verified host checks
 
