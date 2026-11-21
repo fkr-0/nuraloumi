@@ -28,7 +28,9 @@ class BrowserIsolationTest(unittest.TestCase):
         browser = BROWSER_UI.read_text()
         self.assertIn("CairoRenderer::default()", browser)
         self.assertIn("WaylandBackend::connect()", browser)
-        self.assertIn("NativeBrowser::from_environment()", browser)
+        # The regular bundle now owns a bounded native WPE startup path.
+        self.assertIn("nuraloumi_shell::browser::connect_or_start_default()", browser)
+        self.assertNotIn("NativeBrowser::from_environment()", browser)
         for forbidden in (PAIR, SCHEDULE, "MESA_LOADER_DRIVER_OVERRIDE",
                           "LIBGL_DRIVERS_PATH", "libnuraloumi-video.so",
                           "gst_element_set_state"):
