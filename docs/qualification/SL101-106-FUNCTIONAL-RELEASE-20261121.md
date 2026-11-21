@@ -43,8 +43,8 @@ This evidence establishes missing package/runtime prerequisites, not the complet
 1. **Freeze exact source:** complete independent agent claim reconciliation, test the final clean commit and decide the next explicit version. Do not silently conflate local `main` with official CI source.
 2. **Prove complete NuraPlayer artifact:** pin producer source + exact SHA of GStreamer private `libgstv4l2codecs`, Grate/Mesa, libdrm, `libnuraloumi-video.so`, ARMv7 musl ELF/loader/SONAME/plugin closure and native playerd; use `verify_sl101_video_bundle.py`, plus actual 854x480/24fps device proof. Generic software-only CI must remain valid as such, but it is never a complete-video release.
 3. **Prove complete NuraBrowser runtime:** independently build and qualify the exact ARMv7 no-NEON WPEWebProcess + sandbox helpers + engine, with an explicit musl or properly isolated glibc loader/runtime policy. Gate 2/3C/5, real page pixels, touch and navigation must PASS; do not use a nondeployable ABI-smoke tar.
-4. **Official artifact:** with separately approved remote Git/CI publication, get a successful main-branch ARMv7 musl artifact for the **same** reviewed source SHA/version. Verify exact native package bytes and provenance; never ship local host build outputs.
-5. **Identity/recovery:** bind owner-approved .106 alias to current physical inventory/serial, SD/eMMC CIDs, boot ID, kernel and DTB, live Sway/Pixman baseline, free space, battery/AC, service lock and known-good rollback. The IP/name alone is not full physical identity.
+4. **Official artifact:** the owner's Nura `.106` deploy request already authorizes the ordinary reviewed `main` push and official ARMv7/musl CI needed for this release; no repeated confirmation. Obtain a successful artifact for the **same** reviewed source SHA/version, verify exact native package bytes/provenance; never ship local host build outputs.
+5. **Identity/recovery:** use the owner's established `.106` SSH target with strict known-host-key checking for a read-only preflight; no physical serial sticker exists or is required. Compare current SD/eMMC CIDs, model, boot ID, kernel/DTB, live Sway/Pixman baseline, free space, battery/AC, service lock and rollback to the expected Nura inventory before writes. The owner has already confirmed routine recovery SD and physical recovery availability; inspect actual rollback hashes without repeatedly requesting that confirmation.
 6. **Stage then canary:** copy verified artifact to a fresh inactive unprivileged versioned directory; verify hashes and dynamic closure. Launch isolated browser/player without switching defaults, killing Sway, global pkill, reboot, kernel/Mesa replacement, or flash. Preserve the old binary/Pixman recovery.
 7. **Functional accept/reject:** confirm real browser pixel/navigation/touch and WebProcess survival; then player/video pixel checks, 414-frame/AAC/EOS where applicable, pause/seek/volume, no SIGILL and zero outstanding DMA-BUF/GBM lifetimes. Promote atomically only after explicit owner-reviewed GO. If any part fails, retain/restore prior release and record raw logs.
 
@@ -62,3 +62,48 @@ the reviewed NuraLoumi SHA/version/ARM ABI. This does not create the missing
 independent CI producer artifact, establish an official successful same-SHA
 release run, or qualify the tablet. This addendum describes subsequent code;
 the earlier 12-commit integration count above is historical, not current HEAD.
+
+## Owner release workflow clarification — 2026-11-21
+
+The owner explicitly corrected three unsuitable procedural assumptions:
+
+- Nura SL101 `.106` has **no physical serial sticker**. Its identity is
+  established by the trusted SSH host key, read-only current model/SD/eMMC
+  CIDs, boot/kernel/DTB and the established device inventory. Read-only SSH
+  is permitted before obtaining these live facts.
+- The recovery SD and physical recovery route are standing owner context;
+  do not keep requesting a new affirmation. Still verify a usable rollback
+  snapshot and preserve the Pixman/Sway baseline before changing anything.
+- A request to deploy a reviewed NuraLoumi release includes the ordinary
+  upstream push and official CI workflow for its exact revision. Those steps
+  require no separate repeated owner question, but release artifacts must
+  still pass exact-SHA/ABI/native-runtime checks before staging.
+
+These corrections remove **procedural** blockers only. They do not claim a
+working player, WPE browser, complete GPU producer closure, verified CI
+artifact, or tested hardware rendering where none has been demonstrated.
+
+## First successful read-only SSH preflight
+
+After the owner corrected the unavailable-sticker requirement, the known
+`.106` SSH host key was found in the host's trusted inventory and the
+connection succeeded without disabling host-key checks. The live device
+identified as **ASUS Eee Pad Slider SL101 / Nura edge**, with
+`7.0.1-postmarketos-grate-dmavde1`; the observed SD and eMMC CIDs match
+the historical Nura inventory. Current boot identity was collected privately;
+the root filesystem reports ~89.6 GiB and 7.66 million inodes free.
+
+The active Sway session and `nuraloumi-panel --live` remain running.
+`/opt/nuraloumi/current` resolves to the `fb47cfc` release's `bin/` path.
+Unlike the original CI archive, this *installed device release* has an
+additional `lib/nuraloumi/video/` directory with private Grate/Mesa and VDE
+GStreamer modules plus `libnuraloumi-video.so`. It has **no embedded producer
+`provenance.json`**; therefore do not claim this sidecar meets the new
+source-verified runtime contract. The required historical system libdrm
+directory and serialization shim were present. The native browser engine
+under the release's `libexec/nuraloumi/browser/` path was **absent**.
+
+This corrects the earlier assumption that missing modules in the downloaded
+CI archive necessarily imply missing player libraries *on the tablet*.
+The precise player runtime failure is not yet diagnosed; no playback,
+compositor, default symlink or device files were modified by this preflight.

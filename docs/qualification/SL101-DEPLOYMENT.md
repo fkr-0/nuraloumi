@@ -6,6 +6,16 @@ Current Nura evidence establishes a musl ARMv7 userspace and a working
 labwc/wlroots pixman recovery desktop. GPU-backed labwc is not a prerequisite
 for NuraLoumi and must not be enabled by this qualification procedure.
 
+For the owner's established Nura `.106` tablet, the trusted SSH target can be
+used for read-only inventory collection **without a physical serial sticker**;
+compare the current eMMC/SD CIDs, model, OS, boot ID, kernel/DTB and active
+session before any write. The owner confirms the recovery SD and physical
+recovery path are routinely available; do not demand repeated declarations.
+Verify usable snapshot hashes and the existing Pixman baseline during the
+preflight. Owner-directed deployment includes upstream publication and official
+CI for the exact reviewed source revision; independent artifact verification
+and a safe staged trial remain necessary.
+
 The tablet's known recovery model is:
 
 - keep SSH or a physical terminal available;

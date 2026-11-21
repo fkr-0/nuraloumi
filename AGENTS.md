@@ -4,12 +4,17 @@ NuraLoumi is a low-resource touch shell/menu suite for the ASUS Eee Pad Slider S
 
 ## Owner privacy and local-only development policy
 
-**Local-only by default.** Work directly in the local repository and governed
-worktrees using local tests, reviews, commits, and merges. Do not use GitHub,
-GitLab, public pull requests, remote CI, `git fetch`, `git push`, or any other
-network Git operation without the owner's explicit authorization for that
-particular external action. Authorization to implement, test, commit, merge,
-or deploy **locally** never implies permission to publish anything.
+**Local-first development; owner-directed release operations.** Work directly
+in the local repository and governed worktrees using local tests, reviews,
+commits and merges. An owner request to **release/deploy NuraLoumi to the
+known SL101 Nura tablet** includes the ordinary prerequisite of pushing the
+exact reviewed release commit to its configured upstream and triggering its
+official main-branch CI; do not ask for a second redundant approval for those
+release steps. Verify the exact ref, clean tree, destination and absence of
+private infrastructure in outgoing content before publishing. Outside that
+scoped release request, do not fetch, push, trigger remote CI, create public
+PRs or publish files without owner direction. Never interpret this as consent
+to publish secrets, unrelated repositories or experimental device images.
 
 **Private infrastructure stays private.** Treat hostnames, IP addresses,
 internal paths and URLs, network topology, account details, credentials, and
@@ -23,6 +28,14 @@ Preserve unrelated local edits, never reset or clean another agent's state,
 and never assume a successful host build authorizes replacing a live SL101
 session. Any device operation needs its own verified qualification and
 rollback plan.
+
+For owner-designated Nura `.106`, there is no physical serial sticker and no
+repeated sticker/photo request. Start with the approved target using the
+existing trusted SSH host key; collect SD/eMMC CIDs, model, boot/kernel/DTB,
+runtime and session identity read-only. The owner has already confirmed that
+physical recovery and a recovery SD are routinely available; do not re-ask
+that standing fact. Preserve rollback hashes and a known-good software
+renderer before changing the active release.
 
 ## Product boundary
 
