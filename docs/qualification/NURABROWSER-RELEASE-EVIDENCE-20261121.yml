@@ -2,72 +2,63 @@ schema: release-evidence/v1
 schema_version: 1
 release:
   unit: NuraLoumi regular ARMv7/musl browser bundle
-  candidate_version: 0.0.8-rc.1
+  candidate_version: 0.0.8-rc.2
   base_revision: 0.0.7-dev.1
-  target_revision: 41f01a30f97c30e6e0ebda67586a50b5979ad5c3
+  target_revision: pending-final-release-commit
   members:
     - nuraloumi-browser
     - nurabrowser-core
     - WPEWebProcess and sandbox helpers
     - runtime.json with complete ARMv7/musl file and SHA256 inventory
   revision_vector:
-    nuraloumi: 41f01a30f97c30e6e0ebda67586a50b5979ad5c3
-    wpewebkit: not-built
+    nuraloumi: pending-final-release-commit
+    wpewebkit: not-qualified
 metadata:
   version_sources:
     - Cargo.toml
-  changelog: unchanged
+  changelog: updated-for-rc2
   tag:
-    proposed: null
+    proposed: 0.0.8-rc.2
     created: false
     target: null
 preflight:
-  branch: main
+  branch: release/0.0.8-rc.2
   dirty_paths: []
   tool_versions:
     target: armv7-unknown-linux-musleabihf
     alpine_image: alpine:3.22 (linux/arm/v7)
     source_candidate: WPE WebKit 2.54.2
     source_sha256_upstream_expected: f3284e19e47fcb5ac8c63c2e1c113dbd65b2423eb8a545f5b345707829004f56
-    source_downloaded: false
+    source_downloaded: pending
   builder:
-    free_disk_gib_approx: 11
-    available_ram_gib_approx: 1.3
-    swap_used_gib_approx: 31
+    local_candidate: running
+    qualification: incomplete
     risk: >
-      Host at 99 percent disk use and almost no available RAM; do not begin
-      a WebKit source build without a capacity-backed alternative.
+      QEMU ARMv7 native compilation is resource-intensive. A candidate build
+      must not be treated as a verified runtime or installable browser.
 checks:
   - name: existing native browser launcher and IPC tests
     status: pass
-    source: previous local integration checkpoint NURALOUMI-BROWSER-ACTIVATION-20261121-R1
-  - name: Alpine 3.22 ARMv7 WPE WebKit 2.54+ binary package
-    status: absent
-    command: docker run --rm --platform linux/arm/v7 alpine:3.22 apk search
-    note: Repository indexes have libwpe and backend-fdo, not wpewebkit.
-  - name: WPE WebKit 2.54.2 upstream source
-    status: available-not-built
-    note: Official release tarball verified by HTTP HEAD and upstream SHA256 listing only.
+    source: release branch host tests
+  - name: Alpine 3.22 ARMv7 WPE WebKit runtime
+    status: candidate-build-in-progress
+    command: native ARMv7 producer workflow
+    note: Candidate-only output is not accepted by ordinary packaging.
   - name: qualified ARMv7/musl runtime manifest
-    status: fail
-    note: No real producer, ARM ELF closure or installed-layout WebProcess evidence.
+    status: blocked
+    note: No independently verified sandbox, process-spawn or dynamic loader closure.
   - name: official CI release package job
     status: not-run
-    note: >
-      CI deliberately requires NURALOUMI_BROWSER_RUNTIME_DIR and a pinned
-      producer revision; triggering it without a producer cannot pass.
-  - name: device runtime preflight
-    status: fail
-    note: >
-      Read-only SSH: SL101 running postmarketOS grate kernel has browser/player
-      under /usr/local/bin; regular /usr/libexec/nuraloumi/browser/runtime.json
-      is absent.
+    note: Requires a same-source qualified WPE runtime artifact and manifest digest.
+  - name: device runtime qualification
+    status: pending
+    note: No current release-candidate package has been staged or executed.
 artifacts: []
 warnings:
-  - Release NO-GO; synthetic manifest PASS strings are not target runtime proof.
-  - WPE upstream developer-mode WEBKIT_EXEC_PATH cannot replace compiled PKGLIBEXECDIR qualification.
-  - No source-matched ARMv7/musl ELF, package tar, APK, or on-device pixel evidence.
-  - Existing device binaries are not owned by the expected apk packages; snapshot before replacement.
+  - Release remains NO-GO until the real WPE runtime qualifies.
+  - Synthetic manifest PASS strings are not target runtime proof.
+  - The producer must prove compiled-in process paths, sandbox and all dynamic dependencies.
+  - Existing binaries must be snapshotted before any future replacement.
 side_effects:
   pushed: false
   published: false

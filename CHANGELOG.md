@@ -4,6 +4,36 @@ All notable user-visible changes to NuraLoumi are recorded here.
 
 ## [Unreleased]
 
+## [0.0.8-rc.2] - 2026-11-21
+
+### Added
+
+- Native WPE browser runtime packaging is now an explicit source-pinned
+  release input. The launcher accepts only a complete, same-revision runtime
+  manifest and uses bounded same-UID IPC to a supervised engine.
+- The musl release workflow can download a qualified WPE runtime from an
+  exact successful producer run, verify its manifest SHA and same-commit
+  provenance, and include it in the ordinary bundle.
+
+### Fixed
+
+- Player-private GStreamer plugin registry state is isolated per player
+  socket, while the private runtime uses its bundled libdrm when provenance
+  is present and retains the legacy lookup for older bundles.
+- Browser shell control can issue bounded remote commands to an existing
+  same-UID engine without requiring a separate Wayland connection.
+
+### Qualification boundary
+
+- This is a release candidate, not a stable release or deployment approval.
+  The current WPE producer still emits only an unqualified candidate; the
+  ordinary musl package remains blocked until sandbox, WebProcess, dynamic
+  dependency and ARMv7 ISA evidence are independently qualified.
+- The private Grate/GStreamer/libdrm runtime and full player dependency
+  closure still require source-locked release artifacts and per-device E2E.
+- No active SL101 installation, compositor, system library, boot image,
+  or signing trust root is changed by the CI packaging workflow.
+
 ## [0.0.8-rc.1] - 2026-11-17
 
 ### Fixed

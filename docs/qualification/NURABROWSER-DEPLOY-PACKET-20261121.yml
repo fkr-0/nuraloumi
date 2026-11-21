@@ -2,7 +2,7 @@ schema: infra-change-packet/v1
 schema_version: 1
 change:
   service: SL101 NuraLoumi browser plus player regression
-  host: Nura SL101 (private .106 target)
+  host: owner-designated SL101 target (device alias and network identity omitted)
   risk: migration
   requested_scope:
     - qualified ARMv7/musl regular browser bundle installation
@@ -18,16 +18,12 @@ ownership:
   blockers:
     - no qualified runtime.json or nurabrowser-core artifact
     - no official CI package artifact
-    - previous /usr/local/bin installations not under apk package ownership
+    - prior binaries are not yet owned by the expected package
 preflight:
   inventory:
-    - "kernel: 7.0.1-postmarketos-grate-dmavde1"
-    - "root filesystem: 116.7G total; 89.6G available"
-    - "browser: /usr/local/bin/nuraloumi-browser"
-    - "player: /usr/local/bin/nuraloumi-player"
-    - "regular browser runtime: missing"
-    - "browser sha256: cf0fdcb1df8259171ac16d13ff816cfb7ec37686ecd66f7b0194affa698754d2"
-    - "player sha256: 22c52fa135658bbe56cca65e5cb08473f37899fed204581fbf7fc4dd60e3299b"
+    - target identity and current system state are held in the private operator record
+    - installed browser/player binary hashes are held in the private operator record
+    - regular browser runtime: missing
   local_checks:
     - exact manifest plus source and producer SHA verification
     - ARMv7 no-NEON/no-hardware-division and musl ELF closure
@@ -52,7 +48,7 @@ rollback:
 apply:
   authorized: true
   command: null
-  limit: Nura SL101 only
+  limit: owner-designated SL101 only
   allowed_roles:
     - qualified release artifact deployment
 postflight:
@@ -64,8 +60,7 @@ postflight:
   idempotency_command: package version and installed SHA consistency
 results:
   commands:
-    - read-only SSH kernel, disk, installed binary and runtime checks
-    - read-only SHA256 of current browser and player
+    - read-only target identity, system and installed-binary integrity checks
   changed_resources: []
   warnings:
     - Apply was not attempted because mandatory release gates failed.

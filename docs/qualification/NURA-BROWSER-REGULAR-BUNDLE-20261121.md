@@ -80,7 +80,7 @@ requested
 absolute ELF interpreter is available. The older `,browse` script remains
 exclusive to the unrelated glibc/private-root lane. Neither desktop
 visibility, synthetic tests, nor the manifest proves that a page renders
-on `.106`.
+on the target SL101.
 
 ## Remaining gates before an artifact can pass
 
