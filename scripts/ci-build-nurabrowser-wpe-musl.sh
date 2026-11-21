@@ -38,6 +38,8 @@ export CXXFLAGS="$cpu_flags"
 
 # Production WebKit embeds an absolute process path. It MUST match the
 # regular APK install layout; WEBKIT_EXEC_PATH is developer-build-only.
+# This navigation-only WPE candidate disables media and GStreamer together;
+# the NuraPlayer GStreamer stack stays a separately qualified component.
 cmake -S /out/src/wpewebkit-2.54.2 -B /out/build/webkit -G Ninja \
   -DPORT=WPE -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr \
   -DCMAKE_INSTALL_LIBDIR=lib \
@@ -46,7 +48,7 @@ cmake -S /out/src/wpewebkit-2.54.2 -B /out/build/webkit -G Ninja \
   -DENABLE_WPE_PLATFORM_HEADLESS=ON -DENABLE_WPE_PLATFORM_DRM=OFF \
   -DENABLE_WPE_LEGACY_API=OFF -DENABLE_BUBBLEWRAP_SANDBOX=ON \
   -DENABLE_GPU_PROCESS=OFF -DUSE_GBM=OFF -DUSE_LIBDRM=OFF \
-  -DENABLE_VIDEO=OFF -DENABLE_WEB_AUDIO=OFF -DENABLE_WEBGL=OFF \
+  -DENABLE_VIDEO=OFF -DENABLE_WEB_AUDIO=OFF -DUSE_GSTREAMER=OFF -DENABLE_WEBGL=OFF \
   -DENABLE_MEDIA_STREAM=OFF -DENABLE_MEDIA_RECORDER=OFF \
   -DENABLE_INTROSPECTION=OFF -DENABLE_DOCUMENTATION=OFF \
   -DENABLE_SPELLCHECK=OFF -DENABLE_SPEECH_SYNTHESIS=OFF \
