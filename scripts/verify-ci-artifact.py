@@ -76,10 +76,11 @@ def checksum_file(root: Path, listing: Path) -> set[str]:
     return checked
 
 
-def verify_downloaded(folder: Path, lane: str, sha: str) -> dict:
+def verify_downloaded(folder: Path, lane: str, sha: str, expected_version: str | None = None) -> dict:
     require(lane in LANES and bool(SHA.fullmatch(sha)), "invalid lane or SHA")
     _, _, target = LANES[lane]
-    checksum_file(folder, folder / "SHA256SUMS.txt")
+    require(checksum_file(folder, folder / "SHA256SUMS.txt") == {"nuraloumi-ci.tar"},
+            "top-level checksums must pin the sole release tarball")
     manifest = (folder / "nuraloumi-ci/MANIFEST.txt").read_bytes()
     fields = {}
     for line in manifest.decode("utf-8").splitlines():
@@ -96,24 +97,60 @@ def verify_downloaded(folder: Path, lane: str, sha: str) -> dict:
         ("target", target),
     ):
         require(fields.get(key) == expected, f"manifest {key} mismatch")
-    require(len(fields.get("binaries", "").split(",")) >= 4, "incomplete binaries list")
+    binaries = fields.get("binaries", "").split(",")
+    require(len(binaries) >= 4 and len(set(binaries)) == len(binaries)
+            and all(re.fullmatch(r"nuraloumi-[a-z0-9-]+", name) for name in binaries)
+            and {"nuraloumi-menu", "nuraloumi-panel", "nuraloumi-probe",
+                 "nuraloumi-thumbnail-helper"}.issubset(binaries), "incomplete binaries list")
     require(
         f"git_sha={sha}" in (folder / "BUILD-INFO.txt").read_text().splitlines(),
         "BUILD-INFO Git SHA mismatch",
     )
-    require((folder / "ELF-AUDIT.txt").is_file(), "missing ELF audit")
+    audit = (folder / "ELF-AUDIT.txt").read_text()
+    passes = re.findall(r"^PASS (nuraloumi-[a-z0-9-]+) ELF32 ARM VFPv3-D16 hardfloat (musl|glibc) no-NEON-attributes$", audit, re.M)
+    expected_abi = "musl" if lane == "alpine" else "glibc"
+    require(len(passes) == len(binaries) and {name for name, abi in passes if abi == expected_abi} == set(binaries),
+            "ELF audit incomplete or ABI mismatch")
     # Ensure the separately uploaded manifest is the one *inside* the
     # SHA256-verified tarball, not an unrelated copy.
     with tarfile.open(folder / "nuraloumi-ci.tar") as archive:
-        members = [
-            m for m in archive.getmembers()
-            if m.name.lstrip("./") == "MANIFEST.txt" and m.isfile()
-        ]
-        require(len(members) == 1, "tarball manifest missing or duplicated")
-        embedded = archive.extractfile(members[0])
-        require(embedded is not None and embedded.read() == manifest, "tar manifest mismatch")
+        files = {}
+        for member in archive.getmembers():
+            name = member.name.removeprefix("./")
+            path = PurePosixPath(name)
+            require(not path.is_absolute() and ".." not in path.parts
+                    and not member.issym() and not member.islnk()
+                    and (member.isfile() or member.isdir()), "unsafe tar member")
+            if member.isfile():
+                require(name not in files, "duplicate tar member")
+                source = archive.extractfile(member)
+                require(source is not None, "tar member unreadable")
+                files[name] = source.read()
+        require(files.get("MANIFEST.txt") == manifest, "tar manifest mismatch")
+        lines = manifest.decode("utf-8").splitlines()
+        require(lines.count("files:") == 1, "manifest files section missing or repeated")
+        records = {}
+        for line in lines[lines.index("files:") + 1:]:
+            digest, separator, name = line.strip().partition("  ")
+            path = PurePosixPath(name)
+            require(separator and HEXDIGEST.fullmatch(digest) and name not in records
+                    and name and not path.is_absolute() and ".." not in path.parts,
+                    "invalid manifest file record")
+            records[name] = digest
+        require(set(files) == set(records) | {"MANIFEST.txt"}, "partial or extra tar bundle")
+        for name, digest in records.items():
+            require(hashlib.sha256(files[name]).hexdigest() == digest,
+                    f"tar manifest SHA256 mismatch: {name}")
+        for name in binaries:
+            data = files.get("bin/" + name, b"")
+            require(len(data) >= 52 and data[:5] == b"\x7fELF\x01"
+                    and data[5] == 1 and data[18:20] == b"\x28\x00"
+                    and int.from_bytes(data[36:40], "little") & 0x400,
+                    f"wrong ELF32 ARM hardfloat ABI or missing binary: {name}")
     version = fields.get("version", "")
     require(bool(re.fullmatch(r"[0-9]+(?:\.[0-9]+){2}(?:-(?:dev|rc)\.[0-9]+)?", version)), "bad version")
+    if expected_version is not None:
+        require(version == expected_version, "release version mismatch")
     if lane == "alpine":
         base = folder / "native-apk"
         pkg_version = version.replace("-dev.", "_pre").replace("-rc.", "_rc")
@@ -152,6 +189,8 @@ def main() -> int:
     parser.add_argument("--run-id", type=int, required=True)
     parser.add_argument("--sha", required=True, help="exact 40-digit reviewed Git SHA")
     parser.add_argument("--lane", choices=sorted(LANES), required=True)
+    parser.add_argument("--expected-version", required=True,
+                        help="exact release version reviewed alongside --sha")
     parser.add_argument("--out", type=Path, required=True, help="empty local download directory")
     args = parser.parse_args()
     require(args.run_id > 0 and bool(SHA.fullmatch(args.sha)), "invalid run ID or SHA")
@@ -177,7 +216,7 @@ def main() -> int:
          "--name", matches[0], "--dir", str(args.out)],
         check=True, timeout=600,
     )
-    result = verify_downloaded(args.out, args.lane, args.sha)
+    result = verify_downloaded(args.out, args.lane, args.sha, args.expected_version)
     print(f"VERIFIED_CI_ARTIFACT=PASS {result} DEVICE_QUALIFICATION=PENDING")
     return 0
 

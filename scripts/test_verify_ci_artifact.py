@@ -16,18 +16,29 @@ assert spec.loader is not None
 spec.loader.exec_module(verifier)
 
 SHA = "a" * 40
+BINS = ("nuraloumi-menu", "nuraloumi-panel", "nuraloumi-probe", "nuraloumi-thumbnail-helper")
+
+
+def elf_fixture() -> bytes:
+    data = bytearray(52)
+    data[:6] = b"\x7fELF\x01\x01"
+    data[18:20] = b"\x28\x00"
+    data[36:40] = (0x400).to_bytes(4, "little")
+    return bytes(data)
 
 
 def sample(folder: Path, target: str = "debian", version: str = "0.0.4-dev.2") -> None:
     triple = verifier.LANES[target][2]
+    records = {f"bin/{name}": elf_fixture() for name in BINS}
     manifest = (
         "schema=nuraloumi-package-manifest-v1\n"
         f"version={version}\n"
         f"target={triple}\n"
         f"git_commit={SHA}\n"
         "git_dirty=false\n"
-        "binaries=nuraloumi-menu,nuraloumi-panel,nuraloumi-probe,nuraloumi-thumbnail-helper\n"
+        f"binaries={','.join(BINS)}\n"
         "files:\n"
+        + "".join(f"  {hashlib.sha256(data).hexdigest()}  {name}\n" for name, data in records.items())
     ).encode()
     (folder / "nuraloumi-ci").mkdir(parents=True)
     (folder / "nuraloumi-ci/MANIFEST.txt").write_bytes(manifest)
@@ -35,10 +46,18 @@ def sample(folder: Path, target: str = "debian", version: str = "0.0.4-dev.2") -
         info = tarfile.TarInfo("./MANIFEST.txt")
         info.size = len(manifest)
         archive.addfile(info, io.BytesIO(manifest))
+        for name, data in records.items():
+            info = tarfile.TarInfo("./" + name)
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
     digest = hashlib.sha256((folder / "nuraloumi-ci.tar").read_bytes()).hexdigest()
     (folder / "SHA256SUMS.txt").write_text(f"{digest}  nuraloumi-ci.tar\n")
     (folder / "BUILD-INFO.txt").write_text(f"git_sha={SHA}\n")
-    (folder / "ELF-AUDIT.txt").write_text("PASS dummy test\n")
+    abi = "musl" if target == "alpine" else "glibc"
+    (folder / "ELF-AUDIT.txt").write_text("".join(
+        f"PASS {name} ELF32 ARM VFPv3-D16 hardfloat {abi} no-NEON-attributes\n"
+        for name in BINS
+    ))
     if target == "debian":
         dest = folder / "native-deb"
         dest.mkdir()
@@ -67,6 +86,50 @@ def sample(folder: Path, target: str = "debian", version: str = "0.0.4-dev.2") -
 
 
 class VerifierTests(unittest.TestCase):
+    def test_partial_bundle_and_missing_elf_audit_fail(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d)
+            sample(path)
+            (path / "ELF-AUDIT.txt").write_text("PASS dummy test\n")
+            with self.assertRaisesRegex(ValueError, "ELF audit incomplete"):
+                verifier.verify_downloaded(path, "debian", SHA)
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d)
+            sample(path)
+            tar = path / "nuraloumi-ci.tar"
+            manifest = (path / "nuraloumi-ci/MANIFEST.txt").read_bytes()
+            with tarfile.open(tar, "w") as archive:
+                info = tarfile.TarInfo("./MANIFEST.txt")
+                info.size = len(manifest)
+                archive.addfile(info, io.BytesIO(manifest))
+            (path / "SHA256SUMS.txt").write_text(
+                f"{hashlib.sha256(tar.read_bytes()).hexdigest()}  nuraloumi-ci.tar\n"
+            )
+            with self.assertRaisesRegex(ValueError, "partial or extra tar bundle"):
+                verifier.verify_downloaded(path, "debian", SHA)
+
+    def test_wrong_elf_abi_fails_with_rehashed_bundle(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d)
+            sample(path)
+            tar = path / "nuraloumi-ci.tar"
+            manifest = (path / "nuraloumi-ci/MANIFEST.txt").read_bytes()
+            with tarfile.open(tar, "w") as archive:
+                info = tarfile.TarInfo("./MANIFEST.txt")
+                info.size = len(manifest)
+                archive.addfile(info, io.BytesIO(manifest))
+                for name in BINS:
+                    bad = bytearray(elf_fixture())
+                    bad[18:20] = b"\x3e\x00"
+                    data = bytes(bad)
+                    info = tarfile.TarInfo("./bin/" + name)
+                    info.size = len(data)
+                    archive.addfile(info, io.BytesIO(data))
+            (path / "SHA256SUMS.txt").write_text(
+                f"{hashlib.sha256(tar.read_bytes()).hexdigest()}  nuraloumi-ci.tar\n"
+            )
+            with self.assertRaisesRegex(ValueError, "tar manifest SHA256 mismatch"):
+                verifier.verify_downloaded(path, "debian", SHA)
     def test_valid_debian_and_alpine_fixtures(self):
         for lane in ("debian", "alpine"):
             with self.subTest(lane=lane), tempfile.TemporaryDirectory() as d:
@@ -81,8 +144,10 @@ class VerifierTests(unittest.TestCase):
             with self.subTest(lane=lane), tempfile.TemporaryDirectory() as d:
                 path = Path(d)
                 sample(path, lane, version="0.0.8-rc.1")
-                result = verifier.verify_downloaded(path, lane, SHA)
+                result = verifier.verify_downloaded(path, lane, SHA, "0.0.8-rc.1")
                 self.assertEqual(result["version"], "0.0.8-rc.1")
+                with self.assertRaisesRegex(ValueError, "release version mismatch"):
+                    verifier.verify_downloaded(path, lane, SHA, "0.0.8")
 
     def test_tampered_native_package_or_manifest_fails_closed(self):
         with tempfile.TemporaryDirectory() as d:

@@ -69,7 +69,7 @@ after device qualification should an operator explicitly authorize system
 package installation.
 
 Use `python3 scripts/verify-ci-artifact.py --lane alpine|debian --run-id N
---sha FULL_SHA --out EMPTY_DIRECTORY` to download and validate the exact
+--sha FULL_SHA --expected-version REVIEWED_VERSION --out EMPTY_DIRECTORY` to download and validate the exact
 successful main-branch CI run **without deploying**. The script refuses
 wrong-ABI, mismatched Git provenance or package/tar checksums.
 
