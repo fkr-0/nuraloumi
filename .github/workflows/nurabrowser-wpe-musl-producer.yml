@@ -15,8 +15,23 @@ permissions:
   contents: read
 
 jobs:
+  candidate-source:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify source pin and static runtime contract
+        run: |
+          set -euo pipefail
+          sh -n scripts/ci-build-nurabrowser-wpe-musl.sh
+          python3 -m unittest scripts/test_verify_nurabrowser_runtime.py -v
+          sh scripts/ci-fetch-nurabrowser-wpe-source.sh target/wpe-source
+
   native-armv7-musl-wpe-candidate:
-    # This is a build candidate, not a regular APK, qualification, or deploy.
+    # Run the experimental QEMU build only when explicitly requested.
+    if: github.event_name == 'workflow_dispatch'
+    needs: candidate-source
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     steps:
@@ -26,12 +41,8 @@ jobs:
       - uses: docker/setup-qemu-action@v3
         with:
           platforms: arm
-      - name: Verify source pin and static runtime contract
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 -m unittest scripts/test_verify_nurabrowser_runtime.py -v
-          sh scripts/ci-fetch-nurabrowser-wpe-source.sh target/wpe-source
+      - name: Fetch pinned WPE source
+        run: sh scripts/ci-fetch-nurabrowser-wpe-source.sh target/wpe-source
       - name: Build native Alpine 3.22 ARMv7 candidate in isolated container
         shell: bash
         run: |

@@ -25,7 +25,7 @@ class PackageIntegrityTests(unittest.TestCase):
         )
         names = {
             "nuraloumi-shell": ["nuraloumi-menu", "nuraloumi-panel", "nuraloumi-feeds",
-                                "nuraloumi-notificationd", "nuraloumi-browser"],
+                                "nuraloumi-notificationd"],
             "nuraloumi-providers": ["nuraloumi-probe"],
             "nuraloumi-wayland": ["nuraloumi-thumbnail-helper"],
         }
@@ -73,7 +73,6 @@ class PackageIntegrityTests(unittest.TestCase):
                      "share/nuraloumi/qualification/README.md"]:
             self.payloads[name] = b"fixture"
         for desktop, binary in {
-            "nuraloumi-browser.desktop": "nuraloumi-browser",
             "nuraloumi-player.desktop": "nuraloumi-feeds",
             "nuraloumi-files.desktop": "nuraloumi-feeds",
             "nuraloumi-notifications.desktop": "nuraloumi-feeds",
@@ -100,8 +99,7 @@ class PackageIntegrityTests(unittest.TestCase):
             "schema=nuraloumi-package-manifest-v1", "version=0.0.3",
             "target=x86_64-unknown-linux-gnu", "git_commit=test",
             "git_dirty=true", "build_command=fixture",
-            "binaries=" + ",".join(self.names),
-            "browser_runtime=not-targeted", "files:",
+            "binaries=" + ",".join(self.names), "files:",
         ]
         lines += [
             "  " + hashlib.sha256(value).hexdigest() + "  " + name
@@ -119,12 +117,6 @@ class PackageIntegrityTests(unittest.TestCase):
         check = self.verify()
         self.assertEqual(check.returncode, 0, check.stderr)
         self.assertIn(f"binaries={len(self.names)}", check.stdout)
-
-    def test_host_bundle_cannot_claim_unqualified_browser_runtime(self):
-        manifest = self.stage / "MANIFEST.txt"
-        manifest.write_text(manifest.read_text().replace(
-            "browser_runtime=not-targeted", "browser_runtime=required"))
-        self.assertIn("invalid host browser runtime field", self.verify().stderr)
 
     def test_tampered_hash_rejected(self):
         (self.stage / "bin" / self.names[0]).write_bytes(b"\x7fELFtampered")

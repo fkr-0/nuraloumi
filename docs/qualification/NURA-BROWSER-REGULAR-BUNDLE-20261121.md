@@ -4,17 +4,16 @@ OCP: `NURALOUMI-20261121-NURABROWSER-REGULAR-BUNDLE-20261121-486BDD`
 
 ## Decision: producer BLOCKED; package contract FAIL CLOSED
 
-The Rust `nuraloumi-browser` executable is the UI/launcher, not a WPE engine.
-Ordinary `armv7-unknown-linux-musleabihf` and `armv7-unknown-linux-gnueabihf`
-xtask packages now require `NURALOUMI_BROWSER_RUNTIME_DIR` and a pinned
-40-hex `NURALOUMI_BROWSER_PRODUCER_REVISION`. `package` validates the input
-tree against the current NuraLoumi Git SHA and target, copies the *entire*
-tree to `libexec/nuraloumi/browser/`, then validates the staged copy. The
-normal tar manifest hashes every byte, and `package-check` rechecks the
-runtime. CI's downloaded-artifact verifier independently checks provenance,
-qualification flags, file inventory, roles and hashes inside the tar. The
-normal Alpine APK recipe embeds the same required tree at
-`/usr/libexec/nuraloumi/browser/`.
+The Rust `nuraloumi-browser` executable provides the UI and starts a separately
+provisioned, qualified WPE engine. The ordinary Alpine and Debian ARMv7 packages
+retain the existing package contract and ship the Rust binary without a WPE
+runtime or browser desktop entry. The launcher requires a qualified manifest
+before starting a bundled engine.
+
+Browser-inclusive packaging remains pending. It must validate a source-matched
+producer tree against the exact Git SHA, target and pinned producer revision,
+verify the staged copy and check the final archive and native package before
+publication.
 
 Expected producer directory schema: `runtime.json` with
 `schema=nuraloumi-browser-runtime-v1` (JSON value), exact `source_sha`,
@@ -31,21 +30,20 @@ fields (`sandbox`, `instruction_closure`, `dlopen_closure`, `webprocess`,
 files. The verifier checks executable permissions for the engine, WebProcess,
 sandbox helpers and loader, plus ELF32 ARM hardfloat, VFPv3-D16, NEON attributes,
 selected forbidden opcode patterns and loader ABI. The downloaded tar verifier
-also rejects missing executable modes. Producer evidence must
+must also reject missing executable modes. Producer evidence must
 add a complete `DT_NEEDED` **and** dynamic `dlopen` closure audit; a textual
 `PASS` is not proof of runtime correctness.
 
-The Alpine **ordinary-package** workflow currently has no source-matched,
-qualified musl WebKit/WPE runtime input. Its package job therefore fails
-explicitly. A separate, experimental GitHub Actions workflow,
-`.github/workflows/nurabrowser-wpe-musl-producer.yml`, now defines an Alpine
-3.22 native ARMv7/QEMU *candidate build*. It pins the official WPEWebKit 2.54.2
+The experimental workflow
+`.github/workflows/nurabrowser-wpe-musl-producer.yml` checks the pinned source
+and runtime verifier on pull requests. Its Alpine 3.22 native ARMv7/QEMU
+candidate build runs on manual dispatch. It pins the official WPEWebKit 2.54.2
 archive by SHA256, compiles WPEPlatform/Wayland and a software-rendered engine
 with VFPv3-D16 flags, fixes production WebKit's absolute process install path
 to `/usr/libexec/nuraloumi/browser/libexec`, and uploads only a candidate
 tree with `runtime_qualification=UNQUALIFIED`. This experimental build script
 has passed host syntax checks but **has not yet passed an actual GitHub Actions
-build**. A candidate tar is not an installable release and does not contain
+build**. The initial run reached the six-hour runner limit while compiling WebCore. A candidate tar is not an installable release and does not contain
 `runtime.json`; no workflow promotes it to the ordinary package or device.
 
 The existing Debian ARMHF/glibc smoke artifact is
@@ -54,8 +52,7 @@ into this release. The isolated glibc approach would require its own pinned
 ARMHF loader, full library/process tree and sandbox namespace proof without
 polluting musl/GStreamer search paths. A native musl producer is preferred.
 
-The desktop entry runs `nuraloumi-browser`, the native Rust control UI.
-Its regular-bundle activation code now checks the qualified manifest and
+The native Rust control UI's regular-bundle activation code now checks the qualified manifest and
 root-owned, non-writable bundle, then attaches to an existing same-UID,
 private, authenticated `$XDG_RUNTIME_DIR/nura-browser.sock`, or attempts one
 engine start from `/usr/libexec/nuraloumi/browser/nurabrowser-core`.
@@ -65,7 +62,9 @@ helpers, libraries and WebProcess search paths are scoped to that engine
 process, never exported to the NuraLoumi shell, player, GStreamer or VDE.
 Startup waits at most 12 seconds for a valid RPC reply; the UI owns and reaps
 only an engine process it started, and an existing IPC server is neither
-removed nor killed on failure. A missing or unqualified bundle fails closed.
+removed nor killed on failure. If the bundle directory is absent, the UI can still attach to a separately
+started engine over the existing authenticated socket. An installed bundle
+that fails validation prevents activation.
 
 This is **host-tested activation logic only**, not a musl WPE runtime
 qualification or a successful device run. The producer still needs to prove

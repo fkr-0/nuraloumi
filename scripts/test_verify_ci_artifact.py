@@ -2,7 +2,6 @@
 import hashlib
 import importlib.util
 import io
-import json
 from pathlib import Path
 import tarfile
 import tempfile
@@ -31,26 +30,6 @@ def elf_fixture() -> bytes:
 def sample(folder: Path, target: str = "debian", version: str = "0.0.4-dev.2") -> None:
     triple = verifier.LANES[target][2]
     records = {f"bin/{name}": elf_fixture() for name in BINS}
-    browser_payload = {
-        "nurabrowser-core": "engine", "libexec/WPEWebProcess": "webprocess",
-        "bin/bwrap": "bwrap", "bin/xdg-dbus-proxy": "xdg-dbus-proxy",
-        "lib/ld-armhf.so": "loader", "lib/libWPE.so": "library",
-        "lib/modules/webkit.so": "module",
-    }
-    prefix = "libexec/nuraloumi/browser/"
-    browser_records = []
-    for name, role in browser_payload.items():
-        content = elf_fixture()
-        records[prefix + name] = content
-        browser_records.append({"path": name, "role": role,
-                                "sha256": hashlib.sha256(content).hexdigest()})
-    browser = {"schema": "nuraloumi-browser-runtime-v1", "source_sha": SHA,
-               "producer_revision": "b" * 40, "target": triple,
-               "abi": "musl" if target == "alpine" else "glibc",
-               "qualification": {key: "PASS" for key in
-                                 ("sandbox", "instruction_closure", "dlopen_closure", "webprocess", "review")},
-               "files": browser_records}
-    records[prefix + "runtime.json"] = json.dumps(browser).encode()
     manifest = (
         "schema=nuraloumi-package-manifest-v1\n"
         f"version={version}\n"
@@ -58,7 +37,6 @@ def sample(folder: Path, target: str = "debian", version: str = "0.0.4-dev.2") -
         f"git_commit={SHA}\n"
         "git_dirty=false\n"
         f"binaries={','.join(BINS)}\n"
-        "browser_runtime=required\n"
         "files:\n"
         + "".join(f"  {hashlib.sha256(data).hexdigest()}  {name}\n" for name, data in records.items())
     ).encode()
@@ -71,10 +49,6 @@ def sample(folder: Path, target: str = "debian", version: str = "0.0.4-dev.2") -
         for name, data in records.items():
             info = tarfile.TarInfo("./" + name)
             info.size = len(data)
-            if name.startswith(prefix):
-                role = browser_payload.get(name.removeprefix(prefix))
-                if role in {"engine", "webprocess", "bwrap", "xdg-dbus-proxy", "loader"}:
-                    info.mode = 0o755
             archive.addfile(info, io.BytesIO(data))
     digest = hashlib.sha256((folder / "nuraloumi-ci.tar").read_bytes()).hexdigest()
     (folder / "SHA256SUMS.txt").write_text(f"{digest}  nuraloumi-ci.tar\n")
@@ -140,10 +114,6 @@ class VerifierTests(unittest.TestCase):
             sample(path)
             tar = path / "nuraloumi-ci.tar"
             manifest = (path / "nuraloumi-ci/MANIFEST.txt").read_bytes()
-            with tarfile.open(tar) as original:
-                browser_files = {member.name: original.extractfile(member).read()
-                                 for member in original.getmembers()
-                                 if member.isfile() and member.name.startswith("./libexec/nuraloumi/browser/")}
             with tarfile.open(tar, "w") as archive:
                 info = tarfile.TarInfo("./MANIFEST.txt")
                 info.size = len(manifest)
@@ -155,34 +125,11 @@ class VerifierTests(unittest.TestCase):
                     info = tarfile.TarInfo("./bin/" + name)
                     info.size = len(data)
                     archive.addfile(info, io.BytesIO(data))
-                for name, data in browser_files.items():
-                    info = tarfile.TarInfo(name)
-                    info.size = len(data)
-                    archive.addfile(info, io.BytesIO(data))
             (path / "SHA256SUMS.txt").write_text(
                 f"{hashlib.sha256(tar.read_bytes()).hexdigest()}  nuraloumi-ci.tar\n"
             )
             with self.assertRaisesRegex(ValueError, "tar manifest SHA256 mismatch"):
                 verifier.verify_downloaded(path, "debian", SHA)
-    def test_non_executable_browser_engine_tar_fails(self):
-        with tempfile.TemporaryDirectory() as d:
-            path = Path(d)
-            sample(path)
-            tar = path / "nuraloumi-ci.tar"
-            with tarfile.open(tar) as archive:
-                members = [(member, archive.extractfile(member).read())
-                           for member in archive.getmembers() if member.isfile()]
-            with tarfile.open(tar, "w") as archive:
-                for member, data in members:
-                    if member.name == "./libexec/nuraloumi/browser/nurabrowser-core":
-                        member.mode = 0o644
-                    archive.addfile(member, io.BytesIO(data))
-            (path / "SHA256SUMS.txt").write_text(
-                f"{hashlib.sha256(tar.read_bytes()).hexdigest()}  nuraloumi-ci.tar\n"
-            )
-            with self.assertRaisesRegex(ValueError, "not executable in tar"):
-                verifier.verify_downloaded(path, "debian", SHA)
-
     def test_valid_debian_and_alpine_fixtures(self):
         for lane in ("debian", "alpine"):
             with self.subTest(lane=lane), tempfile.TemporaryDirectory() as d:

@@ -26,14 +26,6 @@ package() {
         count=$((count+1))
     done
     [ "$count" -ge 4 ] || return 1
-    # The ordinary APK must contain the exact same first-class browser
-    # runtime already qualified and hashed by the xtask stage verifier.
-    [ -s "$builddir/libexec/nuraloumi/browser/runtime.json" ] || return 1
-    [ -x "$builddir/libexec/nuraloumi/browser/nurabrowser-core" ] || return 1
-    install -d "$pkgdir/usr/libexec/nuraloumi/browser"
-    cp -R "$builddir/libexec/nuraloumi/browser/." "$pkgdir/usr/libexec/nuraloumi/browser/" || return 1
-    cmp "$builddir/libexec/nuraloumi/browser/runtime.json" \
-        "$pkgdir/usr/libexec/nuraloumi/browser/runtime.json" || return 1
     for desktop in "$builddir"/share/applications/*.desktop; do
         install -m644 "$desktop" "$pkgdir/usr/share/applications/${desktop##*/}" || return 1
     done

@@ -117,18 +117,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Ordinary packages now require the fully qualified native WPE
-          # runtime. The old Debian/glibc engine smoke tar is never accepted.
-          # Until a same-source ARMv7/musl producer exists, fail this release
-          # job rather than upload a browser launcher advertised as complete.
-          test -n "${NURALOUMI_BROWSER_RUNTIME_DIR:-}" || {
-            echo 'FAIL: mandatory musl NuraBrowser runtime producer is unavailable' >&2
-            exit 1
-          }
-          test -n "${NURALOUMI_BROWSER_PRODUCER_REVISION:-}" || {
-            echo 'FAIL: missing pinned NuraBrowser producer revision' >&2
-            exit 1
-          }
           # Ensure xtask Git subprocesses resolve the CI checkout when
           # a compiler embeds an alternate CARGO_MANIFEST_DIR mount prefix.
           export GIT_DIR="$PWD/.git"

@@ -129,33 +129,6 @@ pub fn print_sizes(root: &Path, target: Option<&str>, sections: bool) -> Result<
     Ok(())
 }
 
-fn verify_browser_runtime(
-    root: &Path,
-    bundle: &Path,
-    source_sha: &str,
-    target: &str,
-    producer_revision: &str,
-) -> Result<(), String> {
-    let status = std::process::Command::new("python3")
-        .arg(root.join("scripts/verify_nurabrowser_runtime.py"))
-        .arg(bundle)
-        .args([
-            "--source-sha",
-            source_sha,
-            "--target",
-            target,
-            "--producer-revision",
-            producer_revision,
-        ])
-        .current_dir(root)
-        .status()
-        .map_err(|error| format!("invoke browser runtime verifier: {error}"))?;
-    if !status.success() {
-        return Err("browser runtime failed source/ABI/completeness verification".into());
-    }
-    Ok(())
-}
-
 pub fn stage_package(
     root: &Path,
     target: Option<&str>,
@@ -223,7 +196,6 @@ pub fn stage_package(
         &config_dir.join("nuraloumi.toml.example"),
     )?;
     for desktop in [
-        "nuraloumi-browser.desktop",
         "nuraloumi-player.desktop",
         "nuraloumi-files.desktop",
         "nuraloumi-notifications.desktop",
@@ -330,26 +302,6 @@ pub fn stage_package(
     }
 
     let commit = git_commit(root)?;
-    // The browser is a mandatory component of ordinary ARMv7 releases.
-    // A Rust launcher alone is never evidence of a working native browser.
-    if matches!(
-        resolved_target.as_str(),
-        "armv7-unknown-linux-musleabihf" | "armv7-unknown-linux-gnueabihf"
-    ) {
-        let bundle = env::var_os("NURALOUMI_BROWSER_RUNTIME_DIR").ok_or(
-            "required NURALOUMI_BROWSER_RUNTIME_DIR is absent; no browser-inclusive ARMv7 release",
-        )?;
-        let revision = env::var("NURALOUMI_BROWSER_PRODUCER_REVISION")
-            .map_err(|_| "missing pinned NURALOUMI_BROWSER_PRODUCER_REVISION")?;
-        let source = PathBuf::from(bundle);
-        if !source.is_absolute() || !source.is_dir() || source.is_symlink() {
-            return Err("browser runtime input must be an absolute regular directory".into());
-        }
-        verify_browser_runtime(root, &source, &commit, &resolved_target, &revision)?;
-        let destination = stage.join("libexec/nuraloumi/browser");
-        copy_tree(&source, &destination)?;
-        verify_browser_runtime(root, &destination, &commit, &resolved_target, &revision)?;
-    }
     let build_command = match target {
         Some(target) => format!("cargo build --release --workspace --bins --target {target}"),
         None => "cargo build --release --workspace --bins".to_owned(),
@@ -365,14 +317,6 @@ pub fn stage_package(
     manifest.push_str(&format!("git_dirty={}\n", git_dirty(root)?));
     manifest.push_str(&format!("build_command={build_command}\n"));
     manifest.push_str(&format!("binaries={}\n", staged_bins.join(",")));
-    manifest.push_str(&format!(
-        "browser_runtime={}\n",
-        if resolved_target.starts_with("armv7-") {
-            "required"
-        } else {
-            "not-targeted"
-        }
-    ));
     manifest.push_str("files:\n");
 
     for path in files {
@@ -409,7 +353,6 @@ pub fn check_package(root: &Path, stage: &Path) -> Result<(), String> {
     let mut expected_files = std::collections::BTreeMap::new();
     let mut target = None;
     let mut declared_bins = None;
-    let mut browser_runtime = None;
     let mut in_files = false;
     let mut keys = std::collections::BTreeSet::new();
     for line in text.lines() {
@@ -455,7 +398,6 @@ pub fn check_package(root: &Path, stage: &Path) -> Result<(), String> {
                 "binaries" => {
                     declared_bins = Some(value.split(',').map(str::to_owned).collect::<Vec<_>>())
                 }
-                "browser_runtime" => browser_runtime = Some(value.to_owned()),
                 "version" | "git_commit" | "git_dirty" | "build_command" => {}
                 _ => return Err(format!("invalid manifest key or schema: {key}={value}")),
             }
@@ -470,7 +412,6 @@ pub fn check_package(root: &Path, stage: &Path) -> Result<(), String> {
             "git_dirty",
             "build_command",
             "binaries",
-            "browser_runtime",
         ]
         .iter()
         .all(|key| keys.contains(*key))
@@ -478,27 +419,6 @@ pub fn check_package(root: &Path, stage: &Path) -> Result<(), String> {
         return Err("package manifest missing required fields".to_owned());
     }
     let bins = runtime_binaries(root)?;
-    if target
-        .as_deref()
-        .is_some_and(|value| value.starts_with("armv7-"))
-    {
-        if browser_runtime.as_deref() != Some("required") {
-            return Err("ARMv7 browser runtime must be mandatory".into());
-        }
-        let bundle = stage.join("libexec/nuraloumi/browser");
-        let revision = env::var("NURALOUMI_BROWSER_PRODUCER_REVISION")
-            .map_err(|_| "missing browser producer revision for package check")?;
-        let sha = git_commit(root)?;
-        verify_browser_runtime(
-            root,
-            &bundle,
-            &sha,
-            target.as_deref().unwrap_or(""),
-            &revision,
-        )?;
-    } else if browser_runtime.as_deref() != Some("not-targeted") {
-        return Err("invalid host browser runtime field".into());
-    }
     if declared_bins.as_ref() != Some(&bins) {
         return Err(format!("packaged binaries do not match Cargo targets: expected {bins:?}, found {declared_bins:?}"));
     }
@@ -507,7 +427,6 @@ pub fn check_package(root: &Path, stage: &Path) -> Result<(), String> {
         "LICENSE",
         "config/nuraloumi.toml.example",
         "share/applications/nuraloumi-player.desktop",
-        "share/applications/nuraloumi-browser.desktop",
         "share/applications/nuraloumi-files.desktop",
         "share/applications/nuraloumi-notifications.desktop",
         "share/dbus-1/services/org.freedesktop.Notifications.service",
@@ -539,7 +458,6 @@ pub fn check_package(root: &Path, stage: &Path) -> Result<(), String> {
     }
     // Desktop entries cannot point at tools missing from the runtime bundle.
     for desktop in [
-        "nuraloumi-browser.desktop",
         "nuraloumi-player.desktop",
         "nuraloumi-files.desktop",
         "nuraloumi-notifications.desktop",

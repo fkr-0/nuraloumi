@@ -363,14 +363,21 @@ pub fn connect_or_start_default() -> Result<(NativeBrowser, EngineSession), Stri
     let runtime = env::var_os("XDG_RUNTIME_DIR")
         .filter(|value| !value.is_empty())
         .ok_or("XDG_RUNTIME_DIR required for native NuraBrowser")?;
-    let display = env::var("WAYLAND_DISPLAY")
-        .map_err(|_| "WAYLAND_DISPLAY required for native NuraBrowser")?;
-    connect_or_start(
-        Path::new(REGULAR_BUNDLE),
-        Path::new(&runtime),
-        &display,
-        START_DEADLINE,
-    )
+    let runtime = Path::new(&runtime);
+    let root = Path::new(REGULAR_BUNDLE);
+    match fs::symlink_metadata(root) {
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            // The base package supports a separately started, private engine.
+            let client = NativeBrowser::at_runtime_dir(runtime)?;
+            Ok((client, EngineSession { owned: None }))
+        }
+        Err(error) => Err(format!("Cannot inspect browser runtime: {error}")),
+        Ok(_) => {
+            let display = env::var("WAYLAND_DISPLAY")
+                .map_err(|_| "WAYLAND_DISPLAY required for native NuraBrowser")?;
+            connect_or_start(root, runtime, &display, START_DEADLINE)
+        }
+    }
 }
 
 #[cfg(test)]
