@@ -45,6 +45,7 @@ OPTIONS:
     --probe-toplevels          Print compositor toplevel capabilities/windows as JSON and exit
     --probe-workspaces         Print compositor workspace capabilities/workspaces as JSON and exit
     --family <name>            launcher|control-center|wifi|bluetooth|display|audio|power|tasks|windows|system
+    --overview-mode <mode>     Initial launcher overview: all|apps|windows|desktops|tasks
     --fixture <path>           Load a JSON/TOML MenuModel instead of a built-in family
     --providers <path>         Load deterministic JSON/TOML provider snapshot
     --config <path>            Load JSON/TOML shell geometry/theme config
@@ -71,6 +72,7 @@ struct Args {
     probe_toplevels: bool,
     probe_workspaces: bool,
     family: Option<String>,
+    overview_mode: Option<String>,
     fixture: Option<PathBuf>,
     providers: Option<PathBuf>,
     config: Option<PathBuf>,
@@ -247,6 +249,12 @@ fn run() -> Result<(), String> {
         build_family(family, &snapshot)
     };
     let mut shell = ShellState::new(menu, config.reduced_motion)?;
+    if let Some(mode) = args.overview_mode.as_deref() {
+        if family != MenuFamily::Launcher || args.fixture.is_some() {
+            return Err("--overview-mode requires --family launcher without --fixture".into());
+        }
+        shell.set_overview_mode(OverviewMode::parse(mode)?, &snapshot)?;
+    }
     if family == MenuFamily::Appearance && args.fixture.is_none() {
         shell.refresh_menu(nuraloumi_shell::build_appearance_menu(
             config.active_palette(),
@@ -1686,6 +1694,9 @@ fn parse_args() -> Result<Args, String> {
             "--probe-toplevels" => parsed.probe_toplevels = true,
             "--probe-workspaces" => parsed.probe_workspaces = true,
             "--family" => parsed.family = Some(next_value(&mut args, "--family")?),
+            "--overview-mode" => {
+                parsed.overview_mode = Some(next_value(&mut args, "--overview-mode")?)
+            }
             "--fixture" => parsed.fixture = Some(next_value(&mut args, "--fixture")?.into()),
             "--providers" => parsed.providers = Some(next_value(&mut args, "--providers")?.into()),
             "--config" => parsed.config = Some(next_value(&mut args, "--config")?.into()),

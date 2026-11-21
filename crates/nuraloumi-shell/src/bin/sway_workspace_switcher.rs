@@ -34,7 +34,7 @@ use std::os::raw::{c_int, c_short, c_ulong};
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixDatagram;
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::process::{Command, ExitCode, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const IPC_LIMITS: CommandLimits = CommandLimits::new(Duration::from_secs(2), 128 * 1024);
@@ -75,19 +75,23 @@ struct Card {
 enum Request {
     Select(u8),
     Release,
+    SuperRelease,
     Fixture,
     Help,
 }
 
 fn parse_request(args: impl IntoIterator<Item = String>) -> Result<Request, String> {
     let mut args = args.into_iter();
-    let arg = args.next().ok_or("expected a digit 1..9 or --release")?;
+    let arg = args
+        .next()
+        .ok_or("expected a digit 1..9, --release or --super-release")?;
     if args.next().is_some() {
         return Err("expected exactly one argument".into());
     }
     match arg.as_str() {
         "-h" | "--help" => Ok(Request::Help),
         "--release" => Ok(Request::Release),
+        "--super-release" => Ok(Request::SuperRelease),
         "--fixture" => Ok(Request::Fixture),
         _ => arg
             .parse::<u8>()
@@ -255,6 +259,44 @@ fn released_since(dir: &Path, started: u128) -> bool {
     read.is_ok()
         && bytes.len() == 16
         && u128::from_le_bytes(bytes.as_slice().try_into().unwrap()) >= started
+}
+
+// The compositor may start the release command after the picker has already
+// removed its IPC socket. A separate one-shot marker remembers that this Super
+// press was used for a workspace chord, even across overlay startup/teardown.
+fn mark_workspace_chord(dir: &Path) -> Result<(), String> {
+    match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dir.join("workspace-chord.pending"))
+    {
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(format!("marking workspace chord: {error}")),
+    }
+}
+
+fn take_workspace_chord(dir: &Path) -> Result<bool, String> {
+    match fs::remove_file(dir.join("workspace-chord.pending")) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!("clearing workspace chord: {error}")),
+    }
+}
+
+fn open_apps_on_release(chord_was_used: bool, picker_was_running: bool) -> bool {
+    !chord_was_used && !picker_was_running
+}
+
+fn launch_app_overview() -> Result<(), String> {
+    Command::new("nuraloumi-menu")
+        .args(["--live", "--family", "launcher", "--overview-mode", "apps"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("starting App Overview: {error}"))
 }
 
 fn send_request(path: &Path, value: u8) -> std::io::Result<()> {
@@ -757,7 +799,7 @@ fn live(
 fn entry(request: Request) -> Result<(), String> {
     match request {
         Request::Help => {
-            println!("nuraloumi-sway-workspace-switcher [1-9 | --release | --fixture]\nUse Sway bindsym $mod+1..9 to invoke selection and bindsym --release Super_L/Super_R to close.");
+            println!("nuraloumi-sway-workspace-switcher [1-9 | --release | --super-release | --fixture]\nUse Sway bindsym $mod+1..9 to select and --super-release on Super_L/Super_R release to close the picker or open App Overview.");
             return Ok(());
         }
         Request::Fixture => {
@@ -776,14 +818,26 @@ fn entry(request: Request) -> Result<(), String> {
     let started = timestamp_ns()?;
     let dir = session_root()?;
     let request_socket = dir.join("session.sock");
-    if request == Request::Release {
-        // Also persist the release when the original exec has not yet
-        // created its socket (or is still busy capturing a preview).
+    if matches!(request, Request::Release | Request::SuperRelease) {
+        // Persist even if the picker is still capturing its first screenshot.
         record_release(&dir)?;
-        let _ = send_request(&request_socket, 0);
+        let picker_was_running = send_request(&request_socket, 0).is_ok();
+        if !picker_was_running && request == Request::SuperRelease {
+            // Sway exec processes can start slightly out of order when the user
+            // quickly releases Super after a digit. Give that command a chance
+            // to publish its marker before deciding this was a solo press.
+            std::thread::sleep(Duration::from_millis(40));
+        }
+        let chord_was_used = take_workspace_chord(&dir)?;
+        if request == Request::SuperRelease
+            && open_apps_on_release(chord_was_used, picker_was_running)
+        {
+            launch_app_overview()?;
+        }
         return Ok(());
     }
     if let Request::Select(num) = request {
+        mark_workspace_chord(&dir)?;
         // Always switch first; the overlay must not gate workspace changes.
         switch_to(&mut SystemCommandRunner, num)?;
     }
@@ -825,6 +879,10 @@ mod tests {
         assert_eq!(
             parse_request(["--release".into()]).unwrap(),
             Request::Release
+        );
+        assert_eq!(
+            parse_request(["--super-release".into()]).unwrap(),
+            Request::SuperRelease
         );
         for arg in ["0", "10", "-1", "1; exec sh", "01", "--switch", "a"] {
             assert!(parse_request([arg.into()]).is_err(), "{arg}");
@@ -900,6 +958,21 @@ mod tests {
         drop(owner);
         assert!(!path.exists());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn super_alone_opens_apps_but_workspace_chords_only_close_picker() {
+        let dir = env::temp_dir().join(format!("sway-switcher-super-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        assert!(open_apps_on_release(false, false));
+        assert!(!open_apps_on_release(true, false));
+        assert!(!open_apps_on_release(false, true));
+        mark_workspace_chord(&dir).unwrap();
+        mark_workspace_chord(&dir).unwrap(); // multiple digits use one marker
+        assert!(take_workspace_chord(&dir).unwrap());
+        assert!(!take_workspace_chord(&dir).unwrap());
+        assert!(open_apps_on_release(false, false));
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

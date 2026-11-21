@@ -14,10 +14,12 @@ sends a bounded **swaymsg -r -t command 'workspace number N'** request
 immediately, without depending on the overlay redraw. The last requested
 digit receives a **blue border**. The picker lists currently used numbered
 Sway workspaces in the 1–9 shortcut range, including newly created targets.
-Super release sends `--release` through the socket and records a bounded,
-session-local release stamp for startup races. Release during slow capture is
-honored before a surface can map. The socket is removed before the final
-post-close screenshot so later key presses cannot target a terminating
+Super release sends `--super-release` through the socket and records a bounded,
+session-local release stamp for startup races. If no workspace chord was used
+and no switcher socket is live, it starts `nuraloumi-menu --live --family
+launcher --overview-mode apps`: a single Super tap opens the Apps overview.
+Release during slow capture is honored before a surface can map. The socket is
+removed before the final post-close screenshot so later key presses cannot target a terminating
 overlay. Escape and a 15-second fail-safe also close it.
 
 This integration does **not** replace the general workspace protocol provider
@@ -46,20 +48,30 @@ bindsym --no-repeat $mod+8 exec --no-startup-id $ws_picker 8
 bindsym --no-repeat $mod+9 exec --no-startup-id $ws_picker 9
 
 # Single Super-key release, whether left or right (XKB names).
-bindsym --release --no-repeat Super_L exec --no-startup-id $ws_picker --release
-bindsym --release --no-repeat Super_R exec --no-startup-id $ws_picker --release
+bindsym --release --no-repeat Super_L exec --no-startup-id $ws_picker --super-release
+bindsym --release --no-repeat Super_R exec --no-startup-id $ws_picker --super-release
 ```
 
 The example assumes `set $mod Mod4`, an executable on Sway's PATH, the
 standard `SWAYSOCK` and `XDG_RUNTIME_DIR` environment, plus `swaymsg`
-and `grim`. The `--release` bindings must be tested on the actual keyboard:
+and `grim`. The `--super-release` bindings must be tested on the actual keyboard:
 the effective XKB Super keysyms and any other compositor bindings can change
 their behavior. In particular, verify that Sway emits the standalone
 `Super_L`/`Super_R` release binding **after** a `Mod4+number` binding, not
-only after pressing Super alone. The overlay also recognizes Super key-up
-when delivered directly to its Wayland surface, but does not assume those
-events will always reach it. The 15-second fallback is not a substitute
-for the required release gesture. Do not enable two competing release
+only after pressing Super alone. The switcher records an atomic one-shot
+workspace-chord marker so Super+digit is never interpreted as a standalone
+Super tap even if the overlay has already closed. Its `--release` option
+remains close-only; only `--super-release` can launch Apps.
+
+**Other Sway Super combinations:** Sway's release binding does not expose
+arbitrary prior keypresses to this helper. Until validated on the device, a
+Super+letter combination outside the provided Super+1–9 bindings might also
+open Apps upon Super release. Qualify at least Super+Shift+R and each configured
+Super combination before enabling the snippet in a live session.
+
+The overlay also recognizes Super key-up when delivered directly to its Wayland
+surface, but does not assume those events will always reach it. The 15-second
+fallback is not a substitute for the required release gesture. Do not enable two competing release
 bindings for the same physical key.
 
 Before applying on a device, validate the config with `sway -C -c PATH` and
@@ -126,8 +138,13 @@ change is implied by host validation.
 - Holding Super and pressing 2, 3, 1 updates the blue selection, the workspace
   and the list without creating stacked overlays.
 - Releasing either Super key closes the overlay, leaving the last selected
-  workspace active. Escape closes it too. Sway bindings must still work with
-  the panel running and the physical SL101 slider keyboard.
+  workspace active. Escape closes it too.
+- Pressing and releasing either Super key alone opens the Apps overview; no
+  workspace switcher overlay appears.
+- Verify Super+1–9 **do not** also open Apps, and other configured Super
+  combinations (including Super+Shift+R) do not create unexpected menus.
+  Sway bindings must still work with the panel running and the physical SL101
+  slider keyboard.
 - A captured workspace shows a real screenshot; an unseen workspace shows the
   placeholder, never an unrelated screenshot. Reopen after visiting the new
   workspace to check its preview cache.
