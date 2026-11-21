@@ -24,10 +24,13 @@ class BatteryPolicy(unittest.TestCase):
         self.assertIn('threshold=none', source)
         self.assertNotIn('battery-reserve', source)
 
-    def test_qualification_does_not_require_ac(self):
+    def test_private_video_hardware_qualification_preserves_power_gates(self):
+        # Unlike a passive userspace install, the live VDE/Grate test may
+        # stress the tablet and therefore requires AC and an energy reserve.
         source = (ROOT / 'scripts/qualify-nuraloumi-player-video-on-device.sh').read_text()
-        self.assertNotIn('|| blocked ac\n', source)
-        self.assertIn('GATE_POWER_PASS', source)
+        self.assertIn('|| blocked ac\n', source)
+        self.assertIn('|| blocked battery\n', source)
+        self.assertIn('|| blocked root-flock\n', source)
 
 
 if __name__ == '__main__':
