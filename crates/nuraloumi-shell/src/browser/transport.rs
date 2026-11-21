@@ -28,7 +28,9 @@ pub struct NativeBrowser {
     socket: PathBuf,
 }
 
-fn private_runtime_path(dir: &Path) -> Result<PathBuf, String> {
+// Validate the session path before any native engine is spawned. The socket
+// itself need not exist yet, but each ancestor must be a real directory.
+pub(crate) fn checked_socket_path(dir: &Path) -> Result<PathBuf, String> {
     if !dir.is_absolute() || dir.as_os_str().len() > MAX_SOCKET_PATH {
         return Err("Browser runtime path is invalid".into());
     }
@@ -59,6 +61,11 @@ fn private_runtime_path(dir: &Path) -> Result<PathBuf, String> {
     if socket.as_os_str().len() > MAX_SOCKET_PATH {
         return Err("Browser socket path exceeds Unix socket limit".into());
     }
+    Ok(socket)
+}
+
+fn private_runtime_path(dir: &Path) -> Result<PathBuf, String> {
+    let socket = checked_socket_path(dir)?;
     let socket_meta = fs::symlink_metadata(&socket)
         .map_err(|_| "Browser engine socket is not running".to_owned())?;
     if !socket_meta.file_type().is_socket()

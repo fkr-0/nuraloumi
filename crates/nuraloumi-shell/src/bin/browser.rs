@@ -562,7 +562,7 @@ fn main() -> ExitCode {
         let rpc = Connection::Fixture(FixtureRpc::from_ui(&ui));
         run(ui, rpc, config, args.headless)
     } else {
-        NativeBrowser::from_environment().and_then(|mut client| {
+        nuraloumi_shell::browser::connect_or_start_default().and_then(|(mut client, _engine)| {
             let mut ui = BrowserUi::default();
             ui.refresh(&mut client)?;
             run(ui, Connection::Native(client), config, args.headless)

@@ -1,0 +1,73 @@
+schema: infra-change-packet/v1
+schema_version: 1
+change:
+  service: SL101 NuraLoumi browser plus player regression
+  host: Nura SL101 (operator-local tablet)
+  risk: migration
+  requested_scope:
+    - qualified ARMv7/musl regular browser bundle installation
+    - new NuraLoumi browser/player smoke testing
+ownership:
+  state: known-gap
+  canonical_source: NuraLoumi package and scripts
+  external_dependencies:
+    - postmarketOS Alpine armv7/musl
+    - Sway/Wayland
+    - WPE WebKit 2.54+
+    - sandboxed WebProcess and helpers
+  blockers:
+    - no qualified runtime.json or nurabrowser-core artifact
+    - no official CI package artifact
+    - previous /usr/local/bin installations not under apk package ownership
+preflight:
+  inventory:
+    - "kernel: 7.0.1-postmarketos-grate-dmavde1"
+    - "root filesystem: 116.7G total; 89.6G available"
+    - "browser: /usr/local/bin/nuraloumi-browser"
+    - "player: /usr/local/bin/nuraloumi-player"
+    - "regular browser runtime: missing"
+    - "browser sha256: cf0fdcb1df8259171ac16d13ff816cfb7ec37686ecd66f7b0194affa698754d2"
+    - "player sha256: 22c52fa135658bbe56cca65e5cb08473f37899fed204581fbf7fc4dd60e3299b"
+  local_checks:
+    - exact manifest plus source and producer SHA verification
+    - ARMv7 no-NEON/no-hardware-division and musl ELF closure
+    - sandbox helper and compiled-in WebProcess paths under installed prefix
+    - official CI artifact and final APK/tar package-check
+  preview_commands:
+    - package-check on a staged, verified release artifact (not yet available)
+  expected_changes:
+    - one versioned, rollback-capable NuraLoumi package installation
+rollback:
+  required: true
+  artifact: null
+  restore_steps:
+    - record and preserve bytes, modes and hashes of current browser/player
+    - preserve existing Wayland session and compositor ownership
+    - restore exact prior binaries and service state if any postflight gate fails
+  triggers:
+    - SIGILL or loader failure
+    - missing sandboxed WebProcess
+    - no visible page pixels or failed tab/navigation/touch
+    - NuraPlayer regression
+apply:
+  authorized: true
+  command: null
+  limit: Nura SL101 only
+  allowed_roles:
+    - qualified release artifact deployment
+postflight:
+  probes:
+    - actual WPE-rendered page pixels and responsive navigation/tabs
+    - touch and physical keyboard input
+    - sandbox and same-UID IPC
+    - NuraPlayer audio/video and software-recovery path
+  idempotency_command: package version and installed SHA consistency
+results:
+  commands:
+    - read-only SSH kernel, disk, installed binary and runtime checks
+    - read-only SHA256 of current browser and player
+  changed_resources: []
+  warnings:
+    - Apply was not attempted because mandatory release gates failed.
+    - Rollback artifact must be made immediately before any future install.
+  rollback_performed: false
