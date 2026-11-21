@@ -49,3 +49,16 @@ This evidence establishes missing package/runtime prerequisites, not the complet
 7. **Functional accept/reject:** confirm real browser pixel/navigation/touch and WebProcess survival; then player/video pixel checks, 414-frame/AAC/EOS where applicable, pause/seek/volume, no SIGILL and zero outstanding DMA-BUF/GBM lifetimes. Promote atomically only after explicit owner-reviewed GO. If any part fails, retain/restore prior release and record raw logs.
 
 **No deploy was executed on .106 in this integration review.**
+
+## Subsequent source-only GPU package closure
+
+The next local follow-up found a producer/consumer mismatch: the GPU consumer
+accepted a hash-enumerated `gst/` dependency closure but the packager only
+copied `gst/libgstv4l2codecs.so`, potentially dropping required private
+GStreamer modules. The packager now stages the complete verified `gst/`
+directory. A dedicated offline verifier checks that the **final GPU tar**,
+not merely its source bundle, retains exactly all producer-hashed files and
+the reviewed NuraLoumi SHA/version/ARM ABI. This does not create the missing
+independent CI producer artifact, establish an official successful same-SHA
+release run, or qualify the tablet. This addendum describes subsequent code;
+the earlier 12-commit integration count above is historical, not current HEAD.

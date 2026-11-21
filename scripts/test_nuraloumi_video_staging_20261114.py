@@ -20,6 +20,7 @@ class VideoBundleStageTests(unittest.TestCase):
         self.assertIn('"--target",', src)
         self.assertIn('stage.join("lib/nuraloumi/video")', src)
         self.assertIn('copy_tree(&bundle.join("lib")', src)
+        self.assertIn('copy_tree(&bundle.join("gst"), &dest.join("gst"))', src)
         self.assertIn('copy_required(', src)
         self.assertIn("native video engine must be ELF32 ARM", src)
 

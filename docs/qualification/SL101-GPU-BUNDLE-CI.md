@@ -42,7 +42,25 @@ wrong source/ABI, unlisted files, missing plugins, duplicate SONAME, unresolved
 ELF dependencies, or forbidden instructions fails the GPU variant without a
 fallback. The archive SHA is checked before any extraction. The packager
 repeats validation before copying the private libraries. `provenance.json` is
-retained inside the GPU package manifest with the file hashes.
+retained inside the GPU package manifest with the file hashes. The consumer
+copies the **entire** verified `lib/` and `gst/` trees, including additional
+transitive GStreamer modules (not only `libgstv4l2codecs.so`). After packing,
+the GPU CI job uses `scripts/verify_packaged_sl101_video.py` against the
+actual release tarball: it checks the NuraLoumi Git SHA, exact version, ABI,
+producer Git revision, complete file manifest, original per-module producer
+hashes and the absence of dropped or injected private libraries. A passing
+check remains a host-only provenance result, not VDE or Sway hardware proof.
+
+The same check may be repeated **offline** on the original untampered GPU tar
+with exact reviewed pins:
+
+    python3 scripts/verify_packaged_sl101_video.py nuraloumi-gpu-ci.tar \
+      --source-sha <NURALOUMI_MAIN_COMMIT> \
+      --expected-version <NURALOUMI_VERSION> \
+      --producer-revision <SL101_LINUX_COMMIT>
+
+It cannot validate GitHub run identity by itself; independently verify the
+successful official main-branch workflow run and artifact digest first.
 
 The check is a static ABI/source gate; it does **not** establish that VDE,
 DMA-BUF, Wayland compositor, WPE, or audio work on physical SL101 hardware.

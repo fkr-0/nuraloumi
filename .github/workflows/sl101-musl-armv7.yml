@@ -88,6 +88,7 @@ jobs:
           python3 -m unittest scripts/test_native_packages_ci.py -v
           python3 -m unittest scripts/test_verify_ci_artifact.py -v
           python3 -m unittest scripts/test_verify_sl101_video_bundle.py -v
+          python3 -m unittest scripts/test_verify_packaged_sl101_video.py -v
 
       - name: Prepare signed Alpine armv7 sysroot (never accesses tablet)
         shell: bash
@@ -272,6 +273,11 @@ jobs:
           export NURALOUMI_VIDEO_BUNDLE_DIR="$PWD/target/verified-gpu-video"
           cargo xtask package --target "$TARGET" --out target/gha-artifact/nuraloumi-gpu-ci
           cargo xtask package-check --dir target/gha-artifact/nuraloumi-gpu-ci
+          python3 scripts/verify_packaged_sl101_video.py target/gha-artifact/nuraloumi-gpu-ci.tar \
+            --source-sha "$GITHUB_SHA" \
+            --expected-version "$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')" \
+            --producer-revision "$NURALOUMI_VIDEO_PRODUCER_REVISION" \
+            --target "$TARGET"
           test "$(find target/gha-artifact/nuraloumi-gpu-ci/bin -name nuraloumi-player -type f | wc -l)" -eq 1
           test "$(find target/gha-artifact/nuraloumi-gpu-ci/bin -name nuraloumi-playerd -type f | wc -l)" -eq 1
           test -f target/gha-artifact/nuraloumi-gpu-ci/lib/nuraloumi/video/provenance.json

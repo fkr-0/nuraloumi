@@ -289,10 +289,10 @@ pub fn stage_package(
         // tar archive, with the same hash verification as every other file.
         let dest = stage.join("lib/nuraloumi/video");
         copy_tree(&bundle.join("lib"), &dest.join("lib"))?;
-        copy_required(
-            &bundle.join("gst/libgstv4l2codecs.so"),
-            &dest.join("gst/libgstv4l2codecs.so"),
-        )?;
+        // The source verifier admits a *complete* private gst/ ELF closure.
+        // Copy every verified plugin, not just its required entry point.
+        // Dropping a transitive module would make the package unplayable.
+        copy_tree(&bundle.join("gst"), &dest.join("gst"))?;
         if source_verified {
             copy_required(
                 &bundle.join("provenance.json"),
@@ -725,8 +725,8 @@ fn create_deterministic_tar(root: &Path, stage: &Path, tar_path: &Path) -> Resul
 #[cfg(test)]
 mod tests {
     use super::{
-        archive_path, collect_files, create_deterministic_tar, runtime_binaries_from_list,
-        workspace_version,
+        archive_path, collect_files, copy_tree, create_deterministic_tar,
+        runtime_binaries_from_list, workspace_version,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -819,6 +819,31 @@ mod tests {
             .collect::<Vec<_>>();
         relative.sort();
         assert_eq!(relative, vec![PathBuf::from("a/x"), PathBuf::from("z")]);
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn private_gstreamer_copy_retains_transitive_plugins() {
+        let root = temp_dir("gst-closure");
+        let source = root.join("producer/gst");
+        let destination = root.join("package/gst");
+        fs::create_dir_all(source.join("helpers")).expect("source gst tree");
+        fs::write(source.join("libgstv4l2codecs.so"), b"video entry").expect("entry");
+        fs::write(
+            source.join("helpers/libgsttransitive.so"),
+            b"required plugin",
+        )
+        .expect("transitive plugin");
+        copy_tree(&source, &destination).expect("copy complete gst tree");
+        assert_eq!(
+            fs::read(destination.join("libgstv4l2codecs.so")).expect("entry in package"),
+            b"video entry"
+        );
+        assert_eq!(
+            fs::read(destination.join("helpers/libgsttransitive.so"))
+                .expect("transitive plugin in package"),
+            b"required plugin"
+        );
         fs::remove_dir_all(root).expect("cleanup");
     }
 }
