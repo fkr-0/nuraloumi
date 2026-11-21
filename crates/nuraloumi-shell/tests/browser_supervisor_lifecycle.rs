@@ -91,3 +91,60 @@ fn malformed_session_fails_closed() {
     fs::remove_file(path).unwrap();
     fs::remove_dir(dir).unwrap();
 }
+
+#[test]
+fn remote_cli_uses_running_engine_without_wayland() {
+    use std::{
+        io::{BufRead, BufReader, Write},
+        os::unix::net::UnixListener,
+        process::Command,
+    };
+
+    let runtime = fixture_dir();
+    let socket = runtime.join("nura-browser.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
+    let child = || {
+        let mut cli = Command::new(env!("CARGO_BIN_EXE_nuraloumi-browser"));
+        cli.env("XDG_RUNTIME_DIR", &runtime)
+            .env_remove("WAYLAND_DISPLAY")
+            .arg("--remote");
+        cli
+    };
+    assert_eq!(
+        child()
+            .args(["tab-select", "6"])
+            .output()
+            .unwrap()
+            .status
+            .code(),
+        Some(2)
+    );
+
+    let worker = thread::spawn(move || {
+        let (mut conn, _) = listener.accept().unwrap();
+        let mut line = String::new();
+        BufReader::new(&conn).read_line(&mut line).unwrap();
+        let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(
+            request,
+            serde_json::json!({"command": "open", "argument": "https://example.org/"})
+        );
+        conn.write_all(b"{\"ok\":true,\"result\":{}}\n").unwrap();
+    });
+    let output = child()
+        .args(["open", "https://example.org/"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{:?}", output);
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response, serde_json::json!({"ok": true, "result": {}}));
+    worker.join().unwrap();
+
+    fs::set_permissions(&socket, fs::Permissions::from_mode(0o666)).unwrap();
+    let output = child().arg("uri").output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unsafe"));
+    fs::remove_file(socket).unwrap();
+    fs::remove_dir(runtime).unwrap();
+}

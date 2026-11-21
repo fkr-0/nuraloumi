@@ -20,10 +20,10 @@ apk add --no-cache \
   build-base binutils cmake ninja pkgconf python3 perl ruby bison flex gperf \
   git curl tar xz meson linux-headers \
   glib-dev harfbuzz-dev icu-dev libjpeg-turbo-dev libepoxy-dev \
-  libgcrypt-dev libsoup3-dev libtasn1-dev libxkbcommon-dev libxml2-dev \
+  libgcrypt-dev libsoup3-dev libtasn1-dev libxkbcommon-dev libxml2-dev libxslt-dev hyphen-dev \
   libpng-dev sqlite-dev libwebp-dev zlib-dev freetype-dev \
   json-glib-dev wayland-dev wayland-protocols mesa-dev libdrm-dev \
-  bubblewrap xdg-dbus-proxy
+  libseccomp-dev bubblewrap xdg-dbus-proxy
 
 mkdir -p /out/src /out/build /out/stage
 printf '%s  %s\n' \
@@ -46,14 +46,14 @@ cmake -S /out/src/wpewebkit-2.54.2 -B /out/build/webkit -G Ninja \
   -DENABLE_WPE_PLATFORM_HEADLESS=ON -DENABLE_WPE_PLATFORM_DRM=OFF \
   -DENABLE_WPE_LEGACY_API=OFF -DENABLE_BUBBLEWRAP_SANDBOX=ON \
   -DENABLE_GPU_PROCESS=OFF -DUSE_GBM=OFF -DUSE_LIBDRM=OFF \
-  -DENABLE_VIDEO=OFF -DENABLE_WEB_AUDIO=OFF -DENABLE_WEBGL=OFF \
+  -DENABLE_VIDEO=OFF -DENABLE_WEB_AUDIO=OFF -DENABLE_WEBGL=OFF -DUSE_GSTREAMER=OFF \
   -DENABLE_MEDIA_STREAM=OFF -DENABLE_MEDIA_RECORDER=OFF \
   -DENABLE_INTROSPECTION=OFF -DENABLE_DOCUMENTATION=OFF \
   -DENABLE_SPELLCHECK=OFF -DENABLE_SPEECH_SYNTHESIS=OFF \
   -DENABLE_JOURNALD_LOG=OFF -DENABLE_JIT=OFF \
   -DUSE_ATK=OFF -DUSE_FLITE=OFF -DUSE_JPEGXL=OFF \
   -DUSE_AVIF=OFF -DUSE_LCMS=OFF -DUSE_WOFF2=OFF \
-  -DUSE_SYSTEM_UNIFDEF=OFF
+  -DUSE_LIBBACKTRACE=OFF -DUSE_SYSTEM_SYSPROF_CAPTURE=OFF -DUSE_SYSTEM_UNIFDEF=OFF
 cmake --build /out/build/webkit --parallel 2
 cmake --install /out/build/webkit
 DESTDIR=/out/stage cmake --install /out/build/webkit

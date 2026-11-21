@@ -21,6 +21,12 @@ class BrowserIsolationTest(unittest.TestCase):
         player = PLAYER.read_text()
         self.assertIn('daemon.env("GRATE_I420_YU_PAIR", "1")', player)
         self.assertIn('daemon.env("GRATE_I420_YU_FP_SCHEDULE", "1")', player)
+        self.assertIn(
+            'daemon.env("GST_REGISTRY", socket.with_extension("gst-registry.bin"))',
+            player,
+        )
+        self.assertIn('daemon.env("GST_PLUGIN_PATH_1_0", &gst)', player)
+        self.assertNotIn("GST_PLUGIN_SYSTEM_PATH", player)
         self.assertNotIn("std::env::set_var", player)
         self.assertIn("configure_single_player_daemon(", player)
 
@@ -28,7 +34,7 @@ class BrowserIsolationTest(unittest.TestCase):
         browser = BROWSER_UI.read_text()
         self.assertIn("CairoRenderer::default()", browser)
         self.assertIn("WaylandBackend::connect()", browser)
-        self.assertIn("NativeBrowser::from_environment()", browser)
+        self.assertIn("nuraloumi_shell::browser::connect_or_start_default()", browser)
         for forbidden in (PAIR, SCHEDULE, "MESA_LOADER_DRIVER_OVERRIDE",
                           "LIBGL_DRIVERS_PATH", "libnuraloumi-video.so",
                           "gst_element_set_state"):

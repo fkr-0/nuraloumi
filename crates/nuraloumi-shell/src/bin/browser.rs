@@ -72,6 +72,7 @@ fn parse_options(args: impl IntoIterator<Item = String>) -> Result<Option<Option
             "-h" | "--help" => {
                 println!(
                     "nuraloumi-browser [--fixture] [--headless] [--config PATH]\n\
+                         nuraloumi-browser --remote COMMAND [ARGUMENT]\n\
                          Chrome: touch address to edit, Enter to navigate, Esc to dismiss. \
                          Keyboard: Ctrl+L address, Ctrl+T new tab, Ctrl+W close tab."
                 );
@@ -547,8 +548,36 @@ fn run(
     }
 }
 
+fn remote(args: &[String]) -> ExitCode {
+    let (command, argument) = match args {
+        [command] => (command.as_str(), None),
+        [command, argument] => (command.as_str(), Some(argument.as_str())),
+        _ => ("", None),
+    };
+    if !NativeBrowser::command_allowed(command, argument) {
+        eprintln!("nuraloumi-browser: invalid --remote command or argument");
+        return ExitCode::from(2);
+    }
+    match NativeBrowser::from_environment()
+        .and_then(|mut browser| browser.request(command, argument))
+    {
+        Ok(result) => {
+            println!("{}", json!({ "ok": true, "result": result }));
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("nuraloumi-browser: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 fn main() -> ExitCode {
-    let args = match parse_options(env::args().skip(1)) {
+    let mut cli = env::args().skip(1).peekable();
+    if cli.next_if(|arg| arg == "--remote").is_some() {
+        return remote(&cli.collect::<Vec<_>>());
+    }
+    let args = match parse_options(cli) {
         Ok(Some(args)) => args,
         Ok(None) => return ExitCode::SUCCESS,
         Err(error) => {

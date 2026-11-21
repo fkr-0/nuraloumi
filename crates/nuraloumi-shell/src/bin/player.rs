@@ -443,7 +443,7 @@ fn seek_at(snapshot: &Snapshot, x: f64, width: f64) -> Option<Command> {
 /// Configure the sole playback daemon for the SHA-pinned three-pass renderer,
 /// when the private engine was bundled by the ARM release. Never launch an
 /// alternate player or change EGL requirements of the Cairo menu itself.
-fn configure_single_player_daemon(daemon: &mut ProcCommand) {
+fn configure_single_player_daemon(daemon: &mut ProcCommand, socket: &Path) {
     // A versioned /opt/nuraloumi/releases/<commit>/bin/player uses the
     // sibling release library. This ensures one atomic 'current' switch
     // updates ALL tools and the exact Grate/GStreamer backend together.
@@ -466,15 +466,26 @@ fn configure_single_player_daemon(daemon: &mut ProcCommand) {
     }
     let system_drm = Path::new("/usr/local/lib/sl101-libdrm-import-lists-5b06215a2876fec6");
     let serializer = Path::new("/usr/local/lib/gr3d_serialize.so");
-    // This strictly qualified private stack must not be replaced with
-    // unpinned system Mesa or a CPU video fallback.
-    if !system_drm.is_dir() || !serializer.is_file() {
+    // Source-verified bundles carry their target libdrm. Keep the historical
+    // device-local libdrm lookup for legacy packages only.
+    if !serializer.is_file() {
         return;
     }
-    let old = std::env::var_os("LD_LIBRARY_PATH").unwrap_or_default();
-    let mut ld = std::ffi::OsString::from(system_drm.as_os_str());
-    ld.push(":");
-    ld.push(&lib);
+    let mut ld = if root.join("provenance.json").is_file() {
+        if !lib.join("libdrm.so.2").is_file() || !lib.join("libdrm_tegra.so.0").is_file() {
+            return;
+        }
+        lib.as_os_str().to_os_string()
+    } else {
+        if !system_drm.is_dir() {
+            return;
+        }
+        let mut legacy = system_drm.as_os_str().to_os_string();
+        legacy.push(":");
+        legacy.push(&lib);
+        legacy
+    };
+    let old = env::var_os("LD_LIBRARY_PATH").unwrap_or_default();
     if !old.is_empty() {
         ld.push(":");
         ld.push(old);
@@ -489,6 +500,9 @@ fn configure_single_player_daemon(daemon: &mut ProcCommand) {
     // silent external player or CPU YUV conversion may be selected here.
     daemon.env("GRATE_I420_YU_PAIR", "1");
     daemon.env("GRATE_I420_YU_FP_SCHEDULE", "1");
+    // Keep the private decoder out of the shared plugin cache. Retain system
+    // plugin discovery for the demuxers, parsers and audio pipeline.
+    daemon.env("GST_REGISTRY", socket.with_extension("gst-registry.bin"));
     daemon.env("GST_PLUGIN_PATH_1_0", &gst);
     daemon.env("SL101_PRIVATE_GST_DIR", &gst);
     // No system installation, no KMS/DRM-master access, no software upload.
@@ -559,7 +573,7 @@ fn send(cmd: &Command, spawn_daemon: bool) -> Result<Reply, String> {
             .map_err(|e| e.to_string())?
             .with_file_name("nuraloumi-playerd");
         let mut daemon = ProcCommand::new(sibling);
-        configure_single_player_daemon(&mut daemon);
+        configure_single_player_daemon(&mut daemon, &path);
         daemon
             .stdin(Stdio::null())
             .stdout(Stdio::null())

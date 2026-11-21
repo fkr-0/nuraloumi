@@ -125,7 +125,7 @@ impl NativeBrowser {
         Ok(stream)
     }
 
-    fn command_allowed(command: &str, arg: Option<&str>) -> bool {
+    pub fn command_allowed(command: &str, arg: Option<&str>) -> bool {
         match command {
             "open" => arg.is_some_and(|text| {
                 !text.is_empty() && text.len() <= 4096 && !text.chars().any(char::is_control)

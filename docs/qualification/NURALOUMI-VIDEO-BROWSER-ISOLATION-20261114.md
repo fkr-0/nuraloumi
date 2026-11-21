@@ -18,6 +18,15 @@ player-specific three-pass compilation and trace variables before it
 chooses its own renderer. The historical public browser alias was
 removed intentionally; an old test still demanded it, and is corrected.
 
+## Rust browser control
+
+With the WPE engine running, `nuraloumi-browser --remote open URL` and
+`nuraloumi-browser --remote uri` use the same same-UID Unix-socket client
+as the desktop controls. The command attaches to the running engine and
+works from a shell outside Wayland. On the development host, a
+sandboxed headless WPE WebProcess loaded a loopback page and the Rust client
+read its title. ARMv7 runtime tests are separate.
+
 ## Completed tests
 
 - Browser Rust pointer/touch integration: 2/2 PASS.
