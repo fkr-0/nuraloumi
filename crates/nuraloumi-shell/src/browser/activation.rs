@@ -140,6 +140,8 @@ fn launch_plan(root: &Path) -> Result<LaunchPlan, String> {
         .ok_or("Browser runtime file inventory missing")?;
     let mut engine = None;
     let mut webprocess_dir = None;
+    let mut networkprocess_dir = None;
+    let mut gpuprocess_dir = None;
     let mut helpers = BTreeSet::new();
     let mut libraries = BTreeSet::new();
     let mut names = BTreeSet::new();
@@ -160,6 +162,16 @@ fn launch_plan(root: &Path) -> Result<LaunchPlan, String> {
             "webprocess" if name.ends_with("/WPEWebProcess") && webprocess_dir.is_none() => {
                 let file = regular_file(root, name, true)?;
                 webprocess_dir = file.parent().map(Path::to_path_buf);
+            }
+            "networkprocess"
+                if name.ends_with("/WPENetworkProcess") && networkprocess_dir.is_none() =>
+            {
+                let file = regular_file(root, name, true)?;
+                networkprocess_dir = file.parent().map(Path::to_path_buf);
+            }
+            "gpuprocess" if name.ends_with("/WPEGPUProcess") && gpuprocess_dir.is_none() => {
+                let file = regular_file(root, name, true)?;
+                gpuprocess_dir = file.parent().map(Path::to_path_buf);
             }
             "bwrap" if name.ends_with("/bwrap") => {
                 let file = regular_file(root, name, true)?;
@@ -193,6 +205,12 @@ fn launch_plan(root: &Path) -> Result<LaunchPlan, String> {
     }
     let engine = engine.ok_or("Browser engine missing from qualified bundle")?;
     let webprocess_dir = webprocess_dir.ok_or("Browser WebProcess missing")?;
+    let networkprocess_dir = networkprocess_dir.ok_or("Browser NetworkProcess missing")?;
+    if webprocess_dir != networkprocess_dir
+        || gpuprocess_dir.is_some_and(|path| path != webprocess_dir)
+    {
+        return Err("Browser WPE processes are not in one compiled libexec directory".into());
+    }
     if helpers.is_empty()
         || libraries.is_empty()
         || !entries.iter().any(|entry| entry["role"] == "bwrap")
@@ -399,6 +417,7 @@ mod tests {
         let files = [
             ("nurabrowser-core", "engine", true),
             ("libexec/WPEWebProcess", "webprocess", true),
+            ("libexec/WPENetworkProcess", "networkprocess", true),
             ("bin/bwrap", "bwrap", true),
             ("bin/xdg-dbus-proxy", "xdg-dbus-proxy", true),
             ("lib/ld-musl-armhf.so.1", "loader", true),
@@ -454,6 +473,18 @@ mod tests {
         fs::set_permissions(root.join("bin"), fs::Permissions::from_mode(0o755)).unwrap();
         let mut manifest: Value =
             serde_json::from_slice(&fs::read(root.join("runtime.json")).unwrap()).unwrap();
+        manifest["files"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|entry| entry["role"] != "networkprocess");
+        fs::write(
+            root.join("runtime.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        assert!(launch_plan(&root).is_err());
+        fixture_bundle(&root);
+        manifest = serde_json::from_slice(&fs::read(root.join("runtime.json")).unwrap()).unwrap();
         manifest["qualification"]["sandbox"] = Value::String("UNVERIFIED".into());
         fs::write(
             root.join("runtime.json"),

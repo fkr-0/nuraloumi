@@ -17,6 +17,7 @@ TARGET = "armv7-unknown-linux-musleabihf"
 ROLES = {
     "nurabrowser-core": "engine",
     "libexec/WPEWebProcess": "webprocess",
+    "libexec/WPENetworkProcess": "networkprocess",
     "bin/bwrap": "bwrap",
     "bin/xdg-dbus-proxy": "xdg-dbus-proxy",
     "lib/ld-musl-armhf.so.1": "loader",
@@ -63,7 +64,7 @@ class BrowserRuntimeContract(unittest.TestCase):
                     self.assertIn("scripts/verify_nurabrowser_runtime.py", text)
 
     def test_complete_contract_accepts_offline_fixture(self):
-        self.assertEqual(len(self.verify()["files"]), 7)
+        self.assertEqual(len(self.verify()["files"]), 8)
 
     def test_executable_processes_and_loader_required(self):
         for name, role in ROLES.items():
@@ -82,7 +83,8 @@ class BrowserRuntimeContract(unittest.TestCase):
             self.verify()
 
     def test_missing_webprocess_or_helper_rejects(self):
-        for name in ("libexec/WPEWebProcess", "bin/bwrap", "bin/xdg-dbus-proxy", "lib/modules/render.so"):
+        for name in ("libexec/WPEWebProcess", "libexec/WPENetworkProcess",
+                     "bin/bwrap", "bin/xdg-dbus-proxy", "lib/modules/render.so"):
             with self.subTest(name=name):
                 file = self.root / name
                 data = file.read_bytes()
@@ -90,6 +92,36 @@ class BrowserRuntimeContract(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.verify()
                 file.write_bytes(data)
+
+    def test_wpe_process_roles_and_shared_libexec_dir(self):
+        entry = next(e for e in self.document["files"] if e["role"] == "networkprocess")
+        entry["role"] = "module"
+        self.save()
+        with self.assertRaisesRegex(ValueError, "missing engine, WPE processes"):
+            self.verify()
+        entry["role"] = "networkprocess"
+        entry["path"] = "bin/WPENetworkProcess"
+        (self.root / "libexec/WPENetworkProcess").rename(self.root / "bin/WPENetworkProcess")
+        self.save()
+        with self.assertRaisesRegex(ValueError, "share the compiled libexec"):
+            self.verify()
+
+    def test_optional_gpu_process_must_be_in_same_libexec_dir(self):
+        gpu = self.root / "libexec/WPEGPUProcess"
+        gpu.write_bytes(b"optional synthetic gpu")
+        gpu.chmod(0o755)
+        entry = {"role": "gpuprocess", "path": "libexec/WPEGPUProcess",
+                 "sha256": hashlib.sha256(gpu.read_bytes()).hexdigest()}
+        self.document["files"].append(entry)
+        self.save()
+        self.verify()
+        (self.root / "bin/WPEGPUProcess").write_bytes(gpu.read_bytes())
+        (self.root / "bin/WPEGPUProcess").chmod(0o755)
+        gpu.unlink()
+        entry["path"] = "bin/WPEGPUProcess"
+        self.save()
+        with self.assertRaisesRegex(ValueError, "share the compiled libexec"):
+            self.verify()
 
     def test_digest_tamper_rejects(self):
         (self.root / "lib/libWPEWebKit.so").write_bytes(b"tampered")

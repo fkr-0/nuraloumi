@@ -1,0 +1,61 @@
+name: NuraBrowser WPE ARMv7 musl candidate
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/nurabrowser-wpe-musl-producer.yml
+      - scripts/ci-fetch-nurabrowser-wpe-source.sh
+      - scripts/ci-build-nurabrowser-wpe-musl.sh
+      - components/nura-browser-engine/**
+      - scripts/verify_nurabrowser_runtime.py
+      - scripts/test_verify_nurabrowser_runtime.py
+
+permissions:
+  contents: read
+
+jobs:
+  native-armv7-musl-wpe-candidate:
+    # This is a build candidate, not a regular APK, qualification, or deploy.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm
+      - name: Verify source pin and static runtime contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest scripts/test_verify_nurabrowser_runtime.py -v
+          sh scripts/ci-fetch-nurabrowser-wpe-source.sh target/wpe-source
+      - name: Build native Alpine 3.22 ARMv7 candidate in isolated container
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p target/wpe-producer-candidate
+          docker run --rm --platform linux/arm/v7 \
+            -e CI_SOURCE_SHA="$GITHUB_SHA" \
+            -v "$PWD:/work:ro" \
+            -v "$PWD/target/wpe-producer-candidate:/out" \
+            alpine:3.22 /bin/sh /work/scripts/ci-build-nurabrowser-wpe-musl.sh
+          test -s target/wpe-producer-candidate/nurabrowser-wpe-musl-candidate.tar
+          grep -Fx 'runtime_qualification=UNQUALIFIED' \
+            target/wpe-producer-candidate/CANDIDATE-ONLY.txt
+          test ! -e target/wpe-producer-candidate/stage/usr/libexec/nuraloumi/browser/runtime.json
+      - name: Upload unqualified build evidence only
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: nurabrowser-wpe-musl-unqualified-${{ github.sha }}
+          path: |
+            target/wpe-producer-candidate/nurabrowser-wpe-musl-candidate.tar
+            target/wpe-producer-candidate/CANDIDATE-ONLY.txt
+            target/wpe-producer-candidate/SHA256SUMS.txt
+            target/wpe-producer-candidate/STAGED-SHA256SUMS.txt
+            target/wpe-producer-candidate/ALPINE-PACKAGES.txt
+          if-no-files-found: error
+          retention-days: 7

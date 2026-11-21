@@ -12,9 +12,14 @@ from pathlib import Path, PurePosixPath
 import re
 import subprocess
 
-ROLES = {"engine", "webprocess", "bwrap", "xdg-dbus-proxy", "loader", "library", "module"}
-EXECUTABLE_ROLES = {"engine", "webprocess", "bwrap", "xdg-dbus-proxy", "loader"}
-REQUIRED = EXECUTABLE_ROLES
+ROLES = {"engine", "webprocess", "networkprocess", "gpuprocess",
+         "bwrap", "xdg-dbus-proxy", "loader", "library", "module"}
+EXECUTABLE_ROLES = {"engine", "webprocess", "networkprocess", "gpuprocess",
+                    "bwrap", "xdg-dbus-proxy", "loader"}
+REQUIRED = EXECUTABLE_ROLES - {"gpuprocess"}  # GPUProcess may be disabled at build time.
+PROCESS_NAMES = {"webprocess": "WPEWebProcess",
+                 "networkprocess": "WPENetworkProcess",
+                 "gpuprocess": "WPEGPUProcess"}
 TARGETS = {
     "armv7-unknown-linux-musleabihf": "musl",
     "armv7-unknown-linux-gnueabihf": "glibc",
@@ -77,7 +82,7 @@ def verify(root, source_sha, target, producer_revision, inspector=inspect_elf):
             "browser runtime qualifications missing or not PASS")
     entries = manifest["files"]
     require(isinstance(entries, list) and entries, "empty browser runtime")
-    seen, roles = set(), set()
+    seen, roles, processes = set(), set(), {}
     for entry in entries:
         require(isinstance(entry, dict) and set(entry) == {"path", "sha256", "role"},
                 "invalid browser file entry")
@@ -91,6 +96,10 @@ def verify(root, source_sha, target, producer_revision, inspector=inspect_elf):
                 "unsafe or duplicate browser path/role/hash")
         seen.add(name)
         roles.add(role)
+        if role in PROCESS_NAMES:
+            require(name.endswith("/" + PROCESS_NAMES[role]) and role not in processes,
+                    f"invalid or duplicate {role} executable")
+            processes[role] = path.parent
         file = root.joinpath(*path.parts)
         require(file.is_file() and not file.is_symlink() and
                 all(not parent.is_symlink() for parent in file.parents if parent != root),
@@ -102,11 +111,11 @@ def verify(root, source_sha, target, producer_revision, inspector=inspect_elf):
                     f"browser process or loader is not executable: {name}")
         inspector(file, TARGETS[target])
     require(REQUIRED <= roles and {"library", "module"} <= roles,
-            "missing engine, WPEWebProcess, sandbox helper, loader, library or dlopen module")
+            "missing engine, WPE processes, sandbox helper, loader, library or dlopen module")
     require(any(e["role"] == "engine" and e["path"] == "nurabrowser-core" for e in entries),
             "engine must have stable nurabrowser-core location")
-    require(any(e["role"] == "webprocess" and e["path"].endswith("/WPEWebProcess") for e in entries),
-            "missing WPEWebProcess")
+    require(len(set(processes.values())) == 1,
+            "WPE process executables must share the compiled libexec directory")
     all_paths = list(root.rglob("*"))
     require(all(not path.is_symlink() for path in all_paths),
             "symlink in browser runtime tree")

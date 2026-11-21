@@ -20,8 +20,12 @@ Expected producer directory schema: `runtime.json` with
 `schema=nuraloumi-browser-runtime-v1` (JSON value), exact `source_sha`,
 `producer_revision`, `target`, `abi`, a complete `files` list of relative
 paths, SHA256 and semantic roles. Required roles: `engine` at
-`nurabrowser-core`, `webprocess` ending in `/WPEWebProcess`, `bwrap`,
-`xdg-dbus-proxy`, `loader`, `library`, `module`. All five qualification
+`nurabrowser-core`, `webprocess` ending in `/WPEWebProcess`,
+`networkprocess` ending in `/WPENetworkProcess`, `bwrap`,
+`xdg-dbus-proxy`, `loader`, `library`, `module`. The optional
+`gpuprocess` role, when enabled, must end in `/WPEGPUProcess`; all
+WPE process executables must share their compiled-in libexec directory.
+All five qualification
 fields (`sandbox`, `instruction_closure`, `dlopen_closure`, `webprocess`,
 `review`) must be `PASS`. The tree may not contain symlinks or unlisted
 files. The verifier checks executable permissions for the engine, WebProcess,
@@ -31,9 +35,20 @@ also rejects missing executable modes. Producer evidence must
 add a complete `DT_NEEDED` **and** dynamic `dlopen` closure audit; a textual
 `PASS` is not proof of runtime correctness.
 
-The Alpine workflow currently has **no** source-matched musl WebKit/WPE
-producer stage or verified runtime input. Its ordinary package job therefore
-fails explicitly. The existing Debian ARMHF/glibc smoke artifact is
+The Alpine **ordinary-package** workflow currently has no source-matched,
+qualified musl WebKit/WPE runtime input. Its package job therefore fails
+explicitly. A separate, experimental GitHub Actions workflow,
+`.github/workflows/nurabrowser-wpe-musl-producer.yml`, now defines an Alpine
+3.22 native ARMv7/QEMU *candidate build*. It pins the official WPEWebKit 2.54.2
+archive by SHA256, compiles WPEPlatform/Wayland and a software-rendered engine
+with VFPv3-D16 flags, fixes production WebKit's absolute process install path
+to `/usr/libexec/nuraloumi/browser/libexec`, and uploads only a candidate
+tree with `runtime_qualification=UNQUALIFIED`. This experimental build script
+has passed host syntax checks but **has not yet passed an actual GitHub Actions
+build**. A candidate tar is not an installable release and does not contain
+`runtime.json`; no workflow promotes it to the ordinary package or device.
+
+The existing Debian ARMHF/glibc smoke artifact is
 unqualified, mixes host-architecture sandbox helpers and cannot be substituted
 into this release. The isolated glibc approach would require its own pinned
 ARMHF loader, full library/process tree and sandbox namespace proof without
