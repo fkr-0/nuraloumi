@@ -13,9 +13,11 @@ import re
 import subprocess
 
 ROLES = {"engine", "webprocess", "networkprocess", "gpuprocess",
-         "bwrap", "xdg-dbus-proxy", "loader", "library", "module"}
+         "bwrap", "xdg-dbus-proxy", "loader", "library", "module",
+         "resource"}
 EXECUTABLE_ROLES = {"engine", "webprocess", "networkprocess", "gpuprocess",
                     "bwrap", "xdg-dbus-proxy", "loader"}
+ELF_ROLES = EXECUTABLE_ROLES | {"library", "module"}
 REQUIRED = EXECUTABLE_ROLES - {"gpuprocess"}  # GPUProcess may be disabled at build time.
 PROCESS_NAMES = {"webprocess": "WPEWebProcess",
                  "networkprocess": "WPENetworkProcess",
@@ -109,7 +111,11 @@ def verify(root, source_sha, target, producer_revision, inspector=inspect_elf):
         if role in EXECUTABLE_ROLES:
             require(bool(file.stat().st_mode & 0o111),
                     f"browser process or loader is not executable: {name}")
-        inspector(file, TARGETS[target])
+        elif role == "resource":
+            require(not (file.stat().st_mode & 0o111),
+                    f"browser resource must not be executable: {name}")
+        if role in ELF_ROLES:
+            inspector(file, TARGETS[target])
     require(REQUIRED <= roles and {"library", "module"} <= roles,
             "missing engine, WPE processes, sandbox helper, loader, library or dlopen module")
     require(any(e["role"] == "engine" and e["path"] == "nurabrowser-core" for e in entries),

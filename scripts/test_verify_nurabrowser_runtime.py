@@ -23,6 +23,7 @@ ROLES = {
     "lib/ld-musl-armhf.so.1": "loader",
     "lib/libWPEWebKit.so": "library",
     "lib/modules/render.so": "module",
+    "share/webkit/icudtl.dat": "resource",
 }
 
 
@@ -64,7 +65,20 @@ class BrowserRuntimeContract(unittest.TestCase):
                     self.assertIn("scripts/verify_nurabrowser_runtime.py", text)
 
     def test_complete_contract_accepts_offline_fixture(self):
-        self.assertEqual(len(self.verify()["files"]), 8)
+        self.assertEqual(len(self.verify()["files"]), 9)
+
+    def test_non_elf_resources_are_hashed_without_elf_inspection(self):
+        inspected = []
+        gate.verify(self.root, SHA, TARGET, REV,
+                    inspector=lambda path, abi: inspected.append(path.relative_to(self.root).as_posix()))
+        self.assertIn("lib/modules/render.so", inspected)
+        self.assertNotIn("share/webkit/icudtl.dat", inspected)
+
+    def test_executable_resource_is_rejected(self):
+        resource = self.root / "share/webkit/icudtl.dat"
+        resource.chmod(0o755)
+        with self.assertRaisesRegex(ValueError, "resource must not be executable"):
+            self.verify()
 
     def test_executable_processes_and_loader_required(self):
         for name, role in ROLES.items():
