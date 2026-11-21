@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=NuraBrowser
+Comment=Native WPE browser for NuraLoumi
+Exec=nuraloumi-browser
+TryExec=nuraloumi-browser
+Terminal=false
+Categories=Network;WebBrowser;

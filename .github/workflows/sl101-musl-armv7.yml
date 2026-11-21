@@ -25,6 +25,7 @@ on:
       - Cargo.toml
       - Cargo.lock
       - crates/**
+      - components/nura-browser-engine/**
       - packaging/**
       - scripts/prepare-ci-musl-sysroot.sh
       - scripts/build-sl101-armv7.sh
@@ -33,6 +34,10 @@ on:
       - scripts/package-binaries.py
       - scripts/build-ci-alpine-apk.sh
       - scripts/test_native_packages_ci.py
+      - scripts/verify_nurabrowser_runtime.py
+      - scripts/test_verify_nurabrowser_runtime.py
+      - scripts/verify-ci-artifact.py
+      - scripts/test_verify_ci_artifact.py
       - packaging/alpine/**
       - scripts/test_musl_ci.py
       - scripts/verify_sl101_video_bundle.py
@@ -87,6 +92,7 @@ jobs:
           python3 -m unittest scripts/test_musl_ci.py -v
           python3 -m unittest scripts/test_native_packages_ci.py -v
           python3 -m unittest scripts/test_verify_ci_artifact.py -v
+          python3 -m unittest scripts/test_verify_nurabrowser_runtime.py -v
           python3 -m unittest scripts/test_verify_sl101_video_bundle.py -v
           python3 -m unittest scripts/test_verify_packaged_sl101_video.py -v
 
@@ -111,6 +117,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Ordinary packages now require the fully qualified native WPE
+          # runtime. The old Debian/glibc engine smoke tar is never accepted.
+          # Until a same-source ARMv7/musl producer exists, fail this release
+          # job rather than upload a browser launcher advertised as complete.
+          test -n "${NURALOUMI_BROWSER_RUNTIME_DIR:-}" || {
+            echo 'FAIL: mandatory musl NuraBrowser runtime producer is unavailable' >&2
+            exit 1
+          }
+          test -n "${NURALOUMI_BROWSER_PRODUCER_REVISION:-}" || {
+            echo 'FAIL: missing pinned NuraBrowser producer revision' >&2
+            exit 1
+          }
           # Ensure xtask Git subprocesses resolve the CI checkout when
           # a compiler embeds an alternate CARGO_MANIFEST_DIR mount prefix.
           export GIT_DIR="$PWD/.git"

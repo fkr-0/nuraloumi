@@ -26,10 +26,15 @@ on:
       - Cargo.toml
       - Cargo.lock
       - crates/**
+      - components/nura-browser-engine/**
       - packaging/**
       - scripts/package-binaries.py
       - scripts/build-ci-debian-deb.sh
       - scripts/test_native_packages_ci.py
+      - scripts/verify_nurabrowser_runtime.py
+      - scripts/test_verify_nurabrowser_runtime.py
+      - scripts/verify-ci-artifact.py
+      - scripts/test_verify_ci_artifact.py
       - packaging/debian/**
       - scripts/test_debian_armhf_ci.py
       - scripts/inspect-armv7-elf.sh
@@ -111,6 +116,7 @@ jobs:
           python3 -m unittest scripts/test_debian_armhf_ci.py -v
           python3 -m unittest scripts/test_native_packages_ci.py -v
           python3 -m unittest scripts/test_verify_ci_artifact.py -v
+          python3 -m unittest scripts/test_verify_nurabrowser_runtime.py -v
           python3 -m unittest scripts/test_verify_sl101_video_bundle.py -v
 
       - name: Cross-compile every release binary on GitHub infrastructure

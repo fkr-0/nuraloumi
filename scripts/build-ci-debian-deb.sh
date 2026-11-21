@@ -11,6 +11,9 @@ grep -Fx 'schema=nuraloumi-package-manifest-v1' "$manifest" >/dev/null
 grep -Fx 'target=armv7-unknown-linux-gnueabihf' "$manifest" >/dev/null
 grep -Fx 'git_dirty=false' "$manifest" >/dev/null
 grep -Fx "git_commit=$expected_sha" "$manifest" >/dev/null
+grep -Fx 'browser_runtime=required' "$manifest" >/dev/null
+test -s "$stage/libexec/nuraloumi/browser/runtime.json"
+test -x "$stage/libexec/nuraloumi/browser/nurabrowser-core"
 version=$(sed -n 's/^version=//p' "$manifest")
 case "$version" in
   *[!0-9a-zA-Z.+-]*|'') echo 'invalid version' >&2; exit 1;;
@@ -33,8 +36,10 @@ for executable in "$stage"/bin/nuraloumi-*; do
   count=$((count+1))
 done
 test "$count" -ge 4
+install -d "$pkg/usr/libexec/nuraloumi/browser"
+cp -R "$stage/libexec/nuraloumi/browser/." "$pkg/usr/libexec/nuraloumi/browser/"
 # Every packaged QoL launcher must already be an audited staging input.
-for required in nuraloumi-player.desktop nuraloumi-files.desktop nuraloumi-notifications.desktop; do
+for required in nuraloumi-browser.desktop nuraloumi-player.desktop nuraloumi-files.desktop nuraloumi-notifications.desktop; do
   test -f "$stage/share/applications/$required" && test ! -L "$stage/share/applications/$required" || {
     echo "missing or unsafe required desktop entry: $required" >&2
     exit 1
@@ -90,6 +95,7 @@ done
 for desktop in "$stage"/share/applications/*.desktop; do
   cmp "$desktop" "$tmp/extracted/usr/share/applications/${desktop##*/}"
 done
+diff -r "$stage/libexec/nuraloumi/browser" "$tmp/extracted/usr/libexec/nuraloumi/browser"
 cmp "$service" "$tmp/extracted/usr/share/dbus-1/services/org.freedesktop.Notifications.service"
 (cd "$out" && sha256sum "$filename") > "$out/$filename.sha256"
 echo "DEB_PACKAGE=PASS path=$out/$filename binaries=$count sha=$expected_sha"
