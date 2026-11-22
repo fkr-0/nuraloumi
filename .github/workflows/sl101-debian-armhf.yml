@@ -158,14 +158,20 @@ jobs:
           [[ "$BROWSER_PRODUCER_RUN" =~ ^[1-9][0-9]*$ ]]
           [[ "$BROWSER_MANIFEST_SHA" =~ ^[0-9a-f]{64}$ ]]
           [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
-          run_json="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BROWSER_PRODUCER_RUN")"
-          jq -e --arg sha "$GITHUB_SHA" '
-            .path == ".github/workflows/nurabrowser-engine-armhf.yml" and
-            .event == "workflow_dispatch" and
-            .status == "completed" and
-            .conclusion == "success" and
-            .head_sha == $sha
-          ' <<<"$run_json" >/dev/null
+          curl --fail --silent --show-error \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/runs/$BROWSER_PRODUCER_RUN" |
+            python3 -c '
+          import json, sys
+          run = json.load(sys.stdin)
+          expected_sha = sys.argv[1]
+          assert run.get("path") == ".github/workflows/nurabrowser-engine-armhf.yml"
+          assert run.get("event") == "workflow_dispatch"
+          assert run.get("status") == "completed" and run.get("conclusion") == "success"
+          assert run.get("head_sha") == expected_sha
+          ' "$GITHUB_SHA"
 
       - name: Download exact qualified ARMHF/glibc WPE runtime
         if: ${{ github.event_name == 'workflow_dispatch' }}

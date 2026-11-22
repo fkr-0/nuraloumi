@@ -70,8 +70,8 @@ class BrowserRuntimeContract(unittest.TestCase):
         self.assertIn("browser_producer_run_id", workflow)
         self.assertIn("browser_runtime_manifest_sha256", workflow)
         self.assertIn("nurabrowser-wpe-musl-qualified-${{ github.sha }}", workflow)
-        self.assertIn(".path == \".github/workflows/nurabrowser-wpe-musl-producer.yml\"", workflow)
-        self.assertIn(".head_sha == $sha", workflow)
+        self.assertIn('run.get("path") == ".github/workflows/nurabrowser-wpe-musl-producer.yml"', workflow)
+        self.assertIn('run.get("head_sha") == expected_sha', workflow)
         self.assertIn("verify_nurabrowser_runtime.py target/browser-producer-download", workflow)
 
     def test_complete_contract_accepts_offline_fixture(self):
