@@ -15,10 +15,19 @@ on:
         description: 'Full SHA256 of producer glibc video-bundle.tar.gz (required for GPU)'
         required: false
         type: string
+      browser_producer_run_id:
+        description: 'Exact run ID for a fully qualified same-commit ARMHF/glibc WPE runtime producer'
+        required: false
+        type: string
+      browser_runtime_manifest_sha256:
+        description: 'SHA256 of runtime.json from the qualified ARMHF/glibc WPE producer artifact'
+        required: false
+        type: string
   push:
     branches:
       - main
       - ci/sl101-debian-armhf-*
+      - 'release/**'
   pull_request:
     paths:
       - .github/workflows/sl101-debian-armhf.yml
@@ -43,6 +52,7 @@ on:
       - scripts/extract_sl101_video_bundle.py
 
 permissions:
+  actions: read
   contents: read
 
 jobs:
@@ -136,8 +146,56 @@ jobs:
           du -sh "target/$TARGET/release"
           df -h .
 
-      - name: Package all Cargo-declared runtime binaries
+      - name: Validate qualified same-commit ARMHF/glibc WPE producer selection
+        if: ${{ github.event_name == 'workflow_dispatch' }}
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BROWSER_PRODUCER_RUN: ${{ inputs.browser_producer_run_id }}
+          BROWSER_MANIFEST_SHA: ${{ inputs.browser_runtime_manifest_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$BROWSER_PRODUCER_RUN" =~ ^[1-9][0-9]*$ ]]
+          [[ "$BROWSER_MANIFEST_SHA" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          run_json="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BROWSER_PRODUCER_RUN")"
+          jq -e --arg sha "$GITHUB_SHA" '
+            .path == ".github/workflows/nurabrowser-engine-armhf.yml" and
+            .event == "workflow_dispatch" and
+            .status == "completed" and
+            .conclusion == "success" and
+            .head_sha == $sha
+          ' <<<"$run_json" >/dev/null
+
+      - name: Download exact qualified ARMHF/glibc WPE runtime
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: nurabrowser-armhf-qualified-${{ github.sha }}
+          run-id: ${{ inputs.browser_producer_run_id }}
+          github-token: ${{ github.token }}
+          path: target/browser-producer-download
+
+      - name: Verify ARMHF/glibc WPE runtime manifest and ELF closure
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        shell: bash
+        env:
+          BROWSER_MANIFEST_SHA: ${{ inputs.browser_runtime_manifest_sha256 }}
+        run: |
+          set -euo pipefail
+          test -s target/browser-producer-download/runtime.json
+          printf '%s  %s\n' "$BROWSER_MANIFEST_SHA" target/browser-producer-download/runtime.json | sha256sum --check --status
+          python3 scripts/verify_nurabrowser_runtime.py target/browser-producer-download \
+            --source-sha "$GITHUB_SHA" \
+            --target "$TARGET" \
+            --producer-revision "$GITHUB_SHA"
+
+      - name: Package all Cargo-declared runtime binaries
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        shell: bash
+        env:
+          NURALOUMI_BROWSER_RUNTIME_DIR: ${{ github.workspace }}/target/browser-producer-download
+          NURALOUMI_BROWSER_PRODUCER_REVISION: ${{ github.sha }}
         run: |
           set -euo pipefail
           # Fail closed if checkout did not retain commit provenance.
@@ -159,6 +217,7 @@ jobs:
             >> target/gha-artifact/BUILD-INFO.txt
 
       - name: Fail closed on wrong ELF, glibc, ABI or missing surface binaries
+        if: ${{ github.event_name == 'workflow_dispatch' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -210,6 +269,7 @@ jobs:
           echo 'ELF_AUDIT=PASS heuristic-only; SL101 hardware SIGILL check remains pending'
 
       - name: Assemble a Debian 13 armhf .deb from these verified binaries
+        if: ${{ github.event_name == 'workflow_dispatch' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -219,6 +279,7 @@ jobs:
           test -s target/gha-artifact/native-deb/nuraloumi_*_armhf.deb.sha256
 
       - name: Upload Debian armhf tarball, installable DEB, manifests and ELF evidence
+        if: ${{ github.event_name == 'workflow_dispatch' }}
         uses: actions/upload-artifact@v4
         with:
           name: nuraloumi-debian13-armv7-gnueabihf-${{ github.run_number }}-${{ github.sha }}
@@ -231,6 +292,12 @@ jobs:
             target/gha-artifact/ELF-AUDIT.txt
           if-no-files-found: error
           retention-days: 14
+
+      - name: Keep package promotion pending outside an explicit release dispatch
+        if: ${{ github.event_name != 'workflow_dispatch' }}
+        shell: bash
+        run: |
+          echo 'PACKAGE_GATE=PENDING: supply exact same-commit qualified ARMHF/glibc WPE runtime inputs through workflow_dispatch.' >> "$GITHUB_STEP_SUMMARY"
 
       # The ordinary Debian package is software-only. The independent GPU
       # artifact consumes a glibc producer bundle, never the musl one.
@@ -282,10 +349,12 @@ jobs:
             --producer-revision "$NURALOUMI_VIDEO_PRODUCER_REVISION" \
             --archive-sha256 "$NURALOUMI_VIDEO_ARCHIVE_SHA256"
 
-      - name: Package and verify separate glibc GPU-video variant
+      - name: Package and verify combined WPE plus glibc GPU-video variant
         if: ${{ inputs.gpu_producer_run_id != '' }}
         shell: bash
         env:
+          NURALOUMI_BROWSER_RUNTIME_DIR: ${{ github.workspace }}/target/browser-producer-download
+          NURALOUMI_BROWSER_PRODUCER_REVISION: ${{ github.sha }}
           NURALOUMI_VIDEO_PRODUCER_REVISION: ${{ inputs.gpu_producer_revision }}
           NURALOUMI_VIDEO_ARCHIVE_SHA256: ${{ inputs.gpu_archive_sha256 }}
           NURALOUMI_VIDEO_BUNDLE_SOURCE_VERIFIED: '1'
@@ -298,6 +367,8 @@ jobs:
           test "$(find target/gha-artifact/nuraloumi-gpu-glibc-ci/bin -name nuraloumi-playerd -type f | wc -l)" -eq 1
           test -f target/gha-artifact/nuraloumi-gpu-glibc-ci/lib/nuraloumi/video/provenance.json
           (cd target/gha-artifact && sha256sum nuraloumi-gpu-glibc-ci.tar > GPU-GLIBC-SHA256SUMS.txt)
+          sh scripts/build-ci-debian-deb.sh target/gha-artifact/nuraloumi-gpu-glibc-ci target/gha-artifact/native-gpu-deb "$GITHUB_SHA"
+          find target/gha-artifact/native-gpu-deb -name 'nuraloumi_*_armhf.deb' -type f -size +0c | grep -q .
 
       - name: Upload verified glibc GPU-video variant (device qualification pending)
         if: ${{ inputs.gpu_producer_run_id != '' }}
@@ -307,6 +378,7 @@ jobs:
           path: |
             target/gha-artifact/nuraloumi-gpu-glibc-ci.tar
             target/gha-artifact/nuraloumi-gpu-glibc-ci/MANIFEST.txt
+            target/gha-artifact/native-gpu-deb/**
             target/gha-artifact/GPU-GLIBC-SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 14

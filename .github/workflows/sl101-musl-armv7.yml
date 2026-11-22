@@ -26,6 +26,7 @@ on:
   push:
     branches:
       - main
+      - 'release/**'
   pull_request:
     paths:
       - .github/workflows/sl101-musl-armv7.yml
@@ -166,6 +167,7 @@ jobs:
             --producer-revision "$GITHUB_SHA"
 
       - name: Package the exact committed build
+        if: ${{ github.event_name == 'workflow_dispatch' }}
         shell: bash
         env:
           NURALOUMI_BROWSER_RUNTIME_DIR: ${{ github.workspace }}/target/browser-producer-download
@@ -202,6 +204,7 @@ jobs:
           cat "$NURALOUMI_SL101_CROSS_ROOT/source.txt" >> target/gha-artifact/BUILD-INFO.txt
 
       - name: Fail closed on wrong ELF, musl ABI or missing surface binaries
+        if: ${{ github.event_name == 'workflow_dispatch' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -251,6 +254,7 @@ jobs:
           echo 'ELF_AUDIT=PASS heuristic-only; physical SL101 no-SIGILL remains pending'
 
       - name: Sign an Alpine armv7 development .apk from these audited binaries
+        if: ${{ github.event_name == 'workflow_dispatch' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -267,6 +271,7 @@ jobs:
           test -s target/gha-artifact/native-apk/NURALOUMI-APK-SHA256SUMS.txt
           find target/gha-artifact/native-apk -name 'nuraloumi-*.apk' -type f -size +0c | grep -q .
       - name: Upload Alpine armv7 musl tarball, signed development APK and qualification evidence
+        if: ${{ github.event_name == 'workflow_dispatch' }}
         uses: actions/upload-artifact@v4
         with:
           name: nuraloumi-alpine322-armv7-musleabihf-${{ github.run_number }}-${{ github.sha }}
@@ -281,6 +286,12 @@ jobs:
             target/gha-artifact/BINARY-LIST.txt
           if-no-files-found: error
           retention-days: 14
+
+      - name: Keep package promotion pending outside an explicit release dispatch
+        if: ${{ github.event_name != 'workflow_dispatch' }}
+        shell: bash
+        run: |
+          echo 'PACKAGE_GATE=PENDING: supply exact same-commit qualified WPE runtime inputs through workflow_dispatch.' >> "$GITHUB_STEP_SUMMARY"
 
       # The ordinary artifact above is intentionally software-only. This
       # independent artifact is emitted only after an exact producer transfer.

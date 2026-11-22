@@ -103,6 +103,17 @@ class NativePackageCiContract(unittest.TestCase):
             for forbidden in ("ssh ", "scp ", "192.168.", "reboot", "systemctl "):
                 self.assertNotIn(forbidden, ci)
 
+    def test_both_abi_package_jobs_are_explicit_and_release_branch_qualified(self):
+        for workflow in (MUSL, DEB):
+            with self.subTest(workflow="musl" if workflow is MUSL else "glibc"):
+                self.assertIn("- 'release/**'", workflow)
+                self.assertIn("browser_producer_run_id:", workflow)
+                self.assertIn("browser_runtime_manifest_sha256:", workflow)
+                self.assertIn("nurabrowser-", workflow)
+                self.assertIn("github.event_name == 'workflow_dispatch'", workflow)
+                self.assertIn("NURALOUMI_BROWSER_RUNTIME_DIR", workflow)
+                self.assertIn("NURALOUMI_BROWSER_PRODUCER_REVISION", workflow)
+
     def test_combined_gpu_package_contains_same_wpe_runtime_and_signed_apk(self):
         gpu_step = MUSL.split("- name: Package and audit GPU-video variant", 1)[1]
         self.assertIn("NURALOUMI_BROWSER_RUNTIME_DIR", gpu_step)
@@ -113,6 +124,8 @@ class NativePackageCiContract(unittest.TestCase):
         self.assertIn("/output/native-gpu-apk", gpu_step)
         self.assertIn("native-gpu-apk/**", gpu_step)
         self.assertIn("GPU-SHA256SUMS.txt", gpu_step)
+        self.assertIn("native-gpu-deb", DEB)
+        self.assertIn("NURALOUMI_BROWSER_RUNTIME_DIR", DEB.split("Package and verify combined WPE plus glibc GPU-video variant", 1)[1])
 
     def test_apk_is_native_armv7_and_signed_but_never_auto_trusted(self):
         self.assertIn("docker run --rm --platform linux/arm/v7", MUSL)

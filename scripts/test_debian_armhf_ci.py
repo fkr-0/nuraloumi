@@ -78,6 +78,29 @@ class DebianArmhfCiTests(unittest.TestCase):
         # The native Debian DEB is software-only, no private musl blobs.
         self.assertLess(self.ci.index('Assemble a Debian 13 armhf .deb'), self.ci.index('Retrieve independently built glibc GPU'))
 
+    def test_glibc_package_consumes_exact_same_commit_qualified_browser_runtime(self):
+        for part in (
+            'browser_producer_run_id:',
+            'browser_runtime_manifest_sha256:',
+            'nurabrowser-armhf-qualified-${{ github.sha }}',
+            '.path == ".github/workflows/nurabrowser-engine-armhf.yml"',
+            '.head_sha == $sha',
+            'verify_nurabrowser_runtime.py target/browser-producer-download',
+            'NURALOUMI_BROWSER_RUNTIME_DIR: ${{ github.workspace }}/target/browser-producer-download',
+            'NURALOUMI_BROWSER_PRODUCER_REVISION: ${{ github.sha }}',
+        ):
+            self.assertIn(part, self.ci)
+        self.assertIn('if: ${{ github.event_name == \'workflow_dispatch\' }}', self.ci)
+        self.assertIn('if: ${{ github.event_name != \'workflow_dispatch\' }}', self.ci)
+
+    def test_existing_glibc_engine_artifact_is_explicitly_not_a_runtime_qualification(self):
+        producer = (ROOT / '.github/workflows/nurabrowser-engine-armhf.yml').read_text()
+        builder = (ROOT / 'scripts/ci-build-nurabrowser-engine.sh').read_text()
+        self.assertIn('nurabrowser-engine-armhf.tar', producer)
+        self.assertIn('web_process_sandbox=unqualified', builder)
+        self.assertIn('dependency_instruction_closure=unqualified', builder)
+        self.assertNotIn('nurabrowser-armhf-qualified-', producer)
+
     def test_packaging_all_declared_runtime_surfaces(self):
         for part in (
             "cargo -Z build-std=std,panic_abort build --locked --release --workspace --bins",
