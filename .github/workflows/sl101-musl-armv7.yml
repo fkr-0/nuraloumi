@@ -210,14 +210,13 @@ jobs:
           cat "$NURALOUMI_SL101_CROSS_ROOT/source.txt" >> target/gha-artifact/BUILD-INFO.txt
 
       - name: Fail closed on wrong ELF, musl ABI or missing surface binaries
-        if: ${{ github.event_name == 'workflow_dispatch' }}
         shell: bash
         run: |
           set -euo pipefail
           audit=target/gha-artifact/ELF-AUDIT.txt
           : > "$audit"
           while IFS= read -r name; do
-            bin="target/gha-artifact/nuraloumi-ci/bin/$name"
+            bin="target/$TARGET/release/$name"
             test -x "$bin"
             file "$bin" | tee -a "$audit"
             readelf -h "$bin" | grep -Eq 'Class:[[:space:]]+ELF32'
@@ -256,7 +255,9 @@ jobs:
           done < target/gha-artifact/BINARY-LIST.txt
           count=$(grep -c '^PASS ' "$audit")
           test "$count" -eq "$(wc -l < target/gha-artifact/BINARY-LIST.txt)"
-          (cd target/gha-artifact && sha256sum nuraloumi-ci.tar > SHA256SUMS.txt)
+          if test -s target/gha-artifact/nuraloumi-ci.tar; then
+            (cd target/gha-artifact && sha256sum nuraloumi-ci.tar > SHA256SUMS.txt)
+          fi
           echo 'ELF_AUDIT=PASS heuristic-only; physical SL101 no-SIGILL remains pending'
 
       - name: Sign an Alpine armv7 development .apk from these audited binaries
@@ -298,6 +299,18 @@ jobs:
         shell: bash
         run: |
           echo 'PACKAGE_GATE=PENDING: supply exact same-commit qualified WPE runtime inputs through workflow_dispatch.' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload musl build-only ELF and source evidence
+        if: ${{ github.event_name != 'workflow_dispatch' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuraloumi-musl-armv7-build-audit-${{ github.run_number }}-${{ github.sha }}
+          path: |
+            target/gha-artifact/BUILD-LOG.txt
+            target/gha-artifact/BINARY-LIST.txt
+            target/gha-artifact/ELF-AUDIT.txt
+          if-no-files-found: error
+          retention-days: 14
 
       # The ordinary artifact above is intentionally software-only. This
       # independent artifact is emitted only after an exact producer transfer.

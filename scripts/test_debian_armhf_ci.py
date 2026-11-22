@@ -78,6 +78,12 @@ class DebianArmhfCiTests(unittest.TestCase):
         # The native Debian DEB is software-only, no private musl blobs.
         self.assertLess(self.ci.index('Assemble a Debian 13 armhf .deb'), self.ci.index('Retrieve independently built glibc GPU'))
 
+    def test_build_only_glibc_push_audits_direct_release_binaries(self):
+        section = self.ci.split("Fail closed on wrong ELF", 1)[1].split("\n      - name:", 1)[0]
+        self.assertNotIn("if: ${{ github.event_name == 'workflow_dispatch' }}", section)
+        self.assertIn('target/$TARGET/release/$name', section)
+        self.assertIn('name: Upload glibc build-only ELF and source evidence', self.ci)
+
     def test_glibc_package_consumes_exact_same_commit_qualified_browser_runtime(self):
         for part in (
             'browser_producer_run_id:',

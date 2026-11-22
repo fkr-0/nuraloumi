@@ -139,9 +139,11 @@ jobs:
         run: |
           set -euo pipefail
           rustc -vV
+          mkdir -p target/gha-artifact
           # -Z build-std applies RUSTFLAGS (notably -d32) to the Rust sysroot.
-          cargo -Z build-std=std,panic_abort build --locked --release --workspace --bins --target "$TARGET"
-          python3 scripts/package-binaries.py | tee /tmp/sl101-runtime-binaries.txt
+          cargo -Z build-std=std,panic_abort build --locked --release --workspace --bins --target "$TARGET" | tee target/gha-artifact/BUILD-LOG.txt
+          python3 scripts/package-binaries.py | tee target/gha-artifact/BINARY-LIST.txt
+          cp target/gha-artifact/BINARY-LIST.txt /tmp/sl101-runtime-binaries.txt
           test "$(wc -l < /tmp/sl101-runtime-binaries.txt)" -ge 4
           du -sh "target/$TARGET/release"
           df -h .
@@ -223,14 +225,13 @@ jobs:
             >> target/gha-artifact/BUILD-INFO.txt
 
       - name: Fail closed on wrong ELF, glibc, ABI or missing surface binaries
-        if: ${{ github.event_name == 'workflow_dispatch' }}
         shell: bash
         run: |
           set -euo pipefail
           audit=target/gha-artifact/ELF-AUDIT.txt
           : > "$audit"
           while IFS= read -r name; do
-            bin="target/gha-artifact/nuraloumi-ci/bin/$name"
+            bin="target/$TARGET/release/$name"
             test -x "$bin"
             file "$bin" | tee -a "$audit"
             readelf -h "$bin" | grep -Eq 'Class:[[:space:]]+ELF32'
@@ -270,8 +271,10 @@ jobs:
           done < /tmp/sl101-runtime-binaries.txt
           count=$(grep -c '^PASS ' "$audit")
           test "$count" -eq "$(wc -l < /tmp/sl101-runtime-binaries.txt)"
-          (cd target/gha-artifact && sha256sum nuraloumi-ci.tar > SHA256SUMS.txt)
-          cat target/gha-artifact/SHA256SUMS.txt
+          if test -s target/gha-artifact/nuraloumi-ci.tar; then
+            (cd target/gha-artifact && sha256sum nuraloumi-ci.tar > SHA256SUMS.txt)
+            cat target/gha-artifact/SHA256SUMS.txt
+          fi
           echo 'ELF_AUDIT=PASS heuristic-only; SL101 hardware SIGILL check remains pending'
 
       - name: Assemble a Debian 13 armhf .deb from these verified binaries
@@ -295,6 +298,18 @@ jobs:
             target/gha-artifact/native-deb/**
             target/gha-artifact/SHA256SUMS.txt
             target/gha-artifact/BUILD-INFO.txt
+            target/gha-artifact/ELF-AUDIT.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload glibc build-only ELF and source evidence
+        if: ${{ github.event_name != 'workflow_dispatch' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuraloumi-glibc-armhf-build-audit-${{ github.run_number }}-${{ github.sha }}
+          path: |
+            target/gha-artifact/BUILD-LOG.txt
+            target/gha-artifact/BINARY-LIST.txt
             target/gha-artifact/ELF-AUDIT.txt
           if-no-files-found: error
           retention-days: 14

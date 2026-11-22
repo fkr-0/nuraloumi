@@ -114,6 +114,15 @@ class NativePackageCiContract(unittest.TestCase):
                 self.assertIn("NURALOUMI_BROWSER_RUNTIME_DIR", workflow)
                 self.assertIn("NURALOUMI_BROWSER_PRODUCER_REVISION", workflow)
 
+    def test_build_only_push_runs_static_elf_audit_without_package_runtime(self):
+        for workflow, abi in ((MUSL, "musleabihf"), (DEB, "gnueabihf")):
+            with self.subTest(abi=abi):
+                section = workflow.split("Fail closed on wrong ELF", 1)[1].split("\n      - name:", 1)[0]
+                self.assertNotIn("if: ${{ github.event_name == 'workflow_dispatch' }}", section)
+                self.assertIn(f'target/$TARGET/release/$name', section)
+                self.assertIn("ELF-AUDIT.txt", workflow)
+                self.assertIn("build-only", workflow)
+
     def test_combined_gpu_package_contains_same_wpe_runtime_and_signed_apk(self):
         gpu_step = MUSL.split("- name: Package and audit GPU-video variant", 1)[1]
         self.assertIn("NURALOUMI_BROWSER_RUNTIME_DIR", gpu_step)
