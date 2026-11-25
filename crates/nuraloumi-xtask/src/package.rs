@@ -160,7 +160,11 @@ pub fn stage_package(
     root: &Path,
     target: Option<&str>,
     explicit_out: Option<&Path>,
+    profile: &str,
 ) -> Result<PathBuf, String> {
+    if !matches!(profile, "full" | "shell-only") {
+        return Err(format!("unsupported release profile: {profile}"));
+    }
     let resolved_target = match target {
         Some(target) => target.to_owned(),
         None => host_triple(root)?,
@@ -332,10 +336,12 @@ pub fn stage_package(
     let commit = git_commit(root)?;
     // The browser is a mandatory component of ordinary ARMv7 releases.
     // A Rust launcher alone is never evidence of a working native browser.
-    if matches!(
-        resolved_target.as_str(),
-        "armv7-unknown-linux-musleabihf" | "armv7-unknown-linux-gnueabihf"
-    ) {
+    if profile == "full"
+        && matches!(
+            resolved_target.as_str(),
+            "armv7-unknown-linux-musleabihf" | "armv7-unknown-linux-gnueabihf"
+        )
+    {
         let bundle = env::var_os("NURALOUMI_BROWSER_RUNTIME_DIR").ok_or(
             "required NURALOUMI_BROWSER_RUNTIME_DIR is absent; no browser-inclusive ARMv7 release",
         )?;
@@ -365,9 +371,14 @@ pub fn stage_package(
     manifest.push_str(&format!("git_dirty={}\n", git_dirty(root)?));
     manifest.push_str(&format!("build_command={build_command}\n"));
     manifest.push_str(&format!("binaries={}\n", staged_bins.join(",")));
+    if profile == "shell-only" {
+        manifest.push_str("release_profile=shell-only\n");
+    }
     manifest.push_str(&format!(
         "browser_runtime={}\n",
-        if resolved_target.starts_with("armv7-") {
+        if profile == "shell-only" {
+            "deferred"
+        } else if resolved_target.starts_with("armv7-") {
             "required"
         } else {
             "not-targeted"
@@ -410,6 +421,7 @@ pub fn check_package(root: &Path, stage: &Path) -> Result<(), String> {
     let mut target = None;
     let mut declared_bins = None;
     let mut browser_runtime = None;
+    let mut release_profile = None;
     let mut in_files = false;
     let mut keys = std::collections::BTreeSet::new();
     for line in text.lines() {
@@ -456,6 +468,7 @@ pub fn check_package(root: &Path, stage: &Path) -> Result<(), String> {
                     declared_bins = Some(value.split(',').map(str::to_owned).collect::<Vec<_>>())
                 }
                 "browser_runtime" => browser_runtime = Some(value.to_owned()),
+                "release_profile" => release_profile = Some(value.to_owned()),
                 "version" | "git_commit" | "git_dirty" | "build_command" => {}
                 _ => return Err(format!("invalid manifest key or schema: {key}={value}")),
             }
@@ -478,9 +491,17 @@ pub fn check_package(root: &Path, stage: &Path) -> Result<(), String> {
         return Err("package manifest missing required fields".to_owned());
     }
     let bins = runtime_binaries(root)?;
-    if target
-        .as_deref()
-        .is_some_and(|value| value.starts_with("armv7-"))
+    let shell_only = release_profile.as_deref() == Some("shell-only");
+    if release_profile.is_some() && !shell_only {
+        return Err("unsupported package release profile".into());
+    }
+    if shell_only && browser_runtime.as_deref() != Some("deferred") {
+        return Err("shell-only package must defer native browser runtime".into());
+    }
+    if !shell_only
+        && target
+            .as_deref()
+            .is_some_and(|value| value.starts_with("armv7-"))
     {
         if browser_runtime.as_deref() != Some("required") {
             return Err("ARMv7 browser runtime must be mandatory".into());
@@ -496,7 +517,7 @@ pub fn check_package(root: &Path, stage: &Path) -> Result<(), String> {
             target.as_deref().unwrap_or(""),
             &revision,
         )?;
-    } else if browser_runtime.as_deref() != Some("not-targeted") {
+    } else if !shell_only && browser_runtime.as_deref() != Some("not-targeted") {
         return Err("invalid host browser runtime field".into());
     }
     if declared_bins.as_ref() != Some(&bins) {

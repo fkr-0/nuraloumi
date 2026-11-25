@@ -241,13 +241,14 @@ fn cmd_deps(root: &Path, args: &[String]) -> Result<(), String> {
 
 fn cmd_package(root: &Path, args: &[String]) -> Result<(), String> {
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
-        println!("Usage: nuraloumi-xtask package [--target TRIPLE] [--out PATH]");
+        println!("Usage: nuraloumi-xtask package [--target TRIPLE] [--out PATH] [--profile full|shell-only]");
         return Ok(());
     }
     let target = option_value(args, "--target")?;
     let out = option_value(args, "--out")?.map(PathBuf::from);
-    reject_consumed_options(args, &["--target", "--out"])?;
-    stage_package(root, target.as_deref(), out.as_deref())?;
+    let profile = option_value(args, "--profile")?.unwrap_or_else(|| "full".into());
+    reject_consumed_options(args, &["--target", "--out", "--profile"])?;
+    stage_package(root, target.as_deref(), out.as_deref(), &profile)?;
     Ok(())
 }
 
