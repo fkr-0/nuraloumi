@@ -315,20 +315,31 @@ impl BrowserPress {
     }
 }
 
-/// Only poll while WebKit reports an outstanding load; otherwise block on
-/// Wayland to avoid idle CPU/wakeups on the Tegra20.
-fn dispatch_until_event(backend: &mut WaylandBackend, loading: bool) -> Result<bool, String> {
-    if !loading {
-        backend.blocking_dispatch().map_err(|e| e.to_string())?;
-        return Ok(false);
+// Browser chrome has a separate Wayland connection from the WPE page surface.
+// Link clicks can navigate WebKit without generating an event on our chrome
+// connection. Keep the idle refresh bounded, at less than one IPC wakeup per
+// second, so address/history/tab status cannot remain stale indefinitely.
+const LOADING_REFRESH_MS: i32 = 350;
+const IDLE_REFRESH_MS: i32 = 1_500;
+
+fn browser_refresh_interval_ms(loading: bool) -> i32 {
+    if loading {
+        LOADING_REFRESH_MS
+    } else {
+        IDLE_REFRESH_MS
     }
+}
+
+/// Wait for a chrome Wayland event or a bounded status refresh. No busy loop:
+/// poll sleeps until either a Wayland event or the next lightweight IPC poll.
+fn dispatch_until_event(backend: &mut WaylandBackend, loading: bool) -> Result<bool, String> {
     backend.flush().map_err(|e| e.to_string())?;
     let mut fd = libc::pollfd {
         fd: backend.poll_fd(),
         events: libc::POLLIN,
         revents: 0,
     };
-    let result = unsafe { libc::poll(&mut fd, 1, 350) };
+    let result = unsafe { libc::poll(&mut fd, 1, browser_refresh_interval_ms(loading)) };
     if result < 0 {
         let err = std::io::Error::last_os_error();
         if err.kind() != std::io::ErrorKind::Interrupted {
@@ -676,6 +687,16 @@ mod tests {
         assert_eq!(press.touch_up(3), None);
         drag.end(3);
         assert_eq!(drag.motion(3, y - 40.0, 16.0, 300.0), None);
+    }
+
+    #[test]
+    fn browser_chrome_refresh_remains_bounded_after_load_finishes() {
+        // WebKit may navigate through an in-page link with no chrome-side
+        // Wayland input. A blocking dispatch here would leave the address and
+        // Back/Forward affordances stale until the next user interaction.
+        assert_eq!(browser_refresh_interval_ms(true), 350);
+        assert_eq!(browser_refresh_interval_ms(false), 1_500);
+        assert!(browser_refresh_interval_ms(false) < 2_000);
     }
 
     #[test]
