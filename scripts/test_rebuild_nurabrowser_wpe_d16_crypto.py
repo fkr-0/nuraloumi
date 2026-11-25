@@ -57,6 +57,11 @@ class CryptoBuildContract(unittest.TestCase):
         self.assertIn("Tag_ABI_VFP_args: VFP registers", self.text)
         self.assertIn("Tag_FP_arch: VFPv3-D16", self.text)
 
+    def test_autoconf_uses_the_musl_compiler_triplet(self):
+        self.assertIn('toolchain_triplet=$(cc -dumpmachine)', self.text)
+        self.assertEqual(self.text.count('--build="$toolchain_triplet"'), 1)
+        self.assertEqual(self.text.count('--host="$toolchain_triplet"'), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

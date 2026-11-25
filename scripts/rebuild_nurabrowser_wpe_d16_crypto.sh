@@ -61,6 +61,9 @@ export CFLAGS='-O2 -mcpu=cortex-a9 -mfpu=vfpv3-d16 -mfloat-abi=hard -mno-unalign
 export CXXFLAGS="$CFLAGS"
 export CPPFLAGS=''
 export LDFLAGS='-Wl,-z,relro,-z,now'
+# libgcrypt's old config.guess sees gnueabihf under QEMU even on Alpine musl.
+# Fix its Autoconf triplets to the compiler target, without cross mode.
+toolchain_triplet=$(cc -dumpmachine)
 
 # Nettle's Alpine APKBUILD ordinarily enables the fat/NEON runtime dispatch.
 # Turn off both the dispatch and assembler, preserving public SONAMEs.
@@ -77,7 +80,8 @@ export LDFLAGS='-Wl,-z,relro,-z,now'
 (
   cd "$out/work/libgcrypt-1.10.3"
   patch -p1 -i "$inputs/gcc14-armv7.patch" > "$out/logs/gcrypt-patch.log"
-  ./configure --prefix=/usr --libdir=/usr/lib --disable-asm \
+  ./configure --build="$toolchain_triplet" --host="$toolchain_triplet" \
+    --prefix=/usr --libdir=/usr/lib --disable-asm \
     --disable-neon-support --disable-arm-crypto-support \
     > "$out/logs/gcrypt-configure.log" 2>&1
   make -j1 > "$out/logs/gcrypt-build.log" 2>&1
