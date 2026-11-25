@@ -5,34 +5,58 @@ use std::{
     path::Path,
 };
 
-/// Inspect the pathname field (column 6) of actual /proc/<pid>/maps entries.
-/// Never identify a driver from an address, inode, or unrelated substring.
+/// Inspect the pathname remainder after the five fixed /proc/<pid>/maps fields.
+/// Never identify a driver from a truncated path, inode, or unrelated substring.
 fn maps_grate_gallium(maps: &str) -> bool {
     const LIB: &str = "/lib/libgallium-25.0.7.so";
     const CLEAN: &str = "/opt/grate-mesa25-clean/lib/arm-linux-gnueabihf/libgallium-25.0.7.so";
-    fn is_hex(s: &str) -> bool {
-        !s.is_empty() && s.bytes().all(|byte| byte.is_ascii_hexdigit())
-    }
-    fn pathname(line: &str) -> Option<&str> {
-        let mut fields = line.split_whitespace();
-        let (start, end) = fields.next()?.split_once('-')?;
-        let perms = fields.next()?.as_bytes();
-        let offset = fields.next()?;
-        let (major, minor) = fields.next()?.split_once(':')?;
-        let inode = fields.next()?;
-        let path = fields.next()?;
-        if !is_hex(start)
-            || !is_hex(end)
-            || !matches!(perms, [b'r' | b'-', b'w' | b'-', b'x' | b'-', b'p' | b's'])
-            || !is_hex(offset)
-            || !is_hex(major)
-            || !is_hex(minor)
-            || inode.is_empty()
-            || !inode.bytes().all(|byte| byte.is_ascii_digit())
+    fn hex(s: &str, min: usize, max: usize) -> Option<u64> {
+        if !(min..=max).contains(&s.len())
+            || !s
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         {
             return None;
         }
-        Some(path)
+        u64::from_str_radix(s, 16).ok()
+    }
+
+    fn field(line: &str) -> Option<(&str, &str)> {
+        let (head, rest) = line.split_once(' ')?;
+        // The kernel emits ordinary ASCII spaces between the fixed fields.
+        // Tabs and repeated spaces here are malformed, not path characters.
+        if head.is_empty() || rest.is_empty() || rest.starts_with(' ') {
+            return None;
+        }
+        Some((head, rest))
+    }
+    fn pathname(line: &str) -> Option<&str> {
+        let (range, line) = field(line)?;
+        let (start, end) = range.split_once('-')?;
+        let start = hex(start, 8, 16)?;
+        let end = hex(end, 8, 16)?;
+        let (perms, line) = field(line)?;
+        let (offset, line) = field(line)?;
+        let (device, line) = field(line)?;
+        let (major, minor) = device.split_once(':')?;
+        let (inode, path) = line.split_once(' ')?;
+        if start >= end
+            || hex(offset, 8, 16).is_none()
+            || hex(major, 2, 8).is_none()
+            || hex(minor, 2, 8).is_none()
+            || (inode.len() > 1 && inode.starts_with('0'))
+            || inode.parse::<u64>().is_err()
+            || !matches!(
+                perms.as_bytes(),
+                [b'r' | b'-', b'w' | b'-', b'x' | b'-', b'p' | b's']
+            )
+        {
+            return None;
+        }
+        // The kernel may pad after the inode for a pathname column. Once the
+        // path begins, all bytes—including spaces, tabs and "(deleted)"—are
+        // part of the opaque name and must remain in the exact comparison.
+        Some(path.trim_start_matches(' '))
     }
     fn installation_id_is_valid(id: &str) -> bool {
         !id.is_empty()
@@ -42,7 +66,7 @@ fn maps_grate_gallium(maps: &str) -> bool {
             && id != "."
             && id != ".."
     }
-    maps.lines().any(|line| {
+    maps.split('\n').any(|line| {
         let Some(path) = pathname(line) else {
             return false;
         };
@@ -354,6 +378,60 @@ mod tests {
         ] {
             assert_eq!(classify(SWAY_ENV, line), "GLES2", "{line}");
         }
+    }
+
+    #[test]
+    fn maps_pathname_suffix_and_embedded_whitespace_never_alias_driver() {
+        let driver = "/opt/grate-mesa25-musl-fixture/lib/libgallium-25.0.7.so";
+        for path in [
+            format!("{driver} (deleted)"),
+            format!("{driver} extra"),
+            format!("{driver}\tother"),
+            format!("{driver}\r"),
+            format!("{driver}\\012"),
+            format!("/tmp/other {driver}"),
+        ] {
+            assert_eq!(classify(SWAY_ENV, &maps(&path)), "GLES2", "{path:?}");
+        }
+        // Padding after inode is not part of the name; content after the
+        // first pathname byte must never be split or truncated.
+        assert_eq!(
+            classify(
+                SWAY_ENV,
+                &format!("b6e00000-b6e60000 r-xp 00000000 b3:01 17985      {driver}\n")
+            ),
+            "Grate"
+        );
+    }
+
+    #[test]
+    fn maps_rejects_noncanonical_headers_and_invalid_intervals() {
+        let driver = "/opt/grate-mesa25-musl-fixture/lib/libgallium-25.0.7.so";
+        for header in [
+            "B6e00000-b6e60000 r-xp 00000000 b3:01 17985",
+            "b6e00000-b6e60000 r-xp 00000000 B3:01 17985",
+            "b6e00000-b6e60000 r-xp 00000000 b3:1 17985",
+            "b6e00000-b6e60000 r-xp 00000000 b3:01 017985",
+            "b6e00000-b6e60000 r-xp 00000000 b3:01 -1",
+            "b6e60000-b6e00000 r-xp 00000000 b3:01 17985",
+            "b6e00000-b6e00000 r-xp 00000000 b3:01 17985",
+            "b6e00000-b6e60000 r-zp 00000000 b3:01 17985",
+            "b6e00000-b6e60000  r-xp 00000000 b3:01 17985",
+            "b6e00000-b6e60000\tr-xp 00000000 b3:01 17985",
+            "b6e00000-b6e60000 r-xp 00000000 b3:01\t17985",
+            "b6e00000-b6e60000 r-xp 0000000G b3:01 17985",
+        ] {
+            assert_eq!(
+                classify(SWAY_ENV, &format!("{header} {driver}\n")),
+                "GLES2",
+                "{header}"
+            );
+        }
+        // Anonymous entries are valid but cannot identify a driver.
+        assert_eq!(
+            classify(SWAY_ENV, "b6e00000-b6e60000 rw-p 00000000 00:00 0  \n"),
+            "GLES2"
+        );
     }
 
     #[test]
