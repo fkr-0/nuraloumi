@@ -1,0 +1,109 @@
+schema: infra-change-packet/v1
+schema_version: 1
+change:
+  service: NuraLoumi 0.0.8-rc.2 regular browser integration
+  host: sl101-nura (owner-authorized 192.168.23.106)
+  risk: migration
+  requested_scope:
+    - integrate Mesa 26.2.4 plus LLVM 23 VFPv3-D16 correction
+    - qualify WPE 2.54.2 navigation and visible Wayland pages
+    - qualify WayVNC pointer/touch and NuraPlayer isolation
+    - deploy the CI-verified production NuraLoumi release after all gates pass
+ownership:
+  state: known-gap
+  canonical_source: /home/user/code/nuraloumi
+  external_dependencies:
+    - /home/user/code/sl101_linux/patches/mesa-26.2.4
+    - Alpine armv7/musl WebKit 2.54.2 complete installed-layout runtime
+    - Sway/WayVNC user session and existing Pixman recovery path
+    - owner-directed upstream main CI release and SHA-verified artifact
+  blockers:
+    - no source-matched, qualified regular NuraBrowser runtime.json and closure manifest
+    - WPE producer workflow explicitly emits UNQUALIFIED candidate; regular CI release requires missing pinned runtime
+    - the legacy local main worktree at 7e180747 is divergent and contains nine uncommitted edits; it must be preserved until an explicitly reviewed reconciliation
+    - Cargo.toml now reports 0.0.8-rc.2 and the host source tests pass, but the exact-source WPE runtime and production package are not qualified
+    - no verified production artifact or prepared versioned rollback snapshot for new install
+    - real semantic touch and full WayVNC navigation input not yet qualified
+preflight:
+  inventory:
+    - "hostname: sl101-nura, ARMv7l, kernel: 7.0.1-postmarketos-grate-dmavde1"
+    - "boot_id: d09925e8-b244-4134-a813-1d5efe326ae8"
+    - "eMMC CID: 7001004d4d43333247448d402a656e00"
+    - "SD CID: 035344534c31323880ac79a543010300"
+    - "battery: 99 percent, AC online: 1"
+    - "root storage: 89.3G available at preflight"
+    - "current release: /opt/nuraloumi/releases/fb47cfc73c614440dcbf6aecb12642085fef796a/bin"
+    - "installed libgallium-26.2.4.so SHA256: 17acc83789f834278f4fd939a79c627dfe2054bedee353733c57029861af6619"
+    - "patched private libgallium SHA256: 09e03bea18be4120a6d22dde9887e4a452dcd488df6933c5cf46a4c15ec8e87b"
+    - "live compositor PID: 1445, WayVNC PID: 1481"
+    - "regular /usr/libexec/nuraloumi/browser runtime: absent"
+  local_checks:
+    - "SL101 ISA and pixel/IPC tests: 19 focused tests passed"
+    - "NuraLoumi browser qualification and runtime contract tests: 29 passed"
+    - "headless sandboxed WPE 2.54.2: two prior passes; JIT decoded with zero forbidden instructions"
+    - "nested Sway/Pixman with patched Mesa and softpipe: actual index and next-page screenshot oracles PASS"
+    - "live WayVNC through SSH RFB: first-page pixel capture PASS, server and compositor survived"
+    - "WayVNC pointer click: attempted but navigation unproven"
+  preview_commands:
+    - "python3 scripts/verify-ci-artifact.py --lane alpine --run-id <success-run> --sha <reviewed-git-sha> --out <new-staging>"
+    - "python3 scripts/qualify-nurabrowser-release.py --archive <verified-archive> --archive-sha256 <sha> --manifest <verified-manifest> --source-sha <sha> --extracted-root <staged-root>"
+    - "versioned release dry-run with exact .106 identity, current link, content checksums and restored rollback"
+  expected_changes:
+    - one verified versioned NuraLoumi release under /opt/nuraloumi/releases
+    - atomic update of /opt/nuraloumi/current only after package and device qualification
+    - preserve system Mesa, Grate, kernel, active compositor, WayVNC and independent Pixman fallback
+rollback:
+  required: true
+  artifact: null
+  restore_steps:
+    - preserve SHA256 and bytes/mode of all existing browser and player binaries before apply
+    - preserve current release symlink and the previously known-good release directory
+    - stop only scoped trial-owned browser/UIProcess children
+    - atomically restore the exact previous /opt/nuraloumi/current symlink if activation fails
+    - check original Sway, WayVNC, launcher, NuraPlayer and Pixman recovery desktop
+  triggers:
+    - any SIGILL, SIGSEGV, sandbox escape or loader mismatch
+    - missing compiled-in WebProcess/helper path or incomplete dlopen closure
+    - incorrect pixels, failed input/gesture or absent real touch semantics
+    - NuraPlayer or independent software renderer regression
+apply:
+  authorized: true
+  command: null
+  limit: verified Nura SL101 at 192.168.23.106 only
+  allowed_roles:
+    - exact reviewed official ARMv7/musl CI release after preflight closure
+postflight:
+  probes:
+    - check exact device identity, eMMC/SD CIDs, kernel and boot ID again
+    - check versioned binary SHA256, ELF interpreter, D16 ISA and WebProcess sandbox
+    - compare real page pixel oracles and navigation/back/forward/refresh/tabs
+    - real touchscreen wl_touch trace, keyboard focus and WayVNC pointer navigation
+    - NuraPlayer media and software wl_shm/Pixman recovery
+    - confirm previous release remains independently bootable
+  idempotency_command: inspect /opt/nuraloumi/current plus sha256sum of exact installed files and package manifest
+results:
+  commands:
+    - "2026-11-25: read-only SSH baseline and device identity preflight PASS"
+    - "2026-11-25: nested patched softpipe WPE 2.54.2 index pixels, IPC Open/Back/Forward and next-page pixels PASS"
+    - "2026-11-25: final cleanup-hardened nested rerun exit 0; evidence results-wayland-mesa-d16-20261125-EmbeBG; no orphan WPE/bwrap"
+    - "2026-11-25: live WayVNC RFB screenshot over SSH PASS; pointer click produced no observed page transition"
+    - "2026-11-25: first live trial left one trial-owned UIProcess; identified by private env and terminated only that PID"
+    - "2026-11-25: corrected scoped cleanup trial exited normally; no remaining UIProcess/WebProcess/bwrap"
+    - "2026-11-25: compositor PID 1445, WayVNC PID 1481, system Mesa hash and /opt current unchanged"
+  changed_resources:
+    - "private user-home device qualification scripts and logs only"
+    - "new SL101 repository qualification scripts/tests"
+    - "this NuraLoumi no-go packet"
+  warnings:
+    - "SL101 full make test: 2628 tests, 10 skipped, one unrelated missing-fixture import error for work/sl101-0076-dontkmap-kernel-20261109/debian100/staging/stage_debian100.py."
+    - "PRODUCTION NO-GO: official package/producer, rollback artifact and touch gates remain incomplete."
+    - "No production install, symlink flip, apk modification or service restart occurred during this device preflight."
+    - "Source-only WPE recovery commits were subsequently fast-forwarded to GitHub main at 786b24e; this does not qualify a device runtime or authorize production deployment."
+    - "Pointer events from RFB are mouse input, never a substitute for real wl_touch proof."
+  rollback_performed: false
+reconciliation:
+  as_of: "2026-11-25"
+  github_main_source_commit: 786b24ec21b0edccc970af1fd89866a570c6533e
+  source_tree_version: 0.0.8-rc.2
+  evidence_scope: historical device preflight and source-only merge; no independent full release qualification
+  production_gate: NO_GO
