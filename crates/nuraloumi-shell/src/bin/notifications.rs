@@ -11,6 +11,7 @@ use nuraloumi_providers::notifications::{
 };
 use nuraloumi_providers::{ActionProvider, Health, Provider};
 use nuraloumi_render_cairo::{CairoRenderer, RenderOptions, Scene, Viewport};
+use nuraloumi_shell::swipe::{Swipe, SwipeDirection, SwipeOutcome};
 use nuraloumi_shell::{
     dismiss_backdrop_margins, load_config_or_default, render_menu_with_glyphs, ShellConfig,
     Theme as ShellTheme,
@@ -38,6 +39,49 @@ struct BackdropPress {
     pointer_origin: Option<(f64, f64)>,
     touch_origin: Option<(i32, f64, f64)>,
     touches: BTreeSet<i32>,
+}
+
+/// Move the actual Cairo rasterized row, clipped to the original hit rectangle.
+/// This costs one bounded buffer copy only while a gesture is active.
+fn shift_row_pixels(
+    pixels: &mut [u8],
+    stride: usize,
+    width: usize,
+    height: usize,
+    rect: nuraloumi_render_cairo::Rect,
+    scale: f64,
+    offset: f64,
+) {
+    if !offset.is_finite() || !scale.is_finite() || scale <= 0.0 {
+        return;
+    }
+    let x0 = (rect.x * scale).floor().max(0.0) as usize;
+    let x1 = ((rect.x + rect.width) * scale).ceil().max(0.0) as usize;
+    let y0 = (rect.y * scale).floor().max(0.0) as usize;
+    let y1 = ((rect.y + rect.height) * scale).ceil().max(0.0) as usize;
+    let x1 = x1.min(width);
+    let y1 = y1.min(height);
+    if x0 >= x1 || y0 >= y1 || stride < width.saturating_mul(4) {
+        return;
+    }
+    let shift = (offset * scale).round() as isize;
+    let original = pixels.to_vec();
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let at = y * stride + x * 4;
+            if at + 4 > pixels.len() {
+                return;
+            }
+            let source_x = x.checked_add_signed(-shift);
+            if let Some(sx) = source_x.filter(|sx| *sx >= x0 && *sx < x1) {
+                let from = y * stride + sx * 4;
+                pixels[at..at + 4].copy_from_slice(&original[from..from + 4]);
+            } else {
+                // Opaque quiet panel background in Cairo ARGB32 native-endian.
+                pixels[at..at + 4].copy_from_slice(&[0x1b, 0x17, 0x14, 0xff]);
+            }
+        }
+    }
 }
 
 impl BackdropPress {
@@ -199,6 +243,7 @@ struct UiState {
     touch_press: Option<TouchPress>,
     active_touches: BTreeSet<i32>,
     touch_cancelled: bool,
+    swipe: Swipe,
 }
 
 struct TouchPress {
@@ -216,7 +261,9 @@ impl UiState {
             .notifications
             .iter()
             .take(MAX_ENTRIES)
-            .filter(|n| !self.read.contains(&n.id))
+            .filter(|n| {
+                !self.read.contains(&n.id) && !self.swipe.hidden.contains(&format!("view-{}", n.id))
+            })
             .count()
     }
 
@@ -230,6 +277,12 @@ impl UiState {
     }
 
     fn refresh_read_ids(&mut self, snapshot: &NotificationSnapshot) {
+        self.swipe.reconcile(
+            snapshot
+                .notifications
+                .iter()
+                .map(|n| format!("view-{}", n.id)),
+        );
         self.read
             .retain(|id| snapshot.notifications.iter().any(|entry| entry.id == *id));
         if self
@@ -243,6 +296,7 @@ impl UiState {
     fn reset_gestures(&mut self) {
         self.pointer_press = None;
         self.touch_press = None;
+        self.swipe.cancel();
     }
 
     fn pointer(
@@ -277,9 +331,14 @@ impl UiState {
         if self.active_touches.len() > 1 {
             self.touch_cancelled = true;
             self.touch_press = None;
+            self.swipe.cancel();
             return;
         }
         if !self.touch_cancelled {
+            let swipe_item = scene
+                .and_then(|s| s.hit_test(x, y))
+                .filter(|id| id.starts_with("view-"));
+            self.swipe.begin(id, swipe_item, x, y);
             self.touch_press = Some(TouchPress {
                 id,
                 item: scene.and_then(|s| s.hit_test(x, y)).map(str::to_owned),
@@ -294,6 +353,15 @@ impl UiState {
     /// Emit one navigational scroll step per 28 logical pixels of movement.
     /// A swipe never activates the originally pressed notification.
     fn touch_move(&mut self, id: i32, x: f64, y: f64) -> Option<i32> {
+        if matches!(self.swipe.move_to(id, x, y), SwipeOutcome::Captured { .. }) {
+            if let Some(press) = self.touch_press.as_mut() {
+                press.scrolling = true;
+            }
+            return None;
+        }
+        if self.swipe.captured().is_some() {
+            return None;
+        }
         let press = self.touch_press.as_mut().filter(|p| p.id == id)?;
         press.x = x;
         press.y = y;
@@ -311,7 +379,7 @@ impl UiState {
         if !self.active_touches.remove(&id) {
             return None;
         }
-        let result = if self.touch_cancelled {
+        let result = if self.touch_cancelled || self.swipe.suppress_click() {
             None
         } else {
             self.touch_press
@@ -330,6 +398,7 @@ impl UiState {
     }
 
     fn touch_cancel(&mut self, ids: &[i32]) {
+        self.swipe.cancel();
         self.touch_cancelled = true;
         self.touch_press = None;
         if ids.is_empty() {
@@ -404,7 +473,12 @@ fn filtered<'a>(snapshot: &'a NotificationSnapshot, query: &str) -> Vec<&'a Noti
 }
 
 fn model(snapshot: &NotificationSnapshot, ui: &UiState) -> MenuModel {
-    let count = snapshot.notifications.len().min(MAX_ENTRIES);
+    let count = snapshot
+        .notifications
+        .iter()
+        .take(MAX_ENTRIES)
+        .filter(|n| !ui.swipe.hidden.contains(&format!("view-{}", n.id)))
+        .count();
     let unread = ui.selected_count(snapshot);
     let mut items = vec![
         MenuItem::status("heading", format!("Notifications  ·  {count}"))
@@ -542,7 +616,10 @@ fn model(snapshot: &NotificationSnapshot, ui: &UiState) -> MenuModel {
             cmd("ask-clear", ""),
         ));
     }
-    let entries = filtered(snapshot, &ui.query);
+    let entries: Vec<_> = filtered(snapshot, &ui.query)
+        .into_iter()
+        .filter(|entry| !ui.swipe.hidden.contains(&format!("view-{}", entry.id)))
+        .collect();
     if entries.is_empty() {
         items.push(MenuItem::status(
             "empty",
@@ -835,6 +912,7 @@ fn draw(
     width: u32,
     height: u32,
     scale: i32,
+    swipe_offset: Option<(&str, f64)>,
 ) -> Result<Scene, String> {
     let tokens = match config.theme {
         ShellTheme::Dark => &DARK_THEME,
@@ -857,6 +935,22 @@ fn draw(
     let stride = usize::try_from(info.stride).map_err(|error| error.to_string())?;
     let result = buffer
         .with_argb32_bytes(|pixels, _| {
+            let mut shifted = None;
+            if let Some((id, offset)) = swipe_offset {
+                if let Some(hit) = scene.hits.iter().find(|hit| hit.item_id == id) {
+                    let mut image = pixels.to_vec();
+                    shift_row_pixels(
+                        &mut image,
+                        stride,
+                        width as usize,
+                        height as usize,
+                        hit.rect,
+                        f64::from(scale.max(1)),
+                        offset,
+                    );
+                    shifted = Some(image);
+                }
+            }
             backend.present(
                 surface,
                 Frame {
@@ -864,7 +958,7 @@ fn draw(
                     height,
                     stride,
                     format: PixelFormat::Argb8888,
-                    pixels,
+                    pixels: shifted.as_deref().unwrap_or(pixels),
                 },
             )
         })
@@ -1033,10 +1127,78 @@ fn run(config: ShellConfig, fixture_mode: bool) -> Result<(), String> {
                         }
                         redraw = true;
                     }
+                    if ui.swipe.captured().is_some() {
+                        redraw = true;
+                    }
                 }
                 WaylandEvent::TouchUp { id } => {
+                    let commit = ui.swipe.captured().and_then(|(row, _)| {
+                        let width = scene
+                            .as_ref()?
+                            .hits
+                            .iter()
+                            .find(|h| h.item_id == row)?
+                            .rect
+                            .width;
+                        Some((
+                            width,
+                            snapshot
+                                .notifications
+                                .iter()
+                                .any(|n| format!("view-{}", n.id) == row),
+                        ))
+                    });
+                    let outcome = ui.swipe.release(
+                        id,
+                        commit.map_or(0.0, |v| v.0),
+                        commit.is_some_and(|v| v.1),
+                    );
                     if let Some(hit) = ui.touch_up(scene.as_ref(), id) {
                         requested = selected_id_action(&menu, &hit);
+                    }
+                    match outcome {
+                        SwipeOutcome::Dismiss { id: row, direction } => {
+                            // The left direction has a registered provider Remove handler;
+                            // right is deliberately actionless and only hides the view row.
+                            if !config.reduced_motion {
+                                if let (Some((width, height, scale)), Some(hit)) = (
+                                    geometry,
+                                    scene
+                                        .as_ref()
+                                        .and_then(|s| s.hits.iter().find(|h| h.item_id == row)),
+                                ) {
+                                    let distance = hit.rect.width
+                                        * if direction == SwipeDirection::Left {
+                                            -1.0
+                                        } else {
+                                            1.0
+                                        };
+                                    for step in 1..=3 {
+                                        let _ = draw(
+                                            &mut backend,
+                                            surface,
+                                            &renderer,
+                                            &config,
+                                            &menu,
+                                            &state,
+                                            width,
+                                            height,
+                                            scale,
+                                            Some((&row, distance * f64::from(step) / 3.0)),
+                                        )?;
+                                    }
+                                }
+                            }
+                            if direction == SwipeDirection::Right || fixture_mode {
+                                ui.swipe.hide(&row);
+                            } else if let Some(raw) = row.strip_prefix("view-") {
+                                // Do not optimistically remove durable provider data.
+                                requested = Some(cmd("dismiss", raw));
+                            }
+                            redraw = true;
+                        }
+                        SwipeOutcome::Cancel => redraw = true,
+                        _ => {}
                     }
                 }
                 WaylandEvent::TouchCancel { ids } => ui.touch_cancel(&ids),
@@ -1136,6 +1298,7 @@ fn run(config: ShellConfig, fixture_mode: bool) -> Result<(), String> {
                         width,
                         height,
                         scale,
+                        ui.swipe.captured(),
                     )?);
                 }
             }
@@ -1257,6 +1420,62 @@ mod tests {
         ui.touch_down(Some(&scene), 11, x, y);
         assert_eq!(ui.touch_move(11, x, y + 56.0), Some(-2));
         assert_eq!(ui.touch_up(Some(&scene), 11), None);
+    }
+
+    #[test]
+    fn notification_swipe_is_explicit_and_never_ghost_clicks() {
+        let scene = test_scene();
+        let (x, y) = hit_center(&scene, "view-1");
+        let mut ui = UiState::default();
+        ui.touch_down(Some(&scene), 1, x, y);
+        assert_eq!(ui.touch_move(1, x - 180.0, y), None);
+        assert!(ui.swipe.captured().is_some());
+        let result = ui.swipe.release(1, 300.0, true);
+        assert_eq!(
+            result,
+            SwipeOutcome::Dismiss {
+                id: "view-1".into(),
+                direction: SwipeDirection::Left
+            }
+        );
+        assert_eq!(ui.touch_up(Some(&scene), 1), None);
+        ui.swipe.hide("view-1");
+        assert!(model(&fixture(), &ui).item_by_id("view-1").is_none());
+        // A different actionable row has no explicit swipe capability.
+        let (x, y) = hit_center(&scene, "clear-all");
+        ui.touch_down(Some(&scene), 2, x, y);
+        ui.touch_move(2, x + 180.0, y);
+        assert!(ui.swipe.captured().is_none());
+    }
+
+    #[test]
+    fn cairo_row_displacement_preserves_signed_pixels_and_clips() {
+        use nuraloumi_render_cairo::Rect;
+        let original = (0..32u8).collect::<Vec<_>>();
+        let mut right = original.clone();
+        shift_row_pixels(
+            &mut right,
+            16,
+            4,
+            2,
+            Rect::new(0.0, 0.0, 4.0, 1.0),
+            1.0,
+            1.0,
+        );
+        assert_eq!(&right[4..8], &original[0..4]);
+        assert_eq!(&right[16..32], &original[16..32]);
+        let mut left = original.clone();
+        shift_row_pixels(
+            &mut left,
+            16,
+            4,
+            2,
+            Rect::new(0.0, 0.0, 4.0, 1.0),
+            1.0,
+            -1.0,
+        );
+        assert_eq!(&left[0..4], &original[4..8]);
+        assert_eq!(&left[16..32], &original[16..32]);
     }
 
     #[test]

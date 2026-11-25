@@ -5808,3 +5808,4 @@ after_one_shot_action = true
 }
 pub mod display_idle;
 pub mod quick_status;
+pub mod swipe;
