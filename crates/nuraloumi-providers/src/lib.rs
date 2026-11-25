@@ -25,6 +25,7 @@ pub mod refresh;
 pub mod renderer;
 pub mod resources;
 pub mod session;
+pub mod slider;
 pub mod weather;
 
 pub use applications::{

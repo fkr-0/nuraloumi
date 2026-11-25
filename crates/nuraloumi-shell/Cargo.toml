@@ -126,3 +126,7 @@ path = "src/bin/feeds.rs"
 [[bin]]
 name = "nuraloumi-timer"
 path = "src/bin/timer.rs"
+
+[[bin]]
+name = "nuraloumi-slider-observer"
+path = "src/bin/slider_observer.rs"
