@@ -2,11 +2,21 @@ name: NuraBrowser WPE ARMv7 musl candidate
 
 on:
   workflow_dispatch:
+    inputs:
+      resume_run_id:
+        description: 'Exact failed WPE producer run ID containing an unqualified build checkpoint'
+        required: false
+        type: string
+      resume_archive_sha256:
+        description: 'SHA256 of the exact build-state.tar.zst from that producer run'
+        required: false
+        type: string
   pull_request:
     paths:
       - .github/workflows/nurabrowser-wpe-musl-producer.yml
       - scripts/ci-fetch-nurabrowser-wpe-source.sh
       - scripts/ci-build-nurabrowser-wpe-musl.sh
+      - scripts/ci-wpe-checkpoint.sh
       - components/nura-browser-engine/**
       - scripts/verify_nurabrowser_runtime.py
       - scripts/test_verify_nurabrowser_runtime.py
@@ -14,6 +24,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   native-armv7-musl-wpe-candidate:
@@ -24,6 +35,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: Ensure fast host-side checkpoint compressor is available
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v zstd || { sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends zstd; }
       - uses: docker/setup-qemu-action@v3
         with:
           platforms: arm
@@ -34,17 +50,73 @@ jobs:
           python3 -m unittest scripts/test_verify_nurabrowser_runtime.py -v
           python3 -m unittest scripts/test_wpe_musl_producer_ci.py -v
           sh scripts/ci-fetch-nurabrowser-wpe-source.sh target/wpe-source
+      - name: Reject incomplete resume selection
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        shell: bash
+        env:
+          RESUME_RUN: ${{ inputs.resume_run_id }}
+          RESUME_SHA256: ${{ inputs.resume_archive_sha256 }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$RESUME_RUN" && -z "$RESUME_SHA256" ]] || \
+             [[ -z "$RESUME_RUN" && -n "$RESUME_SHA256" ]]; then
+            echo 'Both WPE checkpoint run ID and SHA256 are required together' >&2
+            exit 2
+          fi
+      - name: Validate exact same-commit resume provenance
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.resume_run_id != '' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESUME_RUN: ${{ inputs.resume_run_id }}
+          RESUME_SHA256: ${{ inputs.resume_archive_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$RESUME_RUN" =~ ^[1-9][0-9]*$ ]]
+          [[ "$RESUME_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          curl --fail --silent --show-error \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/runs/$RESUME_RUN" |
+            python3 -c '
+          import json, os, sys
+          run = json.load(sys.stdin)
+          assert run.get("path") == ".github/workflows/nurabrowser-wpe-musl-producer.yml"
+          assert run.get("head_sha") == os.environ["GITHUB_SHA"]
+          assert run.get("status") == "completed" and run.get("conclusion") == "failure"
+          '
+      - name: Download exact failed-run WPE checkpoint
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.resume_run_id != '' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: nurabrowser-wpe-musl-checkpoint-${{ inputs.resume_run_id }}-${{ github.sha }}
+          run-id: ${{ inputs.resume_run_id }}
+          github-token: ${{ github.token }}
+          path: target/wpe-resume-download
+      - name: Verify archive digest and restore resumable Ninja state
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.resume_run_id != '' }}
+        shell: bash
+        env:
+          RESUME_SHA256: ${{ inputs.resume_archive_sha256 }}
+        run: |
+          set -euo pipefail
+          bash scripts/ci-wpe-checkpoint.sh restore \
+            target/wpe-resume-download/build-state.tar.zst \
+            target/wpe-producer-candidate "$RESUME_SHA256" "$GITHUB_SHA"
       - name: Build native Alpine 3.22 ARMv7 candidate in isolated container
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p target/wpe-producer-candidate
-          # A six-hour job kill loses the Ninja failure point. Stop the QEMU
-          # build after 5h30 so GitHub can still upload the bounded log.
+          # Stop early enough to archive a multi-GB Ninja tree on the x86 host
+          # and upload it BEFORE GitHub's hard six-hour cancellation.
           set +e
-          timeout --signal=TERM --kill-after=30s 5h30m \
-            docker run --rm --platform linux/arm/v7 \
+          cidfile="$PWD/target/wpe-producer-candidate/Docker-CID.txt"
+          timeout --signal=TERM --kill-after=120s 4h30m \
+            docker run --rm --cidfile "$cidfile" --platform linux/arm/v7 \
               -e CI_SOURCE_SHA="$GITHUB_SHA" \
+              -e CI_WPE_RESUME="${{ inputs.resume_run_id != '' && '1' || '0' }}" \
               -v "$PWD:/work:ro" \
               -v "$PWD/target/wpe-producer-candidate:/out" \
               alpine:3.22 /bin/sh /work/scripts/ci-build-nurabrowser-wpe-musl.sh \
@@ -52,6 +124,11 @@ jobs:
           statuses=("${PIPESTATUS[@]}")
           builder_rc=${statuses[0]}
           log_rc=${statuses[1]}
+          # Ensure no orphan QEMU container can mutate the Ninja tree while
+          # the host packs its checkpoint. The ID is created by this job.
+          if test -s "$cidfile"; then
+            docker rm --force "$(cat "$cidfile")" >/dev/null 2>&1 || true
+          fi
           set -e
           printf 'source_sha=%s\nbuilder_exit=%s\nlog_exit=%s\nqualification=UNQUALIFIED\n' \
             "$GITHUB_SHA" "$builder_rc" "$log_rc" > target/wpe-producer-candidate/BUILD-STATUS.txt
@@ -73,6 +150,33 @@ jobs:
             target/wpe-producer-candidate/BUILD-LOG.txt
             target/wpe-producer-candidate/BUILD-STATUS.txt
           if-no-files-found: warn
+          retention-days: 14
+
+      - name: Archive the unqualified Ninja state after a bounded failure
+        id: checkpoint
+        if: ${{ failure() && !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if test -s target/wpe-producer-candidate/BUILD-PROVENANCE.txt && \
+             test -s target/wpe-producer-candidate/build/webkit/build.ninja; then
+            mkdir -p target/wpe-producer-checkpoint
+            bash scripts/ci-wpe-checkpoint.sh create \
+              target/wpe-producer-candidate target/wpe-producer-checkpoint/build-state.tar.zst
+            printf 'ready=1\n' >> "$GITHUB_OUTPUT"
+          else
+            echo 'No configured Ninja graph available for safe checkpointing'
+          fi
+      - name: Upload resumable checkpoint (still unqualified)
+        if: ${{ always() && !cancelled() && steps.checkpoint.outputs.ready == '1' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: nurabrowser-wpe-musl-checkpoint-${{ github.run_id }}-${{ github.sha }}
+          path: |
+            target/wpe-producer-checkpoint/build-state.tar.zst
+            target/wpe-producer-checkpoint/build-state.tar.zst.sha256
+          compression-level: 0
+          if-no-files-found: error
           retention-days: 14
 
       - name: Upload unqualified build evidence only

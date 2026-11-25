@@ -13,6 +13,7 @@ test -f /work/target/wpe-source/wpewebkit-2.54.2.tar.xz
 test -d /work/components/nura-browser-engine
 test -d /out
 test ! -e /out/stage
+case "${CI_WPE_RESUME:-0}" in 0|1) ;; *) echo 'invalid resume mode' >&2; exit 2 ;; esac
 
 # Build on the target libc/ISA rather than mixing glibc and musl development
 # sysroots. This may take several hours under QEMU. Dependencies are explicit.
@@ -29,7 +30,23 @@ mkdir -p /out/src /out/build /out/stage
 printf '%s  %s\n' \
   f3284e19e47fcb5ac8c63c2e1c113dbd65b2423eb8a545f5b345707829004f56 \
   /work/target/wpe-source/wpewebkit-2.54.2.tar.xz | sha256sum -c -
-tar -xJf /work/target/wpe-source/wpewebkit-2.54.2.tar.xz -C /out/src
+
+builder_sha256=$(sha256sum /work/scripts/ci-build-nurabrowser-wpe-musl.sh | cut -d ' ' -f 1)
+packages_sha256=$(apk info -vv | LC_ALL=C sort | sha256sum | cut -d ' ' -f 1)
+if [ "${CI_WPE_RESUME:-0}" = 1 ]; then
+  # A restored Ninja tree must have precisely the same source, script and
+  # Alpine package set. Otherwise rebuilding from scratch is mandatory.
+  test -s /out/BUILD-PROVENANCE.txt
+  grep -Fx "source_sha=$CI_SOURCE_SHA" /out/BUILD-PROVENANCE.txt
+  grep -Fx "builder_sha256=$builder_sha256" /out/BUILD-PROVENANCE.txt
+  grep -Fx "packages_sha256=$packages_sha256" /out/BUILD-PROVENANCE.txt
+  test -s /out/build/webkit/build.ninja
+  test -f /out/src/wpewebkit-2.54.2/CMakeLists.txt
+  echo 'WPE_RESTORED_NINJA=VERIFIED'
+else
+  test ! -e /out/BUILD-PROVENANCE.txt
+  test ! -e /out/src/wpewebkit-2.54.2
+  tar -xJf /work/target/wpe-source/wpewebkit-2.54.2.tar.xz -C /out/src
 
 # WPE 2.54.2 uses DRM_FORMAT_XRGB8888 in the WPEPlatform Wayland DMA-BUF
 # backing-store path even when USE_LIBDRM=OFF, but this translation unit does
@@ -62,6 +79,7 @@ if link not in text:
         raise SystemExit(f"unexpected WPE 2.54.2 target layout: {cmake}")
     cmake.write_text(text.replace(needle, needle + link, 1))
 PY
+fi
 
 # Tegra2: ARMv7 hardfloat, VFPv3-D16, no NEON or hardware division.
 cpu_flags='-O2 -mcpu=cortex-a9 -mfpu=vfpv3-d16 -mfloat-abi=hard -mno-unaligned-access'
@@ -86,6 +104,10 @@ cmake -S /out/src/wpewebkit-2.54.2 -B /out/build/webkit -G Ninja \
   -DUSE_ATK=OFF -DUSE_FLITE=OFF -DUSE_JPEGXL=OFF \
   -DUSE_AVIF=OFF -DUSE_LCMS=OFF -DUSE_WOFF2=OFF \
   -DUSE_LIBBACKTRACE=OFF -DUSE_SYSTEM_SYSPROF_CAPTURE=OFF -DUSE_SYSTEM_UNIFDEF=OFF
+if [ "${CI_WPE_RESUME:-0}" = 0 ]; then
+  printf 'source_sha=%s\nbuilder_sha256=%s\npackages_sha256=%s\nqualification=UNQUALIFIED\n' \
+    "$CI_SOURCE_SHA" "$builder_sha256" "$packages_sha256" > /out/BUILD-PROVENANCE.txt
+fi
 cmake --build /out/build/webkit --parallel 2
 cmake --install /out/build/webkit
 DESTDIR=/out/stage cmake --install /out/build/webkit
