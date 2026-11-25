@@ -180,6 +180,10 @@ int nura_video_render_loop(NuraVideo *handle){
     pipeline=gst_parse_launch(desc,&err);g_free(desc);
     if(!pipeline||err){
         printf("STREAM_PARSE_FAIL reason=%s\n",err?err->message:"unknown");
+        char message[192];
+        snprintf(message,sizeof(message),"GStreamer pipeline parse failed: %.145s",
+                 err?err->message:"unknown");
+        nura_video_error(handle,message);
         if(err)g_error_free(err);
         goto done;
     }
@@ -194,7 +198,10 @@ int nura_video_render_loop(NuraVideo *handle){
         nura_video_error(handle,"missing pinned VDE capture plugin");goto done;
     }
     sink=gst_bin_get_by_name(GST_BIN(pipeline),"probe");
-    if(!sink)goto done;
+    if(!sink){
+        nura_video_error(handle,"missing GStreamer video appsink");
+        goto done;
+    }
     GstPad *pad=gst_element_get_static_pad(sink,"sink");
     gst_pad_add_probe(pad,GST_PAD_PROBE_TYPE_QUERY_DOWNSTREAM,
                       video_meta_query,NULL,NULL);
@@ -206,7 +213,15 @@ int nura_video_render_loop(NuraVideo *handle){
     }
     bus=gst_element_get_bus(pipeline);
     devfd=open("/dev/dri/renderD128",O_RDWR|O_CLOEXEC);
-    if(devfd<0||!(gbm=gbm_create_device(devfd)))goto done;
+    if(devfd<0){
+        nura_video_error(handle,"cannot open /dev/dri/renderD128");
+        goto done;
+    }
+    gbm=gbm_create_device(devfd);
+    if(!gbm){
+        nura_video_error(handle,"GBM device creation failed on renderD128");
+        goto done;
+    }
     PFNEGLGETPLATFORMDISPLAYEXTPROC get_display=
         (void *)eglGetProcAddress("eglGetPlatformDisplayEXT");
     PFNEGLCREATEPLATFORMWINDOWSURFACEEXTPROC get_window=
@@ -216,26 +231,47 @@ int nura_video_render_loop(NuraVideo *handle){
     destroy=(void *)eglGetProcAddress("eglDestroyImageKHR");
     PFNGLEGLIMAGETARGETTEXTURE2DOESPROC image_target=
         (void *)eglGetProcAddress("glEGLImageTargetTexture2DOES");
-    if(!get_display||!get_window||!create||!destroy||!image_target)
+    if(!get_display||!get_window||!create||!destroy||!image_target){
+        nura_video_error(handle,"EGL/GL DMA-BUF extension entry points missing");
         goto done;
+    }
     ed=get_display(EGL_GBM,gbm,NULL);
     EGLint major=0,minor=0,n=0,format=0;
-    if(ed==EGL_NO_DISPLAY||!eglInitialize(ed,&major,&minor))goto done;
+    if(ed==EGL_NO_DISPLAY||!eglInitialize(ed,&major,&minor)){
+        nura_video_error(handle,"EGL GBM display initialization failed");
+        goto done;
+    }
     eglBindAPI(EGL_OPENGL_ES_API);
     const EGLint attrs[]={EGL_SURFACE_TYPE,EGL_WINDOW_BIT,
          EGL_RENDERABLE_TYPE,EGL_OPENGL_ES2_BIT,
          EGL_RED_SIZE,8,EGL_GREEN_SIZE,8,EGL_BLUE_SIZE,8,EGL_NONE};
-    if(!eglChooseConfig(ed,attrs,&config,1,&n)||n!=1)goto done;
+    if(!eglChooseConfig(ed,attrs,&config,1,&n)||n!=1){
+        nura_video_error(handle,"EGL ES2 window configuration unavailable");
+        goto done;
+    }
     eglGetConfigAttrib(ed,config,EGL_NATIVE_VISUAL_ID,&format);
-    if((unsigned)format!=DRM_XR24)goto done;
+    if((unsigned)format!=DRM_XR24){
+        nura_video_error(handle,"EGL native visual is not DRM XR24");
+        goto done;
+    }
     surface=gbm_surface_create(gbm,W,H,format,GBM_BO_USE_RENDERING);
-    if(!surface)goto done;
+    if(!surface){
+        nura_video_error(handle,"GBM XR24 surface creation failed");
+        goto done;
+    }
     es=get_window(ed,config,surface,NULL);
     const EGLint ctx_attrs[]={EGL_CONTEXT_CLIENT_VERSION,2,EGL_NONE};
     ctx=eglCreateContext(ed,config,EGL_NO_CONTEXT,ctx_attrs);
     if(es==EGL_NO_SURFACE||ctx==EGL_NO_CONTEXT||
-       !eglMakeCurrent(ed,es,es,ctx))goto done;
-    if(strcmp((const char *)glGetString(GL_VENDOR),"Grate"))goto done;
+       !eglMakeCurrent(ed,es,es,ctx)){
+        nura_video_error(handle,"EGL ES2 context or window surface failed");
+        goto done;
+    }
+    const GLubyte *vendor=glGetString(GL_VENDOR);
+    if(!vendor||strcmp((const char *)vendor,"Grate")){
+        nura_video_error(handle,"Grate GLES renderer unavailable");
+        goto done;
+    }
     puts("STREAM_GPU_READY Grate_Tegra=1 XR24=1 four_internal_passes=1");
     const char *frag=
       "precision mediump float;uniform mat4 m;uniform mat4 yuvm;"
@@ -246,7 +282,10 @@ int nura_video_render_loop(NuraVideo *handle){
       "vec4 q=vec4(dot(yuv1,yuvm[0]),dot(yuv1,yuvm[1]),"
       "dot(yuv1,yuvm[2]),1.0);gl_FragColor=m*q;}";
     program=make_program(frag);
-    if(!program)goto done;
+    if(!program){
+        nura_video_error(handle,"Grate video shader compilation/link failed");
+        goto done;
+    }
     const GLfloat coeff[3][4]={
         {1.164f,0.f,1.793f,-0.973051f},
         {1.164f,-0.213f,-0.533f,0.301427f},
@@ -262,9 +301,15 @@ int nura_video_render_loop(NuraVideo *handle){
     glUniformMatrix4fv(glGetUniformLocation(program,"yuvm"),1,GL_FALSE,ym);
     for(int i=0;i<3;i++)glUniform1i(glGetUniformLocation(program,
                              i==0?"sy":i==1?"su":"sv"),i);
-    if(!check("stream-program-uniform"))goto done;
+    if(!check("stream-program-uniform")){
+        nura_video_error(handle,"Grate video shader uniform setup failed");
+        goto done;
+    }
     stream=sl101_stream_open();
-    if(!stream)goto done;
+    if(!stream){
+        nura_video_error(handle,"Wayland video stream surface unavailable");
+        goto done;
+    }
     printf("STREAM_MODE requested=%u audio_requested=%d audio_sink=%s "
            "video_sync=1 audio_sync=1 cpu_yuv_map=0\n",
            target,audio,audio?"pulsesink":"none");

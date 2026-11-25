@@ -50,4 +50,23 @@ if grep -Fq '"v4l2slh264dec0"' "$root/src/vde-moving-probe.c"; then
   echo 'FAIL: auto-generated decoder name restored' >&2
   exit 1
 fi
-printf 'MEDIA_AUDIO_REGRESSION_PASS noaudio=0 aac=1 geometry=distinct decoder_name=stable\n'
+# Playerd may discard stdout/stderr, so setup failures must survive through
+# nura_video_status().error rather than only printf diagnostics.
+for stage in \
+  'GStreamer pipeline parse failed' \
+  'missing GStreamer video appsink' \
+  'cannot open /dev/dri/renderD128' \
+  'GBM device creation failed' \
+  'EGL/GL DMA-BUF extension entry points missing' \
+  'EGL GBM display initialization failed' \
+  'Grate GLES renderer unavailable' \
+  'Wayland video stream surface unavailable'
+do
+  if ! grep -Fq "$stage" "$root/src/vde-moving-probe.c"; then
+    echo "FAIL: missing native video setup diagnostic: $stage" >&2
+    exit 1
+  fi
+done
+grep -Fq 'if(!vendor||strcmp((const char *)vendor,"Grate"))' \
+  "$root/src/vde-moving-probe.c"
+printf 'MEDIA_AUDIO_REGRESSION_PASS noaudio=0 aac=1 geometry=distinct decoder_name=stable video_setup_diagnostics=present\n'
