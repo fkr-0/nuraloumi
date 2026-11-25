@@ -245,11 +245,18 @@ impl IpcRuntime {
                 while !stop_worker.load(std::sync::atomic::Ordering::Relaxed) {
                     // Reap the one-shot child without ever waiting on the Wayland
                     // thread. Do not accumulate overlapping toast processes.
-                    if toast_child
-                        .as_mut()
-                        .is_some_and(|child| child.try_wait().map_or(true, |exit| exit.is_some()))
-                    {
-                        toast_child.take();
+                    if let Some(child) = toast_child.as_mut() {
+                        match child.try_wait() {
+                            Ok(Some(status)) => {
+                                eprintln!("nuraloumi-panel: toast child exited status={status}; visibility unverified");
+                                toast_child.take();
+                            }
+                            Err(error) => {
+                                eprintln!("nuraloumi-panel: toast child status unavailable: {error}");
+                                toast_child.take();
+                            }
+                            Ok(None) => {}
+                        }
                     }
                     if let Ok(Some(request)) = server.accept_one() {
                         let current = observations_worker
@@ -308,9 +315,12 @@ impl IpcRuntime {
                                             .arg(notification.app.as_deref().unwrap_or("NuraLoumi"))
                                             .stdin(Stdio::null())
                                             .stdout(Stdio::null())
-                                            .stderr(Stdio::null())
+                                            // The child logs only lifecycle/errors, never
+                                            // notification text; retain diagnostics in panel logs.
+                                            .stderr(Stdio::inherit())
                                             .spawn()
                                             .map_err(|error| error.to_string())?;
+                                        eprintln!("nuraloumi-panel: toast child spawned pid={}; Wayland commit and visibility unverified", child.id());
                                         toast_child = Some(child);
                                         Ok(())
                                     },
@@ -383,8 +393,8 @@ impl Drop for IpcRuntime {
 }
 
 /// Authoritative explicit incoming-notification request path. An installed
-/// standalone center has UNKNOWN open state, so it cannot be treated as closed.
-/// Only a known-closed center permits the one-shot child. The launcher callback
+/// standalone center has UNKNOWN open state, which is not evidence of an open
+/// center and must not suppress an otherwise valid incoming banner. The launcher callback
 /// is injected to fixture-test all branches without running an external program.
 fn notification_reply<F>(
     request: &crate::ipc::IpcRequest,
@@ -409,16 +419,6 @@ where
             serde_json::json!({
                 "accepted": false, "reason": "notification_center_open"
             }),
-        );
-    }
-    if surfaces
-        .iter()
-        .any(|entry| entry.name == "notifications" && entry.open_state == SurfaceOpenState::Unknown)
-    {
-        return IpcResponse::failure(
-            &request.id,
-            "center_state_unknown",
-            "standalone notification center is installed but its open state is not observed",
         );
     }
     if !executable_available {
@@ -725,7 +725,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_notify_never_guesses_standalone_center_closed() {
+    fn explicit_notify_unknown_installed_center_does_not_suppress_banner() {
         use crate::ipc::{IpcCommand, IpcRequest, Notify};
         use std::cell::Cell;
         let dir = TestDir::new();
@@ -762,9 +762,9 @@ mod tests {
         );
         dir.executable("nuraloumi-notifications", 0o755);
         let unknown = SurfaceCatalog::discover(&dir.0, &[]).observe(None, None, 0, 51);
-        let response = notification_reply(&request, &unknown, true, false, closed);
-        assert_eq!(response.error.unwrap().code, "center_state_unknown");
-        assert_eq!(launched.get(), 1);
+        let response = notification_reply(&request, &unknown, true, false, launch);
+        assert_eq!(response.result.unwrap()["accepted"], true);
+        assert_eq!(launched.get(), 2);
     }
 
     #[test]

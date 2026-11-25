@@ -293,6 +293,9 @@ fn run(options: Options) -> Result<(), String> {
                         (width, height, scale),
                         config.theme,
                     )?;
+                    if !drawn {
+                        eprintln!("nuraloumi-toast: first Wayland buffer committed; physical visibility unverified");
+                    }
                     drawn = true;
                 }
                 other => {
