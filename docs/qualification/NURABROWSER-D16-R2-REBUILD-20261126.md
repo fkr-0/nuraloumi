@@ -29,7 +29,7 @@ merely to make compilation pass.
 - The source fetcher validated **12/12** vendor SHA-512 pins (OpenSSL 3.5.9,
   Nettle 3.10.2, libgcrypt 1.10.3 and nine Alpine patch inputs). It refuses
   preexisting destinations, oversized or hash-mismatched downloads.
-- Source/builder consistency and synthetic failure tests: **12/12 pass**.
+- Source/builder consistency and synthetic failure tests: **13/13 pass**.
 - Independent host-side application of the eight Alpine OpenSSL patches to a
   fresh OpenSSL 3.5.9 source tree: **8/8 pass** with no fuzz, offsets or rejects.
 
@@ -50,6 +50,52 @@ compilation used the proper ARMv7/musl target. The committed build script now
 passes the GCC target as both `--build` and `--host` for libgcrypt. **A new
 canonical build with this correction is required**; do not promote the
 first-run output from a diagnostically mismatched configuration.
+
+Static decoded-ISA diagnostic: three linked first-run crypto libraries
+(`libnettle.so.8`, `libhogweed.so.6`, `libgcrypt.so.20`) were copied into an
+independent flat inspection directory and passed
+`scripts/audit_nurabrowser_decoded_isa.py`: **238,947 decoded instructions,
+0 forbidden uses, 0 unknown decodes and 0 decoder errors**. `libgcrypt` also
+had SONAME `libgcrypt.so.20` and `DT_NEEDED` on
+`libc.musl-armv7.so.1`/`libgpg-error.so.0`. This does **not** supersede the
+required repeat against the corrected canonical build and entire WebKit root.
+
+Additional graphics-plugin preflight (original root, not replacements):
+`libEGL.so.1`, `libgbm.so.1` and `dri/libdril_dri.so` report
+VFPv3-D16/hardfloat ELF attributes. **`libgallium-25.1.9.so` instead reports
+`Tag_FP_arch: VFPv3` and `Tag_Advanced_SIMD_arch: NEONv1`**, a definite
+incompatibility with Tegra20 if loaded. The instruction decoder yielded
+**1,082,779 unknown decodes** and
+**89,990 flagged uses across the four libraries** (3,948,507 decoded
+instructions). The stripped ARM/Thumb mapping can produce false
+disassemblies and false NEON positives, so these instruction counts cannot
+classify `libEGL`, `libgbm` and the DRI shim. The `libgallium` NEON **ELF
+attribute** is an independent hard failure, not based on the decoder.
+Prove that the runtime does not load Gallium, or replace that graphics stack
+with a D16-qualified build; `dlopen`/Mesa/LLVM and correct-mode ISA evidence
+remain mandatory.
+
+Whole-root `readelf -A` scan of all regular files found exactly six
+NEON-attributed objects in the original Alpine root: `usr/lib/libcrypto.so.3`,
+`usr/lib/libnettle.so.8.11`, `usr/lib/libgcrypt.so.20.4.3`,
+`usr/lib/ossl-modules/legacy.so`, `usr/lib/libgallium-25.1.9.so` and
+`usr/lib/gallium-pipe/pipe_kmsro.so`. The source-pinned crypto overlay replaces
+the first four as part of the five-library-plus-module ABI set; **both
+graphics objects remain NEON-attributed** until they are proved unreachable
+by runtime `dlopen` or rebuilt for D16. The audit detects attributes, not
+every possible machine instruction, and is not a sandbox/pixel proof.
+
+The graphics blocker is not merely a speculative module lookup:
+`readelf -d` shows `libEGL.so.1.0.0` has a direct `DT_NEEDED` edge to
+`libgallium-25.1.9.so`. The GLESv1/GLESv2 libraries also embed that
+dependency name. Therefore **any runtime loading this packaged EGL stack
+necessarily loads the NEON Gallium object**. A D16-qualified Mesa EGL/Gallium
+replacement or a proved EGL-free rendering backend is required; removing
+only `pipe_kmsro.so` cannot qualify the current EGL closure.
+The fresh-root assembler now independently writes all remaining
+`blocking_neon_elf_attributes` into `candidate/PROVENANCE.json`, with a
+synthetic negative-control test. Its report is evidence, **never** a promotion
+gate or claim that other decoded/JIT instructions are safe.
 
 ## Reproducible commands (no tablet access)
 
