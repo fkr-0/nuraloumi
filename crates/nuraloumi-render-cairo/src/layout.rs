@@ -94,6 +94,7 @@ fn paint_control_category_icon(
             color,
         });
     }
+
     true
 }
 
@@ -606,7 +607,7 @@ pub fn layout_menu_scaled<M: MenuSource, T: TextMeasurer>(
                             1.0,
                         )),
                     });
-                    if !paint_control_category_icon(&item.id, glyph_box, theme.accent, &mut paint) {
+                    if !paint_control_category_icon(item.id, glyph_box, theme.accent, &mut paint) {
                         if let Some(glyph) = item.glyph {
                             paint.push(PaintNode::Text {
                                 origin: Point::new(
@@ -832,6 +833,131 @@ mod launcher_tab_tests {
             node,
             PaintNode::Text { text, .. } if text.contains('󰒓')
         )));
+    }
+
+    #[test]
+    fn control_icons_fit_bounds_and_rasterize_across_themes_widths_and_scales() {
+        use crate::render::{CairoRenderer, DeterministicText};
+
+        let categories = ["media", "network", "display", "system", "notifications"];
+        for width in [448.0, 280.0] {
+            for scale in [1.0, 2.0] {
+                for theme in [Theme::dark(), Theme::light()] {
+                    let mut menu = MenuView {
+                        id: "control-center".into(),
+                        title: "Control Center".into(),
+                        items: Vec::new(),
+                    };
+                    for (index, category) in categories.iter().enumerate() {
+                        let mut entry =
+                            MenuItemView::action(format!("control.tab.{category}"), *category);
+                        entry.glyph = Some('\u{f0c9}');
+                        entry.enabled = index != 4;
+                        menu.items.push(entry);
+                    }
+                    let interaction = InteractionState {
+                        selected_id: Some("control.tab.media".into()),
+                        ..InteractionState::default()
+                    };
+                    let viewport = Viewport::new(width, 400.0, scale);
+                    let scene = layout_menu(&menu, &interaction, viewport, &theme, &ToyText, false);
+                    let strokes: Vec<_> = scene
+                        .paint
+                        .iter()
+                        .filter_map(|node| {
+                            if let PaintNode::Line {
+                                from,
+                                to,
+                                width,
+                                color,
+                            } = node
+                            {
+                                (*width == 1.8 && *color == theme.accent).then_some((*from, *to))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    assert!(
+                        strokes.len() >= 30,
+                        "missing category strokes at {width}px/{scale}x"
+                    );
+                    for (index, category) in categories.iter().enumerate() {
+                        let hit = scene
+                            .hits
+                            .iter()
+                            .find(|hit| hit.item_id == format!("control.tab.{category}"))
+                            .unwrap();
+                        assert_eq!(hit.enabled, index != 4);
+                        let icon = Rect::new(
+                            hit.rect.x + LayoutMetrics::default().content_insets.left,
+                            hit.rect.y + (hit.rect.height - 18.0) / 2.0,
+                            18.0,
+                            18.0,
+                        );
+                        let matching: Vec<_> = strokes
+                            .iter()
+                            .filter(|(from, to)| {
+                                icon.contains(from.x, from.y) && icon.contains(to.x, to.y)
+                            })
+                            .collect();
+                        assert!(matching.len() >= 3, "{category} has no in-bounds strokes");
+                        // Cairo's 1.8px round/cap footprint must also remain inside the icon box.
+                        for (from, to) in matching {
+                            for point in [from, to] {
+                                assert!(point.x - 0.9 >= icon.x && point.x + 0.9 <= icon.right());
+                                assert!(point.y - 0.9 >= icon.y && point.y + 0.9 <= icon.bottom());
+                            }
+                        }
+                    }
+                    assert!(!scene.paint.iter().any(|node| matches!(node,
+                        PaintNode::Text { text, .. } if text.chars().any(|ch| ('\u{e000}'..='\u{f8ff}').contains(&ch)))));
+                    let renderer = CairoRenderer::with_text_backend(DeterministicText);
+                    let mut buffer = renderer.render_scene(&scene).unwrap();
+                    let (pixel_count, _) = buffer
+                        .with_argb32_bytes(|bytes, info| {
+                            let stride = info.stride as usize;
+                            let mut totals = [0_usize; 5];
+                            for (index, category) in categories.iter().enumerate() {
+                                let hit = scene
+                                    .hits
+                                    .iter()
+                                    .find(|hit| hit.item_id == format!("control.tab.{category}"))
+                                    .unwrap();
+                                let x = ((hit.rect.x + 8.0) * scale) as usize;
+                                let y = ((hit.rect.y + (hit.rect.height - 18.0) / 2.0) * scale)
+                                    as usize;
+                                let side = (18.0 * scale) as usize;
+                                for py in y..y + side {
+                                    for px in x..x + side {
+                                        let offset = py * stride + px * 4;
+                                        let raw = u32::from_ne_bytes(
+                                            bytes[offset..offset + 4].try_into().unwrap(),
+                                        );
+                                        let red = ((raw >> 16) & 255) as i32;
+                                        let green = ((raw >> 8) & 255) as i32;
+                                        let blue = (raw & 255) as i32;
+                                        let distance = (red - i32::from(theme.accent.r)).abs()
+                                            + (green - i32::from(theme.accent.g)).abs()
+                                            + (blue - i32::from(theme.accent.b)).abs();
+                                        if distance < 12 {
+                                            totals[index] += 1;
+                                        }
+                                    }
+                                }
+                            }
+                            (totals, info)
+                        })
+                        .unwrap();
+                    assert!(
+                        pixel_count
+                            .iter()
+                            .all(|count| *count >= (3.0 * scale) as usize),
+                        "invisible icon pixels: {pixel_count:?} at {width}px/{scale}x"
+                    );
+                }
+            }
+        }
     }
 
     fn launcher_fixture() -> MenuView {
