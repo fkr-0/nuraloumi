@@ -10,6 +10,7 @@ on:
       - components/nura-browser-engine/**
       - scripts/verify_nurabrowser_runtime.py
       - scripts/test_verify_nurabrowser_runtime.py
+      - scripts/test_wpe_musl_producer_ci.py
 
 permissions:
   contents: read
@@ -31,21 +32,49 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest scripts/test_verify_nurabrowser_runtime.py -v
+          python3 -m unittest scripts/test_wpe_musl_producer_ci.py -v
           sh scripts/ci-fetch-nurabrowser-wpe-source.sh target/wpe-source
       - name: Build native Alpine 3.22 ARMv7 candidate in isolated container
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p target/wpe-producer-candidate
-          docker run --rm --platform linux/arm/v7 \
-            -e CI_SOURCE_SHA="$GITHUB_SHA" \
-            -v "$PWD:/work:ro" \
-            -v "$PWD/target/wpe-producer-candidate:/out" \
-            alpine:3.22 /bin/sh /work/scripts/ci-build-nurabrowser-wpe-musl.sh
+          # A six-hour job kill loses the Ninja failure point. Stop the QEMU
+          # build after 5h30 so GitHub can still upload the bounded log.
+          set +e
+          timeout --signal=TERM --kill-after=30s 5h30m \
+            docker run --rm --platform linux/arm/v7 \
+              -e CI_SOURCE_SHA="$GITHUB_SHA" \
+              -v "$PWD:/work:ro" \
+              -v "$PWD/target/wpe-producer-candidate:/out" \
+              alpine:3.22 /bin/sh /work/scripts/ci-build-nurabrowser-wpe-musl.sh \
+            2>&1 | tee target/wpe-producer-candidate/BUILD-LOG.txt
+          statuses=("${PIPESTATUS[@]}")
+          builder_rc=${statuses[0]}
+          log_rc=${statuses[1]}
+          set -e
+          printf 'source_sha=%s\nbuilder_exit=%s\nlog_exit=%s\nqualification=UNQUALIFIED\n' \
+            "$GITHUB_SHA" "$builder_rc" "$log_rc" > target/wpe-producer-candidate/BUILD-STATUS.txt
+          if test "$builder_rc" -ne 0 || test "$log_rc" -ne 0; then
+            echo "WPE ARMv7/musl builder or diagnostic log failed: builder=$builder_rc tee=$log_rc" >&2
+            test "$builder_rc" -eq 0 || exit "$builder_rc"
+            exit "$log_rc"
+          fi
           test -s target/wpe-producer-candidate/nurabrowser-wpe-musl-candidate.tar
           grep -Fx 'runtime_qualification=UNQUALIFIED' \
             target/wpe-producer-candidate/CANDIDATE-ONLY.txt
           test ! -e target/wpe-producer-candidate/stage/usr/libexec/nuraloumi/browser/runtime.json
+      - name: Retain WPE musl Ninja diagnostics on failure or timeout
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: nurabrowser-wpe-musl-build-log-${{ github.run_id }}-${{ github.sha }}
+          path: |
+            target/wpe-producer-candidate/BUILD-LOG.txt
+            target/wpe-producer-candidate/BUILD-STATUS.txt
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Upload unqualified build evidence only
         if: ${{ success() }}
         uses: actions/upload-artifact@v4

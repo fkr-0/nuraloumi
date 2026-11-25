@@ -4801,17 +4801,19 @@ after_one_shot_action = true
 
     #[test]
     fn manual_scroll_does_not_snap_to_selected_last_app() {
-        let mut snapshot = FixtureSnapshot::default();
-        snapshot.applications = (0..20)
-            .map(|index| ApplicationEntry {
-                id: format!("app-{index:02}.desktop"),
-                label: format!("GUI App {index:02}"),
-                generic_name: None,
-                keywords: vec![],
-                launchable: true,
-                pinned: false,
-            })
-            .collect();
+        let snapshot = FixtureSnapshot {
+            applications: (0..20)
+                .map(|index| ApplicationEntry {
+                    id: format!("app-{index:02}.desktop"),
+                    label: format!("GUI App {index:02}"),
+                    generic_name: None,
+                    keywords: vec![],
+                    launchable: true,
+                    pinned: false,
+                })
+                .collect(),
+            ..FixtureSnapshot::default()
+        };
         let menu = build_launcher_menu_for(&snapshot, OverviewMode::Apps);
         let state = MenuState {
             selected_id: Some("overview.app.app-19.desktop".into()),

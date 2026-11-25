@@ -4,7 +4,7 @@
 Produce verified commands for local and SSH-triggered NuraLoumi notifications, including CLI, daemon, freedesktop D-Bus and on-screen toast/notification-center behavior.
 
 ## Context
-The user explicitly asked how to send notifications in 0.0.8-rc.2. Inspect crates/nuraloumi-shell/src/bin/ctl.rs, bin/notifications.rs, notificationd, toast, docs/qualification/notifications-* and the SL101 OpenRC desktop session. The session may use XDG_RUNTIME_DIR=/run/sl101-desktop-user and a private D-Bus socket; verify paths before documenting them.
+The user explicitly asked how to send notifications in 0.0.8-rc.2. Inspect crates/nuraloumi-shell/src/bin/ctl.rs, bin/notifications.rs, notificationd, toast, docs/qualification/notifications-* and the SL101 OpenRC desktop session. The desktop session may use an isolated XDG_RUNTIME_DIR and a private D-Bus socket; verify process-scoped paths before documenting them.
 
 ## Scope
 Own notification usage docs, host tests and a bounded probe script if useful; do not modify slider state detection (separate worker), WPE, player or the live .106 desktop. Read-only SSH may probe if authenticated, but never send surprise owner-facing notifications without a local explicit canary opt-in.

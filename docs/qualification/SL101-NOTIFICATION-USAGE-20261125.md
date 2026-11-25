@@ -21,14 +21,14 @@ nuraloumi-ctl --json ping
 nuraloumi-ctl --json notify --summary 'Hello flo' --body 'Local shell' --app Terminal
 
 # Read-only SSH preflight through trusted SSH alias, as desktop session user:
-ssh SL101_ALIAS 'ls -ld /run/sl101-desktop-user; ls -l /run/sl101-desktop-user/nuraloumi.sock'
-ssh SL101_ALIAS 'XDG_RUNTIME_DIR=/run/sl101-desktop-user nuraloumi-ctl --json ping'
+ssh SL101_ALIAS 'printf "login runtime=%s\n" "$XDG_RUNTIME_DIR"'
+ssh SL101_ALIAS 'test -S "$XDG_RUNTIME_DIR/nuraloumi.sock" && nuraloumi-ctl --json ping'
 
 # ONLY with explicit opt-in to a visible tablet canary:
-ssh SL101_ALIAS 'nuraloumi-ctl --json --socket /run/sl101-desktop-user/nuraloumi.sock notify --summary "SSH canary" --body "One-shot toast" --app Qualification'
+ssh SL101_ALIAS 'nuraloumi-ctl --json --socket "$XDG_RUNTIME_DIR/nuraloumi.sock" notify --summary "SSH canary" --body "One-shot toast" --app Qualification'
 ```
 
-`/run/sl101-desktop-user` is a known session-directory *candidate*, not freshly verified in this task. Confirm the actual panel process environment before use. The CLI defaults to `$XDG_RUNTIME_DIR/nuraloumi.sock` if the runtime directory is nonempty and absolute; otherwise `/tmp/nuraloumi-$UID.sock`. SSH logins can inherit an unrelated runtime directory: use `--socket` to target the confirmed one. Socket permissions require the owning desktop user; do not escalate privileges to force delivery.
+The SSH login's `$XDG_RUNTIME_DIR` may differ from the active compositor's directory or be unset. Verify the actual Sway/panel process environment and assign that validated directory for the SSH commands above before use; otherwise do not send a canary. The CLI defaults to `$XDG_RUNTIME_DIR/nuraloumi.sock` if the runtime directory is nonempty and absolute; otherwise `/tmp/nuraloumi-$UID.sock`. SSH logins can inherit an unrelated runtime directory: use `--socket` to target the confirmed one. Socket permissions require the owning desktop user; do not escalate privileges to force delivery.
 
 With `--json` and a successful spawn, expect a response containing `"ok":true` and `"result":{"accepted":true,"presentation":"one_shot_started_unverified"}` (plus request `id`). Without `--json`, stdout prints the pretty `result` only. Exit 0 means child **spawned**, not visible pixels. The panel owns the IPC listener and launches only executable sibling `nuraloumi-toast`, with at most one child active. Open notification center/control center suppresses the toast (`accepted:false, reason:notification_center_open`); unknown notification-center state fails `center_state_unknown`. Other failures: `toast_unavailable`, `toast_busy`, `toast_spawn_failed`. An unavailable/denied socket yields `connection_failed` on stderr, exit 2; other failures exit 1.
 
@@ -54,7 +54,7 @@ notify-send --app-name=NuraLoumi --expire-time=5000 'D-Bus canary' 'Check center
 busctl --user call org.freedesktop.Notifications /org/freedesktop/Notifications org.freedesktop.Notifications GetHistory
 ```
 
-For SSH, use the **same UID, `DBUS_SESSION_BUS_ADDRESS` and actual private bus socket** as the running desktop. The candidate `unix:path=/run/sl101-desktop-user/bus` is **unverified**: inspect process environment and socket first. The panel's `nuraloumi.sock` is never a D-Bus socket. `dbus-run-session` starts a private test bus, *not* the tablet's current session. An installed `share/dbus-1/services/org.freedesktop.Notifications.service` descriptor can activate the daemon if executable and visible to the bus; alternatively one user-session service may manage it. Merely building `nuraloumi-notificationd` does not establish bus ownership. Startup order for IPC: panel -> bound IPC -> sibling toast; for D-Bus: established user bus -> single owner/activation -> sender -> provider/center refresh. D-Bus daemon has **no integrated on-screen toast listener** in this qualified path.
+For SSH, use the **same UID, `DBUS_SESSION_BUS_ADDRESS` and actual private bus socket** as the running desktop. Never assume a private desktop bus path from a login shell: inspect the compositor process environment and actual bus socket first. The panel's `nuraloumi.sock` is never a D-Bus socket. `dbus-run-session` starts a private test bus, *not* the tablet's current session. An installed `share/dbus-1/services/org.freedesktop.Notifications.service` descriptor can activate the daemon if executable and visible to the bus; alternatively one user-session service may manage it. Merely building `nuraloumi-notificationd` does not establish bus ownership. Startup order for IPC: panel -> bound IPC -> sibling toast; for D-Bus: established user bus -> single owner/activation -> sender -> provider/center refresh. D-Bus daemon has **no integrated on-screen toast listener** in this qualified path.
 
 **No-UI fallback:** if Wayland/panel/toast is unavailable, IPC fails rather than quietly storing history; if there is no freedesktop owner, `notify-send` cannot prove reception. These transports do not automatically fall back to each other. If notification center is open, IPC intentionally suppresses the toast. Do not claim on-screen presentation from a successful D-Bus call alone.
 

@@ -2357,6 +2357,9 @@ fn render_panel_feedback_and_present(
     Ok(scene)
 }
 
+// Keep the frame adapter's backend, UI state, and transient scroll explicit;
+// grouping them would only obscure the distinct ownership boundaries.
+#[allow(clippy::too_many_arguments)]
 fn render_menu_and_present(
     backend: &mut WaylandBackend,
     surface: SurfaceId,

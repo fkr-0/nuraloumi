@@ -36,12 +36,36 @@ build, continue using the local, prepared tablet-derived sysroot described in
 
 ## Artifacts and verification
 
-On `main` pushes, the Actions run uploads a
-`nuraloumi-alpine322-armv7-musleabihf-<run_number>` artifact containing
-`nuraloumi-ci.tar`, a package `MANIFEST.txt` (Git SHA, target and per-file
-SHA256), `SHA256SUMS.txt`, `BUILD-INFO.txt`, `ELF-AUDIT.txt`, the complete
-cross-build log and binary inventory. The glibc workflow independently uploads
-`nuraloumi-debian13-armv7-gnueabihf-<run_number>`.
+On ordinary `main` or `release/**` pushes, the workflow performs
+the ARMv7/musl cross-build and ISA/ELF audit but **does not package a complete
+browser or GPU runtime**. Previously it uploaded three text files only. Starting
+with the local CI fix described in the 25 November progress report, the
+`nuraloumi-musl-armv7-build-audit-<run_number>-<git_sha>` artifact includes
+those audit texts **and the actual 28 (or current Cargo inventory) ELF files**
+under `armv7-musl-elf/`, plus `ARMV7-ELF-SHA256SUMS.txt` and a
+`AUDIT-ONLY-NO-DEPLOYMENT.txt` marker. Recalculate checksums and decode those
+bytes independently. This is not an APK/tar release; it omits native WPE,
+private Grate/Mesa/GStreamer/VDE and their runtime dependency closures.
+
+Only a separately authorized `workflow_dispatch` with the exact, successful,
+**same-commit qualified WPE producer** run ID and its pinned
+`runtime.json` hash may generate the normal `nuraloumi-ci.tar`, manifest
+and a development-signed APK. An optional exact-source GPU producer triple
+(run ID, 40-character revision, archive SHA256) adds the independently verified
+GPU-video variant. The candidate WPE producer currently outputs
+`runtime_qualification=UNQUALIFIED`, not a qualified
+`runtime.json`, so this dispatch remains blocked until its full closure,
+sandbox/WebProcess, ISA and device rendering gates have evidence. A green push
+is **never** a deployment authorization. The glibc workflow independently
+uploads Debian ARMHF results for a different libc ABI.
+
+The separate WPE candidate workflow has a six-hour GitHub job budget. Its
+local follow-up now bounds the Docker/QEMU/Ninja build at five hours thirty
+minutes and uploads source-identified BUILD-LOG.txt and BUILD-STATUS.txt even
+on failure, preserving the build stage and both builder/tee exit statuses.
+This is a diagnostic improvement, not an acceleration or qualification of
+WPE 2.54.2. The successful candidate artifact remains explicitly
+UNQUALIFIED and has no runtime.json.
 
 The checks reject missing Cargo-declared binaries, stale extra executables,
 wrong ELF architecture, missing VFPv3-D16 attributes, NEON attributes,

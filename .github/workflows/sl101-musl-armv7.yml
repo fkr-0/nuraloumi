@@ -263,6 +263,31 @@ jobs:
           fi
           echo 'ELF_AUDIT=PASS heuristic-only; physical SL101 no-SIGILL remains pending'
 
+      - name: Stage actual ARMv7/musl ELF bytes for independent audit only
+        if: ${{ github.event_name != 'workflow_dispatch' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage=target/gha-artifact/armv7-musl-elf
+          mkdir -p "$stage"
+          while IFS= read -r name; do
+            case "$name" in
+              nuraloumi-*) ;;
+              *) echo "FAIL: unexpected binary name in audit inventory: $name" >&2; exit 1 ;;
+            esac
+            test -x "target/$TARGET/release/$name"
+            cp -- "target/$TARGET/release/$name" "$stage/$name"
+          done < target/gha-artifact/BINARY-LIST.txt
+          test "$(find "$stage" -maxdepth 1 -type f | wc -l)" -eq \
+            "$(wc -l < target/gha-artifact/BINARY-LIST.txt)"
+          (
+            cd target/gha-artifact
+            sha256sum armv7-musl-elf/* > ARMV7-ELF-SHA256SUMS.txt
+            sha256sum --check --status ARMV7-ELF-SHA256SUMS.txt
+          )
+          printf 'source_sha=%s\ntarget=%s\nruntime_qualification=UNQUALIFIED\ncontains_wpe=false\ncontains_gpu_video_bundle=false\ndeployment=FORBIDDEN\n' \
+            "$GITHUB_SHA" "$TARGET" > target/gha-artifact/AUDIT-ONLY-NO-DEPLOYMENT.txt
+
       - name: Sign an Alpine armv7 development .apk from these audited binaries
         if: ${{ github.event_name == 'workflow_dispatch' }}
         shell: bash
@@ -303,7 +328,7 @@ jobs:
         run: |
           echo 'PACKAGE_GATE=PENDING: supply exact same-commit qualified WPE runtime inputs through workflow_dispatch.' >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload musl build-only ELF and source evidence
+      - name: Upload build-only non-deployable musl ELF bytes and source evidence
         if: ${{ github.event_name != 'workflow_dispatch' }}
         uses: actions/upload-artifact@v4
         with:
@@ -312,10 +337,14 @@ jobs:
             target/gha-artifact/BUILD-LOG.txt
             target/gha-artifact/BINARY-LIST.txt
             target/gha-artifact/ELF-AUDIT.txt
+            target/gha-artifact/armv7-musl-elf/**
+            target/gha-artifact/ARMV7-ELF-SHA256SUMS.txt
+            target/gha-artifact/AUDIT-ONLY-NO-DEPLOYMENT.txt
           if-no-files-found: error
           retention-days: 14
 
-      # The ordinary artifact above is intentionally software-only. This
+      # The push artifact contains real ELF bytes but lacks private WPE/GPU
+      # runtime dependencies and is explicitly forbidden for deployment. This
       # independent artifact is emitted only after an exact producer transfer.
       - name: Validate GPU producer selection
         if: ${{ github.event_name == 'workflow_dispatch' }}
@@ -326,6 +355,9 @@ jobs:
           PRODUCER_SHA: ${{ inputs.gpu_archive_sha256 }}
         run: |
           set -euo pipefail
+          # Bind optional dispatch inputs even when a caller supplied blanks.
+          PRODUCER_REV="${PRODUCER_REV:-}"
+          PRODUCER_SHA="${PRODUCER_SHA:-}"
           if [[ -z "$PRODUCER_RUN" ]]; then
             test -z "$PRODUCER_REV"
             test -z "$PRODUCER_SHA"
@@ -396,12 +428,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          docker run --rm --platform linux/arm/v7 \\
-            -v "$PWD:/work:ro" \\
-            -v "$PWD/target/gha-artifact:/output" \\
+          docker run --rm --platform linux/arm/v7 \
+            -v "$PWD:/work:ro" \
+            -v "$PWD/target/gha-artifact:/output" \
             alpine:3.22 /bin/sh -ec '
               apk add --no-cache abuild openssl tar coreutils
-              sh /work/scripts/build-ci-alpine-apk.sh \\
+              sh /work/scripts/build-ci-alpine-apk.sh \
                 /work/target/gha-artifact/nuraloumi-gpu-ci /output/native-gpu-apk "$1"
             ' sh "$GITHUB_SHA"
           test -s target/gha-artifact/native-gpu-apk/NURALOUMI-APK-SHA256SUMS.txt

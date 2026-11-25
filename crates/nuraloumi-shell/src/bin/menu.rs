@@ -832,6 +832,9 @@ fn run_live(
     }
 }
 
+// The adapter intentionally receives the live backend plus separate renderer,
+// semantic state, device snapshot, presentation, and scroll state.
+#[allow(clippy::too_many_arguments)]
 fn render_and_present(
     backend: &mut WaylandBackend,
     surface: SurfaceId,
