@@ -10,7 +10,9 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import re
 import shutil
+import subprocess
 import tarfile
 
 if __package__:
@@ -28,6 +30,29 @@ else:
 WPE_FROM_PRODUCER = PROCESSES + (
     "usr/lib/libWPEWebKit-2.0.so.1.11.5",
 )
+NEON_ATTRIBUTE = re.compile(r"NEON|Advanced_SIMD", re.IGNORECASE)
+
+
+def find_neon_elf_objects(root):
+    """Conservatively record any remaining NEON-tagged ELF in a private root.
+
+    Stripped ELF may lack complete attributes; absence is NOT an ISA PASS.
+    Symlink aliases are omitted because their regular target is scanned.
+    """
+    findings = []
+    for path in sorted(root.rglob("*")):
+        if path.is_symlink() or not path.is_file():
+            continue
+        with path.open("rb") as stream:
+            if stream.read(4) != b"\x7fELF":
+                continue
+        result = subprocess.run(
+            ["readelf", "-A", str(path)], check=True, capture_output=True,
+            text=True, timeout=20,
+        )
+        if NEON_ATTRIBUTE.search(result.stdout):
+            findings.append(path.relative_to(root).as_posix())
+    return findings
 
 
 def check_producer_bytes(producer, root):
@@ -125,6 +150,7 @@ def assemble(root, producer, overlay, output):
         "crypto_source_manifest_sha256": sha256(source_manifest),
         "crypto_replacements": installed,
         "producer_wpe_sha256": wpe_hashes,
+        "blocking_neon_elf_attributes": find_neon_elf_objects(output),
         "unproven": [
             "complete_isa_dlopen_gpu_llvm", "networkprocess_seccomp_negative_controls",
             "native_wayland_pixels_touch_rollback_review",
@@ -165,7 +191,8 @@ def main():
     try:
         evidence = assemble(args.alpine_root, args.producer_directory,
                             args.d16_overlay_directory, args.fresh_output)
-    except (OSError, ValueError, tarfile.TarError) as exc:
+    except (OSError, ValueError, tarfile.TarError,
+            subprocess.SubprocessError) as exc:
         parser.exit(1, f"D16_ALPINE_ASSEMBLY=FAIL: {exc}\n")
     print("D16_ALPINE_ASSEMBLY=CANDIDATE_ONLY "
           f"source_sha={evidence['producer_source_sha']} "

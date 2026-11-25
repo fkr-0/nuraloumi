@@ -5,6 +5,7 @@ from pathlib import Path
 import tarfile
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from scripts.assemble_nurabrowser_alpine_d16_root import (
     WPE_FROM_PRODUCER, assemble,
@@ -92,6 +93,24 @@ class AlpineRootD16AssemblyTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "mismatches WPE producer"):
                 assemble(root, producer, overlay, output)
             self.assertFalse(output.exists())
+
+    def test_remaining_neon_elf_is_recorded_as_release_blocker(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, producer, overlay = self.fixture(base)
+            (root / "usr/lib/libunqualified.so").write_bytes(b"\x7fELF" + b"test")
+            output = base / "new-root"
+
+            class ReadelfResult:
+                stdout = "Tag_Advanced_SIMD_arch: NEONv1\n"
+
+            with patch("scripts.assemble_nurabrowser_alpine_d16_root.subprocess.run",
+                       return_value=ReadelfResult()) as reader:
+                evidence = assemble(root, producer, overlay, output)
+            self.assertEqual(evidence["blocking_neon_elf_attributes"],
+                             ["usr/lib/libunqualified.so"])
+            self.assertEqual(reader.call_count, 1)
+            self.assertEqual(evidence["qualification"], "UNQUALIFIED")
 
 
 if __name__ == "__main__":
