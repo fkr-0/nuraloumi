@@ -15,7 +15,7 @@ case "${1:-}" in
     [[ -s "$root/build/webkit/build.ninja" ]] || die 'missing configured Ninja graph'
     [[ -f "$root/src/wpewebkit-2.54.2/CMakeLists.txt" ]] || die 'missing source tree'
     [[ ! -e "$archive" ]] || die 'refusing to replace an archive'
-    command -v zstd >/dev/null || die 'zstd is required on the x86 runner'
+    command -v zstd >/dev/null || die 'zstd is required on the host runner'
     mkdir -p "$(dirname "$archive")"
     tar -C "$root" -cf - src build BUILD-PROVENANCE.txt |
       zstd -q -1 -T2 -o "$archive"
