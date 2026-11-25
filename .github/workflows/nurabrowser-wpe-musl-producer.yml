@@ -3,6 +3,11 @@ name: NuraBrowser WPE ARMv7 musl candidate
 on:
   workflow_dispatch:
     inputs:
+      probe_only:
+        description: 'Run a short native AArch32-on-Arm64 capability probe; skip the long WPE build'
+        required: false
+        type: boolean
+        default: false
       resume_run_id:
         description: 'Exact failed WPE producer run ID containing an unqualified build checkpoint'
         required: false
@@ -27,7 +32,36 @@ permissions:
   actions: read
 
 jobs:
+  hosted-arm64-native-armv7-probe:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.probe_only }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Inspect real ARMv7 process and compiler, without QEMU
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v readelf || { sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends binutils; }
+          bash scripts/ci-probe-armv7-native-compat.sh target/native-armv7-probe
+      - name: Preserve native execution proof or falsification
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: hosted-arm64-native-armv7-probe-${{ github.run_id }}-${{ github.sha }}
+          path: |
+            target/native-armv7-probe/RESULT.txt
+            target/native-armv7-probe/HOST-PROCESS-ELF.txt
+            target/native-armv7-probe/TARGET-COMPILER.txt
+            target/native-armv7-probe/TARGET-ELF.txt
+            target/native-armv7-probe/TARGET-ATTRIBUTES.txt
+          if-no-files-found: warn
+          retention-days: 14
+
   native-armv7-musl-wpe-candidate:
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.probe_only) }}
     # This is a build candidate, not a regular APK, qualification, or deploy.
     runs-on: ubuntu-24.04
     timeout-minutes: 360
