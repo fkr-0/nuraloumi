@@ -42,3 +42,49 @@ NetworkProcess's missing seccomp filter is **not** evidence that WebKit's WebPro
 5. Preserve the exact active release and rollback, and run full installer/activation and post-activation health gates before promoting a browser binary.
 
 Verdict: **live rendering and link navigation PASS; WebProcess sandbox presence PASS; NetworkProcess policy, native browser shell, physical touch and production package PENDING.**
+
+## 21:06 CET: private ARMv7/musl dependency closure observation
+
+The follow-up read-only checker `scripts/inventory_nurabrowser_live_runtime.py`
+ran on the device's unchanged private canary tree, not its production release.
+Its JSON receipt is
+`/home/user/.local/state/nurabrowser-canary/runtime-inventory-20261125.json`,
+SHA256 `7e11aed1c9d2a8ed623fabc34ecd40b43e04dfb388595250bfc7f56aa7fd34a3`
+(52,257 bytes). The tree's recorded engine source SHA is
+`7e18074746b395f8245c312736063d0bd38324e5`; its
+`components/nura-browser-engine` tree object equals the current checkout's
+`cd1eaee884b5fcd068f92bd97fb5d4a7b6451d8c`.
+
+- **BLOCKED, not PASS:** 92 scoped files, 89 ARM ELF objects, 82 statically
+  reachable from UI/Web/NetworkProcess and the known private plugin seeds,
+  **30 findings** (multiple findings can refer to one library).
+- The private candidate omits `libLLVM.so.23.1`, `libdrm.so.2`, several
+  X11/XCB dependencies of the Mesa/EGL overlay, and materialized
+  `libgbm.so.1` alias; duplicate private Wayland library names require
+  deterministic loader precedence rather than an arbitrary inventory pick.
+- The bundled `libcrypto.so.3`, `libgcrypt.so.20`, `libnettle.so.8` carry
+  NEON/non-D16 ELF attributes. A separately built D16 crypto replacement
+  candidate exists in the local producer record, but has **not** been
+  merged or runtime-qualified in this live device canary.
+- Actual `/proc/<pid>/maps` inspection while the launcher was running
+  confirmed UI and WebProcess mapped `libLLVM.so.23.1` and
+  `libdrm.so.2.134.0` through system-style `/usr/lib` or `/lib` paths;
+  NetworkProcess mapped the bundled `libcrypto.so.3`, and all three mapped
+  bundled `libgcrypt.so.20`. The mount namespaces can change how these paths
+  resolve: a map pathname alone does **not** prove the underlying file inode
+  or eliminate a required `/proc/<pid>/mountinfo` comparison.
+- The 30 static issues are not 30 observed illegal instructions or crashes;
+  missing direct dependencies, unknown `dlopen` modules, syscall behavior,
+  independent ISA decoding and TLS/network behavior still need separate tests.
+
+The menu Canary remained isolated. After collecting live maps the exact
+`nurabrowser-core` Sway window was closed (`con_id=11`); no WPE helper remained,
+and Sway PID 1444 / WayVNC PID 1480 continued running. The host navigation
+and IPC fake-WebKit regression runners also passed **8/8** and **13/13**;
+these are not native NuraBrowser chrome/physical-touch acceptance tests.
+
+**Next root closure gate:** assemble a *new* immutable staging tree with the
+source-verified D16 crypto replacements, locally sourced LLVM/DRM/XCB closure
+and explicit SONAME links; verify real interpreter/link maps and all transitive
+plugins there. Never change the working Canary in place or write a qualifying
+`runtime.json` while any of these findings remain unresolved.
