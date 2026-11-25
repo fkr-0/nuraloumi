@@ -55,6 +55,21 @@ def verify_decoded_isa(disassembly):
             "forbidden ARM/NEON/hardware-division instruction detected")
 
 
+def verify_dynamic_abi(dynamic, abi):
+    """Reject libc-family mixing even for shared objects without PT_INTERP."""
+    needed = re.findall(r"Shared library: \[([^\]]+)\]", dynamic)
+    if abi == "musl":
+        require(not any(name in ("libc.so.6", "ld-linux-armhf.so.3", "libm.so.6",
+                                     "libresolv.so.2", "libutil.so.1", "libanl.so.1",
+                                     "libnsl.so.1") or
+                        name.startswith(("libc-2.", "ld-linux", "libpthread.so.0",
+                                         "libdl.so.2", "librt.so.1")) for name in needed),
+                "glibc dependency in musl runtime")
+    else:
+        require(not any(name.startswith(("libc.musl-", "ld-musl-")) for name in needed),
+                "musl dependency in glibc runtime")
+
+
 def inspect_elf(path, abi):
     """Production inspector: verify ELF target, loader and basic ISA attributes."""
     def readelf(*options):
@@ -75,6 +90,7 @@ def inspect_elf(path, abi):
     dynamic = readelf("-d")
     require("NEEDED" in dynamic or "There is no dynamic section" in dynamic,
             f"unreadable DT_NEEDED closure: {path}")
+    verify_dynamic_abi(dynamic, abi)
     disassembly = subprocess.run(["llvm-objdump", "-d", str(path)], check=True,
                                  capture_output=True, text=True, timeout=60).stdout
     verify_decoded_isa(disassembly)

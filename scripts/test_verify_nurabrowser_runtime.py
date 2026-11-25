@@ -51,6 +51,29 @@ class DecodedISAGate(unittest.TestCase):
                     gate.verify_decoded_isa(line)
 
 
+class DynamicABIGate(unittest.TestCase):
+    def test_musl_rejects_glibc_needed_even_without_interpreter(self):
+        for soname in ("libc.so.6", "libpthread.so.0", "libdl.so.2",
+                       "librt.so.1", "libm.so.6", "libresolv.so.2",
+                       "ld-linux-armhf.so.3"):
+            with self.subTest(soname=soname):
+                with self.assertRaisesRegex(ValueError, "glibc dependency"):
+                    gate.verify_dynamic_abi(
+                        f" 0x00000001 (NEEDED) Shared library: [{soname}]", "musl")
+
+    def test_glibc_rejects_musl_and_musl_accepts_its_own_libc(self):
+        dynamic = " 0x00000001 (NEEDED) Shared library: [libc.musl-armv7.so.1]"
+        gate.verify_dynamic_abi(dynamic, "musl")
+        with self.assertRaisesRegex(ValueError, "musl dependency"):
+            gate.verify_dynamic_abi(dynamic, "glibc")
+
+    def test_regular_wpe_shared_libraries_are_not_blocked(self):
+        gate.verify_dynamic_abi(
+            " 0x00000001 (NEEDED) Shared library: [libWPEPlatform-2.0.so.2]\n"
+            " 0x00000001 (NEEDED) Shared library: [libc.musl-armv7.so.1]",
+            "musl")
+
+
 class BrowserRuntimeContract(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
