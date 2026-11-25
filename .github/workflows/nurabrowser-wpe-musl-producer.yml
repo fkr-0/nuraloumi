@@ -26,6 +26,8 @@ on:
       - scripts/verify_nurabrowser_runtime.py
       - scripts/test_verify_nurabrowser_runtime.py
       - scripts/test_wpe_musl_producer_ci.py
+      - scripts/ci-probe-armv7-native-compat.sh
+      - scripts/test_wpe_arm_runner_ci.py
 
 permissions:
   contents: read
@@ -63,7 +65,8 @@ jobs:
   native-armv7-musl-wpe-candidate:
     if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.probe_only) }}
     # This is a build candidate, not a regular APK, qualification, or deploy.
-    runs-on: ubuntu-24.04
+    # This Arm64 host runs real 32-bit ARMv7 userspace, as proven by /proc/PID/exe.
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
@@ -74,9 +77,12 @@ jobs:
         run: |
           set -euo pipefail
           command -v zstd || { sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends zstd; }
-      - uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm
+      - name: Fail closed if hosted Arm runner loses native AArch32 support
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v readelf || { sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends binutils; }
+          bash scripts/ci-probe-armv7-native-compat.sh target/wpe-producer-native-preflight
       - name: Verify source pin and static runtime contract
         shell: bash
         run: |
@@ -143,7 +149,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p target/wpe-producer-candidate
-          # Stop early enough to archive a multi-GB Ninja tree on the x86 host
+          # Stop early enough to archive a multi-GB Ninja tree on the Arm64 host
           # and upload it BEFORE GitHub's hard six-hour cancellation.
           set +e
           cidfile="$PWD/target/wpe-producer-candidate/Docker-CID.txt"
@@ -158,7 +164,7 @@ jobs:
           statuses=("${PIPESTATUS[@]}")
           builder_rc=${statuses[0]}
           log_rc=${statuses[1]}
-          # Ensure no orphan QEMU container can mutate the Ninja tree while
+          # Ensure no orphan ARMv7 container can mutate the Ninja tree while
           # the host packs its checkpoint. The ID is created by this job.
           if test -s "$cidfile"; then
             docker rm --force "$(cat "$cidfile")" >/dev/null 2>&1 || true

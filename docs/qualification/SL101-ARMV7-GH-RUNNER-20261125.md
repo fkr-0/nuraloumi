@@ -5,7 +5,9 @@
 GitHub offers the standard `ubuntu-24.04-arm` hosted runner, but its
 documented architecture is **Arm64 (AArch64)**, not 32-bit ARMv7. For a
 public repository GitHub documents 4 vCPUs, 16 GiB RAM and 14 GiB storage.
-It is therefore **not** automatically a native ARMv7 compiler runner.
+The Arm64 label alone is not proof of ARMv7 execution. An independent
+on-runner test below established that this particular hosted kernel supports
+native AArch32 compatibility.
 Source: https://docs.github.com/en/actions/reference/runners/github-hosted-runners
 
 The SL101 requires armv7-unknown-linux-musleabihf, Cortex-A9,
@@ -37,15 +39,32 @@ browser binaries.
 
 | Observation | Next build approach |
 | --- | --- |
-| Host /proc/PID/exe is ELF32 ARM, compiler and sample execute | Consider a short WPE CMake/build sample on this Arm64 runner; only then move the main WPE job off QEMU |
+| Host /proc/PID/exe is ELF32 ARM, compiler and sample execute | **Observed: PASS**. Move the WPE candidate job to this Arm64 runner with mandatory no-QEMU preflight and monitor its real build result |
 | Docker fails with exec format error | Arm64 kernel lacks required AArch32 userspace compatibility; use x86-64 or Arm64 **cross-compilation** |
 | Host /proc/PID/exe is ELF64 AArch64 | QEMU or another interpreter is executing the guest; do **not** claim a native ARMv7 build |
 | Package or VFPv3-D16 gate fails | Preserve evidence, fix target toolchain; do not run a long WPE build |
 
-Native AArch32 on this hosted runner is **UNKNOWN until the short GitHub
-run completes**. Even a passing compatibility result is not a throughput
-benchmark. The existing QEMU checkpoint scheme remains a fallback, not the
-desired release build architecture.
+## Observed result (2026-11-25)
+
+**PASS**, run https://github.com/fkr-0/nuraloumi/actions/runs/45587548628
+at commit `7d74ff31c581d426f320864040f3c8b2da177434`. The actual
+artifact is https://github.com/fkr-0/nuraloumi/actions/runs/45587548628/artifacts/15008429094 .
+The host kernel's live Alpine container process was `ELF32 ARM`,
+Version5 EABI hard-float. Alpine identified `armv7`. A compiled and executed
+Cortex-A9 sample had `Tag_FP_arch: VFPv3-D16`,
+`Tag_ABI_VFP_args: VFP registers`, and no NEON attribute.
+The runner image was `ubuntu-24.04-arm` (version `20261116.188.1`).
+The independent downloaded files were `RESULT.txt`,
+`HOST-PROCESS-ELF.txt`, `TARGET-COMPILER.txt`, `TARGET-ELF.txt`, and
+`TARGET-ATTRIBUTES.txt`. The result states `qualification=UNQUALIFIED`:
+it proves **execution capability only**. Runner throughput, disk capacity,
+full WebKit linking, dependency closure, sandbox, pixels and SL101 device
+qualification still require separate verification.
+
+Consequently, the WPE candidate job now uses `ubuntu-24.04-arm`, does not
+install or enable QEMU, and runs the same ARMv7 host-ELF preflight every time.
+The 4h30 bounded checkpoint mechanism remains an emergency fallback for
+native build failures, not a routine multi-run strategy.
 
 ## Running and interpreting
 
@@ -57,6 +76,6 @@ Do **not** supply resume inputs. Inspect the
 `TARGET-ATTRIBUTES.txt`. A passing script reports
 `HOSTED_ARM64_NATIVE_ARMV7=PASS`; otherwise treat the claim as falsified.
 
-Do not switch the full producer to `ubuntu-24.04-arm` simply because
-GitHub lists Arm runners. The actual host ELF witness determines whether
-this is faster native compilation or just QEMU again.
+Do not infer native ARMv7 support on other Arm64 runners or future runner
+images without repeating the host-ELF witness. A passing native-ISA probe
+is not evidence that WPE built or can be deployed.
