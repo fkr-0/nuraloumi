@@ -180,3 +180,72 @@ candidate archive, install anything on the tablet, or change a GitHub release.
 **Qualification remains NO-GO** pending a completed crypto build, new closure
 audits, real sandbox/WebProcess/Wayland testing and independent review. Do not
 mark any untested qualification field PASS.
+
+## Completed D16 crypto overlay and RC.2 preflight — follow-up
+
+The local ARMv7/musl producer completed OpenSSL 3.5.9 after Nettle 3.10.2 and
+libgcrypt 1.10.3. All six replacement objects were present, their stored
+SHA-256 inventory verified during fresh assembly, and all five library
+SONAMEs matched their filenames. New OpenSSL SHA-256 values:
+
+- `libcrypto.so.3`: `23b3063a65c08835f3310dcea5c01ff679d1b52d1c1063dd6d97912ceed23a91`
+- `libssl.so.3`: `358bee67a49e17a2553489699fe109717f44eb6fd1e8ba5b9075f41c699365c2`
+- `ossl-modules/legacy.so`: `eb99588be2f3ac6c2a4f03ce6aab98f4436e03efec2eaa0f791fb58179719221`
+
+The original 85-file WPE canary was copied into a **fresh** private closure,
+with the five crypto replacements and OpenSSL legacy module. The result has
+**87 regular files and 81 ARM ELF objects**. Its generated `SHA256SUMS`
+verified; `audit_nurabrowser_wpe_candidate.py` returned
+`STATIC_PREFLIGHT_PASS` with **zero ELF/attribute/interpreter/DT_NEEDED
+issues**, comparing against main commit
+`03860531ed408090474d8bc7e105a1865ac70fb8`.
+This is not full runtime qualification.
+
+The original WPE build source remains
+`7e18074746b395f8245c312736063d0bd38324e5`. Its
+`components/nura-browser-engine` Git tree is byte-identical to the
+current release tree (`cd1eaee884b5fcd068f92bd97fb5d4a7b6451d8c`),
+but **engine-tree equivalence does not prove whole-repository producer
+identity**. At the time of this preflight, both published `main` and
+`release/0.0.8-rc.2` pointed to
+`03860531ed408090474d8bc7e105a1865ac70fb8`.
+
+The deterministic, explicitly **unqualified** candidate tar has SHA-256
+`80f11c94ce065b72cdb07ead3441db35cc7fd743de61b18d8ed9515d722e39df`.
+Its marker still forbids deployment and it contains no qualified
+`runtime.json`.
+
+### Bounded independent checks
+
+- The full streaming decoder scanned all **six** replacement ELF objects:
+  **1,002,464 decoded instructions**, **zero unsupported ISA findings**,
+  **zero unknown decodes**, **zero decoder errors**.
+- The decoder scanned the entire private closure: **81 ELF objects**,
+  **25,310,987 instruction-shaped lines**, **809,154 unknown decodes** and
+  **39,959 suspected incompatible uses**. It correctly returned
+  `BLOCKED`. Stripped ARM/Thumb mixed-mode decoding is ambiguous, and
+  the previously falsified `bwrap` address recurred. **Those findings
+  must not be described as 39,959 proven illegal instructions.**
+- A disposable read-only, network-disabled ARMv7 container successfully
+  executed `nurabrowser-core --help` through the candidate's private
+  musl loader (exit 0). A bounded `about:blank` headless attempt
+  subsequently failed at `bwrap` user-namespace creation in the confined
+  Docker environment, after correcting the packaged NetworkProcess path.
+  That disposable container was stopped. Neither result qualifies real
+  WebProcess rendering or predicts the target's sandbox behavior.
+- Official musl workflow run `45537663780` at the preflight baseline SHA
+  `03860531ed408090474d8bc7e105a1865ac70fb8` succeeded. Its
+  independently downloaded text artifact contains **28 matching binary
+  names, 28 ELF-audit PASS rows and 28 build-log PASS rows**. It does not
+  contain WPE binaries, `runtime.json`, an APK or a deployable tar.
+- Overlay/decoded-ISA auditor tests: **16 passed**.
+
+### Decision
+
+**NO-GO remains.** Before RC.2 tagging or production deployment:
+resolve ARM/Thumb instruction-mode coverage on the other stripped ELF
+dependencies; qualify transitive `dlopen` including Mesa/LLVM; validate
+genuine sandbox/WebProcess/NetworkProcess, Wayland pixels, navigation and
+touch on a source-matched musl target; and obtain a same-commit official
+producer artifact plus independently reviewed `runtime.json`. Preserve
+the current software-renderer fallback and rollback.
