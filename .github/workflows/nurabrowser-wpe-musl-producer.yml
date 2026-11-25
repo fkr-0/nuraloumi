@@ -153,7 +153,7 @@ jobs:
           # and upload it BEFORE GitHub's hard six-hour cancellation.
           set +e
           cidfile="$PWD/target/wpe-producer-candidate/Docker-CID.txt"
-          timeout --signal=TERM --kill-after=120s 4h30m \
+          timeout --signal=TERM --kill-after=120s 270m \
             docker run --rm --cidfile "$cidfile" --platform linux/arm/v7 \
               -e CI_SOURCE_SHA="$GITHUB_SHA" \
               -e CI_WPE_RESUME="${{ inputs.resume_run_id != '' && '1' || '0' }}" \
