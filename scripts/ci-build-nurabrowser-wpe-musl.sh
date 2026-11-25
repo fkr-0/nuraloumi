@@ -86,10 +86,15 @@ cpu_flags='-O2 -mcpu=cortex-a9 -mfpu=vfpv3-d16 -mfloat-abi=hard -mno-unaligned-a
 export CFLAGS="$cpu_flags"
 export CXXFLAGS="$cpu_flags"
 
+# An Arm64 kernel exposes aarch64 via uname even to genuine ARMv7 containers.
+# WebKitCommon has a supported FORCE_32BIT path for this case: without it,
+# WebKit incorrectly selects ARM64 allocator/JSC features for 32-bit objects.
+# Explicitly choose the upstream ARM Thumb-2 mimalloc backend as well.
 # Production WebKit embeds an absolute process path. It MUST match the
 # regular APK install layout; WEBKIT_EXEC_PATH is developer-build-only.
 cmake -S /out/src/wpewebkit-2.54.2 -B /out/build/webkit -G Ninja \
   -DPORT=WPE -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr \
+  -DFORCE_32BIT=ON -DUSE_MIMALLOC=ON -DUSE_SYSTEM_MALLOC=OFF \
   -DCMAKE_INSTALL_LIBDIR=lib \
   -DLIBEXEC_INSTALL_DIR=/usr/libexec/nuraloumi/browser/libexec \
   -DENABLE_WPE_PLATFORM=ON -DENABLE_WPE_PLATFORM_WAYLAND=ON \
@@ -104,10 +109,27 @@ cmake -S /out/src/wpewebkit-2.54.2 -B /out/build/webkit -G Ninja \
   -DUSE_ATK=OFF -DUSE_FLITE=OFF -DUSE_JPEGXL=OFF \
   -DUSE_AVIF=OFF -DUSE_LCMS=OFF -DUSE_WOFF2=OFF \
   -DUSE_LIBBACKTRACE=OFF -DUSE_SYSTEM_SYSPROF_CAPTURE=OFF -DUSE_SYSTEM_UNIFDEF=OFF
+# Fail before the expensive Ninja graph if the kernel's AArch64 identity won
+# over our actual ARMv7 userspace ABI, or no bmalloc implementation was chosen.
+grep -Fx 'CMAKE_SYSTEM_PROCESSOR:INTERNAL=armv7l' /out/build/webkit/CMakeCache.txt >/dev/null || {
+  echo 'WPE CMake did not select the ARMv7 target processor' >&2
+  exit 2
+}
+grep -Fx 'USE_MIMALLOC:BOOL=ON' /out/build/webkit/CMakeCache.txt >/dev/null || {
+  echo 'WPE CMake did not select the ARMv7 mimalloc backend' >&2
+  exit 2
+}
+grep -Fx 'USE_SYSTEM_MALLOC:BOOL=OFF' /out/build/webkit/CMakeCache.txt >/dev/null || {
+  echo 'WPE CMake unexpectedly enabled conflicting system malloc' >&2
+  exit 2
+}
 if [ "${CI_WPE_RESUME:-0}" = 0 ]; then
   printf 'source_sha=%s\nbuilder_sha256=%s\npackages_sha256=%s\nqualification=UNQUALIFIED\n' \
     "$CI_SOURCE_SHA" "$builder_sha256" "$packages_sha256" > /out/BUILD-PROVENANCE.txt
 fi
+# Compile the formerly failing object-library target first. This checks
+# allocator macros on real WPEPlatform sources before the larger link graph.
+cmake --build /out/build/webkit --target WPEPlatformHeadless --parallel 2
 cmake --build /out/build/webkit --parallel 2
 cmake --install /out/build/webkit
 DESTDIR=/out/stage cmake --install /out/build/webkit

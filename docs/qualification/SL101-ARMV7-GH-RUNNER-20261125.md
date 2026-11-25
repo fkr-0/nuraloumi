@@ -66,6 +66,35 @@ install or enable QEMU, and runs the same ARMv7 host-ELF preflight every time.
 The 4h30 bounded checkpoint mechanism remains an emergency fallback for
 native build failures, not a routine multi-run strategy.
 
+## Native WPE compiler failure and architecture correction
+
+The first full native WPE run
+https://github.com/fkr-0/nuraloumi/actions/runs/45588143763
+at `98ed4ebd87f829e691be59b1e497422307602ba5` compiled 6,642 of 8,544
+Ninja steps before `BPlatform.h:435` rejected the missing allocator
+selection. A verified 104 MB compressed checkpoint (SHA256
+`299ed156a84004a56fbff36a858845448727426e8e3e23f45c92a5db17bb1fb1`)
+is preserved under artifact 15011610639, but is **not** reusable across a
+changed commit/script under our exact provenance contract.
+
+The independently inspected checkpoint exposes the underlying cause:
+`CMakeFiles/3.31.7/CMakeSystem.cmake` recorded
+`CMAKE_SYSTEM_PROCESSOR=aarch64` for the *32-bit* Alpine container because
+the Arm64 host kernel supplies uname. The source-matched WebKitCommon.cmake
+therefore selected `WTF_CPU_ARM64`, leaving both `USE_MIMALLOC` and
+`USE_SYSTEM_MALLOC` `OFF`. For actual ARM32, BPlatform.h cannot use libpas,
+so the allocator selection was impossible.
+
+WebKit 2.54.2 already supports `FORCE_32BIT` on an AArch64 host in
+WebKitCommon.cmake. The builder now requests `FORCE_32BIT=ON`, explicitly
+pins the upstream ARM Thumb-2 mimalloc backend, and checks the resulting
+CMake cache for `armv7l`, mimalloc ON and system malloc OFF **before**
+invoking Ninja. The formerly failing `WPEPlatformHeadless` object library
+is the first build target, before compiling the rest of WebKit, so its
+allocator configuration fails early if still wrong. This correction still
+requires a real hosted-runner compile,
+link, ISA and runtime qualification; none is inferred from static CMake logic.
+
 ## Running and interpreting
 
 After the source revision is intentionally published, dispatch the

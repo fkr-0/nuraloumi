@@ -40,6 +40,29 @@ class WpeMuslProducerCiTests(unittest.TestCase):
         ):
             self.assertIn(part, self.workflow)
 
+    def test_arm64_kernel_must_not_be_mistaken_for_armv7_userspace(self):
+        # The native AArch32 container inherits the host kernel's aarch64 uname.
+        # WPE 2.54.2 WebKitCommon explicitly supports FORCE_32BIT on Arm64.
+        for part in (
+            "-DFORCE_32BIT=ON -DUSE_MIMALLOC=ON -DUSE_SYSTEM_MALLOC=OFF",
+            "CMAKE_SYSTEM_PROCESSOR:INTERNAL=armv7l",
+            "USE_MIMALLOC:BOOL=ON",
+            "USE_SYSTEM_MALLOC:BOOL=OFF",
+            "WPE CMake did not select the ARMv7 target processor",
+            "WPE CMake did not select the ARMv7 mimalloc backend",
+            "cmake --build /out/build/webkit --target WPEPlatformHeadless --parallel 2",
+        ):
+            self.assertIn(part, self.builder)
+        # Reject the old configuration before spending time on Ninja.
+        self.assertLess(
+            self.builder.index("CMAKE_SYSTEM_PROCESSOR:INTERNAL=armv7l"),
+            self.builder.index("cmake --build /out/build/webkit"),
+        )
+        self.assertLess(
+            self.builder.index("--target WPEPlatformHeadless --parallel 2"),
+            self.builder.index("cmake --build /out/build/webkit --parallel 2"),
+        )
+
     def test_timeout_interval_is_accepted_by_coreutils(self):
         result = subprocess.run(
             ["timeout", "--signal=TERM", "--kill-after=120s", "270m", "true"],
