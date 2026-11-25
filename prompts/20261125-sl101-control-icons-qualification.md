@@ -4,7 +4,7 @@
 Qualify Media, Network, Display, System and Notifications icons so the SL101 does not show missing-glyph rectangles.
 
 ## Context
-Commit 95bb56bc introduced Cairo stroke icons for control.tab.* and control.<category>.* in crates/nuraloumi-render-cairo/src/layout.rs. The installed release still contains private-use Nerd Font glyphs and the user sees rectangles; the new code is not deployed or visually qualified.
+Commit 95bb56bc introduced Cairo stroke icons for control.tab.* and control.media.*, control.network.*, control.display.*, control.system.*, and control.notifications.* in crates/nuraloumi-render-cairo/src/layout.rs. The installed release still contains private-use Nerd Font glyphs and the user sees rectangles; the new code is not deployed or visually qualified.
 
 ## Scope
 Own only Control Center icon geometry/visibility and deterministic pixel tests. No menu placement, scrolling or media-engine changes. Avoid adding font, image, EGL or GPU runtime dependencies to Cairo. Device screenshots only read-only and only with existing authenticated access.
