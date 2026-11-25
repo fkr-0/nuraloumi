@@ -130,3 +130,7 @@ path = "src/bin/timer.rs"
 [[bin]]
 name = "nuraloumi-slider-observer"
 path = "src/bin/slider_observer.rs"
+
+[[bin]]
+name = "nuraloumi-hardware-observer"
+path = "src/bin/hardware_input_observer.rs"
