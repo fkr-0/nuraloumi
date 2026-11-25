@@ -80,8 +80,10 @@ def audit(root):
                     elf_files.append(path)
     findings, instructions, overflow = [], 0, 0
     counts, sampled = Counter(), Counter()
+    per_file = {}
     for file in elf_files:
         rel = file.relative_to(root).as_posix()
+        file_counts = Counter()
         # Stream huge libWPEWebKit output, bound even a stuck decoder.
         with subprocess.Popen(
             ["timeout", "240", "llvm-objdump", "-d", "--no-show-raw-insn", str(file)],
@@ -89,7 +91,10 @@ def audit(root):
         ) as process:
             count, issues, extra = inspect_lines(process.stdout, rel,
                                                  max(0, LIMIT - len(findings)),
-                                                 counts=counts, sampled=sampled)
+                                                 counts=file_counts, sampled=sampled)
+            counts.update(file_counts)
+            if file_counts:
+                per_file[rel] = dict(sorted(file_counts.items()))
             instructions += count
             findings.extend(issues)
             overflow += extra
@@ -102,6 +107,7 @@ def audit(root):
         "decoded_instructions": instructions, "findings": findings,
         "additional_findings": overflow,
         "findings_by_code": dict(sorted(counts.items())),
+        "findings_by_file": per_file,
         "unknown_decodes": counts["UNKNOWN_DECODE"],
         "incompatible_decoded_uses": sum(n for code, n in counts.items()
                                          if code != "UNKNOWN_DECODE"),

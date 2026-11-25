@@ -122,8 +122,34 @@ candidate archive, install anything on the tablet, or change a GitHub release.
   illegal instructions. A rigorous static ISA PASS still requires
   proper instruction-mode coverage, in addition to replacing the three
   previously identified incompatible crypto dependencies.
+  A concrete misdecode was reproduced in the stripped `bwrap` binary at
+  address `0x1e3c`: default ARM-mode disassembly falsely displayed
+  `vst4.16 {d19,...}`, while a Thumb-mode decode at the same bytes showed
+  ordinary `strb.w` instructions. The later classified pass counted 970,861
+  unknown decodes and 56,859 *suspected* ISA findings; those counts cannot be
+  treated as verified illegal instructions without per-section mode recovery.
 - The targeted WPE contract and new overlay tests passed **42/42** locally.
   This verifies guardrails and synthetic cases, not runtime/device behavior.
+- The rebuilt **Nettle 3.10.2** and **Hogweed** stage completed. Their
+  SONAMEs are `libnettle.so.8` and `libhogweed.so.6`, with musl
+  dependencies and VFPv3-D16 attributes. Re-decoding their complete,
+  unstripped ELF files scanned **67,263 instruction lines**, finding
+  **zero** incompatible instructions, upper D-register uses or unknown
+  decodes. Stage-file SHA-256 values:
+  `bd20c9ab04765ad8e14de807af9df9583b7966105e6cd6ed219f103cd3423b0f`
+  (Nettle) and
+  `bce004f14b272ad491efa4565fa63fbfc7b22de41e1a229fa1d501c173d04008`
+  (Hogweed). This is a **two-library static preflight**, not full runtime
+  qualification.
+- The rebuilt **libgcrypt 1.10.3** shared object also linked with
+  `libgcrypt.so.20` SONAME, musl and `libgpg-error.so.0` dependencies,
+  and VFPv3-D16 attributes without NEON. Its independent full-file decoded
+  scan examined **171,684 instruction lines**, finding **zero** incompatible
+  instructions and **zero** unknown decodes; SHA-256
+  `693639b2df87b45d161cab0cdf94b7deb91796e8ccc7cf3fb6023b9b4b4da839`.
+  The three completed crypto-library scans therefore cover **238,947**
+  instruction lines with no static ISA findings. OpenSSL, runtime closure and
+  device behavior remain unqualified.
 - A read-only SSH check confirmed the SL101 still runs Nura edge ARMv7 with
   its existing Sway/WayVNC sessions. It also has system Mesa 26.2.4 and LLVM
   23.1.2; their ELF attributes alone do not qualify generated code. No live
@@ -134,6 +160,12 @@ candidate archive, install anything on the tablet, or change a GitHub release.
   conditionally. A recorded runtime `dlopen` trace is needed to identify
   the actual graphics path and close it without relying on unqualified
   system Mesa/LLVM; direct `DT_NEEDED` completeness is insufficient.
+- The original WebKit CMake cache confirms `ENABLE_JIT=OFF`,
+  `ENABLE_DFG_JIT=OFF`, `ENABLE_FTL_JIT=OFF`,
+  `ENABLE_GPU_PROCESS=OFF`, `ENABLE_WEBGL=OFF`, `USE_GBM=OFF`
+  and `USE_SKIA=ON`. These reduce some code-generation paths but **do
+  not** prove that system Mesa/LLVM never generates incompatible code;
+  the earlier anonymous-code SIGILL remains unexplained.
 - The official WPE producer's most recent runs on the release branch remain
   cancelled; the earlier successful PR workflow has no retained runtime
   artifact. A new exact-source CI artifact and ordinary package are missing.
