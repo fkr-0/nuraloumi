@@ -93,3 +93,43 @@ production pixel/sandbox PASS; keep Mesa/LLVM path qualification independent.
 
 Status: **NO-GO** for production. Keep the existing software-rendering
 fallback and rollback hashes intact.
+
+## Follow-up: source-pinned Cortex-A9 crypto rebuild (25 November)
+
+This is a **separate, private build exercise**; it does not update an existing
+candidate archive, install anything on the tablet, or change a GitHub release.
+
+- Added `scripts/rebuild_nurabrowser_wpe_d16_crypto.sh`, requiring fresh
+  output and a native ARMv7/musl toolchain. Source and Alpine 3.22 security
+  patch SHA-512 values are pinned and rechecked before compilation.
+- Source inputs: OpenSSL **3.5.9** with Alpine's five 2026 security patches,
+  Nettle **3.10.2**, and libgcrypt **1.10.3** with Alpine's GCC 14 ARM patch.
+  Compile flags specifically target Cortex-A9, hard-float VFPv3-D16; OpenSSL
+  assembler is disabled, Nettle fat dispatch/NEON/assembler disabled, and
+  libgcrypt assembler/NEON/ARM crypto disabled.
+- Added `scripts/assemble_nurabrowser_wpe_d16_candidate.py` to copy the
+  private 85-file closure into a *fresh* directory, replace all five paired
+  crypto SONAMEs, record SHA-256 provenance, and retain the unqualified marker.
+  It refuses pre-existing output, symlinks, missing pairs and checksum tamper.
+- Added `scripts/audit_nurabrowser_decoded_isa.py` for streaming disassembly
+  of all candidate ELF files, with upper VFP-register, NEON and ARM hardware
+  division checks. It is intentionally a preflight, not a PASS manifest.
+- Initial disassembly of the **original** candidate processed **80 ELF files**
+  and approximately **25 million instruction-shaped lines**, reporting over
+  one million combined findings. Its first 256 sampled findings are unknown
+  decodes: these stripped objects mix ARM and Thumb code. The bulk count was
+  not yet classified by reason and **cannot** be interpreted as a million
+  illegal instructions. A rigorous static ISA PASS still requires
+  proper instruction-mode coverage, in addition to replacing the three
+  previously identified incompatible crypto dependencies.
+- The targeted WPE contract and new overlay tests passed **42/42** locally.
+  This verifies guardrails and synthetic cases, not runtime/device behavior.
+- A read-only SSH check confirmed the SL101 still runs Nura edge ARMv7 with
+  its existing Sway/WayVNC sessions. No live file was changed.
+- The official WPE producer's most recent runs on the release branch remain
+  cancelled; the earlier successful PR workflow has no retained runtime
+  artifact. A new exact-source CI artifact and ordinary package are missing.
+
+**Qualification remains NO-GO** pending a completed crypto build, new closure
+audits, real sandbox/WebProcess/Wayland testing and independent review. Do not
+mark any untested qualification field PASS.
