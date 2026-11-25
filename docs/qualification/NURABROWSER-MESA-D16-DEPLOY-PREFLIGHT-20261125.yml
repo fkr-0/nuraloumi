@@ -2,7 +2,7 @@ schema: infra-change-packet/v1
 schema_version: 1
 change:
   service: NuraLoumi 0.0.8-rc.2 regular browser integration
-  host: sl101-nura (owner-authorized 192.168.23.106)
+  host: owner-designated SL101 tablet (private network identity withheld)
   risk: migration
   requested_scope:
     - integrate Mesa 26.2.4 plus LLVM 23 VFPv3-D16 correction
@@ -11,9 +11,9 @@ change:
     - deploy the CI-verified production NuraLoumi release after all gates pass
 ownership:
   state: known-gap
-  canonical_source: /home/user/code/nuraloumi
+  canonical_source: NuraLoumi upstream main
   external_dependencies:
-    - /home/user/code/sl101_linux/patches/mesa-26.2.4
+    - privately reviewed SL101 Mesa D16 patchset
     - Alpine armv7/musl WebKit 2.54.2 complete installed-layout runtime
     - Sway/WayVNC user session and existing Pixman recovery path
     - owner-directed upstream main CI release and SHA-verified artifact
@@ -26,16 +26,15 @@ ownership:
     - real semantic touch and full WayVNC navigation input not yet qualified
 preflight:
   inventory:
-    - "hostname: sl101-nura, ARMv7l, kernel: 7.0.1-postmarketos-grate-dmavde1"
-    - "boot_id: d09925e8-b244-4134-a813-1d5efe326ae8"
-    - "eMMC CID: 7001004d4d43333247448d402a656e00"
-    - "SD CID: 035344534c31323880ac79a543010300"
+    - "target: ARMv7l SL101; hostname and kernel identity recorded in private preflight"
+    - "boot_id: verified privately; omitted from public source"
+    - "eMMC and SD card CIDs: matched private device inventory; omitted from public source"
     - "battery: 99 percent, AC online: 1"
     - "root storage: 89.3G available at preflight"
-    - "current release: /opt/nuraloumi/releases/fb47cfc73c614440dcbf6aecb12642085fef796a/bin"
+    - "current release: previously installed versioned NuraLoumi release; exact private path recorded separately"
     - "installed libgallium-26.2.4.so SHA256: 17acc83789f834278f4fd939a79c627dfe2054bedee353733c57029861af6619"
     - "patched private libgallium SHA256: 09e03bea18be4120a6d22dde9887e4a452dcd488df6933c5cf46a4c15ec8e87b"
-    - "live compositor PID: 1445, WayVNC PID: 1481"
+    - "live compositor and WayVNC processes: verified in private preflight"
     - "regular /usr/libexec/nuraloumi/browser runtime: absent"
   local_checks:
     - "SL101 ISA and pixel/IPC tests: 19 focused tests passed"
@@ -69,7 +68,7 @@ rollback:
 apply:
   authorized: true
   command: null
-  limit: verified Nura SL101 at 192.168.23.106 only
+  limit: owner-designated SL101 only; verify device identity against private preflight
   allowed_roles:
     - exact reviewed official ARMv7/musl CI release after preflight closure
 postflight:
@@ -89,13 +88,13 @@ results:
     - "2026-11-25: live WayVNC RFB screenshot over SSH PASS; pointer click produced no observed page transition"
     - "2026-11-25: first live trial left one trial-owned UIProcess; identified by private env and terminated only that PID"
     - "2026-11-25: corrected scoped cleanup trial exited normally; no remaining UIProcess/WebProcess/bwrap"
-    - "2026-11-25: compositor PID 1445, WayVNC PID 1481, system Mesa hash and /opt current unchanged"
+    - "2026-11-25: compositor, WayVNC, system Mesa hash and current release remained unchanged"
   changed_resources:
     - "private user-home device qualification scripts and logs only"
     - "new SL101 repository qualification scripts/tests"
     - "this NuraLoumi no-go packet"
   warnings:
-    - "SL101 full make test: 2628 tests, 10 skipped, one unrelated missing-fixture import error for work/sl101-0076-dontkmap-kernel-20261109/debian100/staging/stage_debian100.py."
+    - "SL101 full make test: 2628 tests, 10 skipped, one unrelated missing-fixture import error for the Debian 10 stage_debian100.py fixture."
     - "PRODUCTION NO-GO: official package/producer, rollback artifact and touch gates remain incomplete."
     - "No production install, symlink flip, apk modification or service restart occurred during this device preflight."
     - "Source-only WPE recovery commits were subsequently fast-forwarded to GitHub main at 786b24e; this does not qualify a device runtime or authorize production deployment."
