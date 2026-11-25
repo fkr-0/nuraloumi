@@ -83,6 +83,7 @@ pub fn build_appearance_menu(selected: ThemePalette) -> MenuModel {
             true,
         ));
     }
+
     MenuModel {
         id: "appearance".into(),
         title: "Appearance".into(),
@@ -1442,13 +1443,21 @@ const fn default_brightness_writable() -> bool {
     true
 }
 
+const fn default_display_always_on() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FixtureSnapshot {
     pub network: ProviderValue,
+    #[serde(default)]
+    pub wifi_radio_enabled: Option<bool>,
     pub audio: ProviderValue,
     pub battery: ProviderValue,
     pub clock: ProviderValue,
     pub brightness: ProviderValue,
+    #[serde(default = "default_display_always_on")]
+    pub display_always_on: bool,
     #[serde(default)]
     pub renderer: Option<String>,
     #[serde(default)]
@@ -1498,6 +1507,7 @@ impl Default for FixtureSnapshot {
                 value: Some("Lab Wi-Fi · 82%".into()),
                 message: None,
             },
+            wifi_radio_enabled: Some(true),
             audio: ProviderValue {
                 state: ValueState::Ready,
                 value: Some("46% · speaker".into()),
@@ -1518,6 +1528,7 @@ impl Default for FixtureSnapshot {
                 value: Some("62%".into()),
                 message: None,
             },
+            display_always_on: true,
             renderer: None,
             renderer_switch_available: false,
             brightness_writable: true,
@@ -2706,26 +2717,99 @@ pub fn build_audio_menu(snapshot: &FixtureSnapshot) -> MenuModel {
 }
 
 pub fn build_power_menu(snapshot: &FixtureSnapshot) -> MenuModel {
+    let mut items = vec![
+        section("power.quick.heading", "Quick status"),
+        provider_status("power.battery", "Battery", &snapshot.battery),
+        toggle_action(
+            "power.toggle.always-on",
+            "Always on",
+            "display.always-on",
+            true,
+            Some(snapshot.display_always_on),
+            Some(if snapshot.display_always_on {
+                "Display stays on"
+            } else {
+                "10 minute idle timeout"
+            }),
+        ),
+        toggle_action(
+            "power.toggle.mute",
+            "Mute",
+            "audio.mute",
+            snapshot.audio.available(),
+            snapshot.audio.value.as_deref().map(|v| v.contains("muted")),
+            Some("Toggle speaker mute"),
+        ),
+        toggle_action(
+            "power.toggle.wifi",
+            "Wi-Fi",
+            "network.wifi",
+            snapshot.network.available() && snapshot.wifi_radio_enabled.is_some(),
+            snapshot.wifi_radio_enabled,
+            Some("Toggle Wi-Fi radio"),
+        ),
+        toggle_action(
+            "power.toggle.bluetooth",
+            "Bluetooth",
+            "bluetooth.radio",
+            snapshot.bluetooth.available(),
+            snapshot
+                .bluetooth
+                .value
+                .as_deref()
+                .map(|v| v.starts_with("On")),
+            Some("Toggle Bluetooth radio"),
+        ),
+        section("power.brightness", "Brightness"),
+    ];
+    // Do not expose a zero-backlight target before SL101 black-screen recovery
+    // is qualified; 10% is the lowest visible quick-sheet brightness setting.
+    for level in [10, 25, 40, 60, 80, 100] {
+        let mut item = MenuItem::action(
+            format!("power.brightness.{level}"),
+            format!("Brightness {level}%"),
+            MenuAction::SetValue {
+                id: "system.brightness".into(),
+                value: level,
+            },
+        );
+        if !snapshot.brightness.available() || !snapshot.brightness_writable {
+            item.enabled = false;
+            item.action = None;
+        }
+        items.push(item);
+    }
+    items.push(section("power.volume", "Volume"));
+    for level in (0..=100).step_by(20) {
+        let mut item = MenuItem::action(
+            format!("power.volume.{level}"),
+            format!("Volume {level}%"),
+            MenuAction::SetValue {
+                id: "audio.volume".into(),
+                value: level,
+            },
+        );
+        if !snapshot.audio.available() {
+            item.enabled = false;
+            item.action = None;
+        }
+        items.push(item);
+    }
+    items.extend([
+        section("power.actions", "Power"),
+        confirm_action("power.suspend", "Sleep…", "system.suspend"),
+        confirm_action("power.restart", "Restart…", "system.restart"),
+        confirm_action("power.poweroff", "Shut down…", "system.poweroff"),
+        status(
+            "power.hibernate",
+            "Hibernate unavailable",
+            "No qualified hibernation/resume image",
+        ),
+    ]);
     MenuModel {
         id: "power".into(),
-        title: "Power".into(),
-        items: vec![
-            section("power.summary", "Power"),
-            provider_status("power.battery", "Battery", &snapshot.battery),
-            status(
-                "power.safety",
-                "Safety",
-                "Power actions require confirmation; provider defaults remain dry-run",
-            ),
-            confirm_action(
-                "power.end_desktop",
-                "Log out to console (VT1)…",
-                "system.end_desktop",
-            ),
-            confirm_action("power.suspend", "Sleep (qualified only)…", "system.suspend"),
-            confirm_action("power.restart", "Restart…", "system.restart"),
-            confirm_action("power.poweroff", "Power off…", "system.poweroff"),
-        ],
+        title: "Quick status".into(),
+        items,
     }
 }
 
@@ -3822,7 +3906,10 @@ mod tests {
     fn default_render_path_paints_glyphs_and_custom_resolver_overrides() {
         use nuraloumi_render_cairo::{CairoRenderer, PaintNode, RenderOptions, Viewport};
 
-        let menu = build_family(MenuFamily::Power, &FixtureSnapshot::default());
+        // The full quick-status model places power actions below the tiles
+        // and sliders. Isolate the glyph contract from viewport scrolling.
+        let mut menu = build_family(MenuFamily::Power, &FixtureSnapshot::default());
+        menu.items.retain(|item| item.id == "power.suspend");
         let state = MenuState::default();
         let renderer = CairoRenderer::default();
         let viewport = Viewport::new(480.0, 480.0, 1.0);
@@ -5581,6 +5668,58 @@ after_one_shot_action = true
     }
 
     #[test]
+    fn quick_status_has_explicit_toggles_set_values_and_disabled_hibernation() {
+        let snapshot = FixtureSnapshot {
+            display_always_on: false,
+            wifi_radio_enabled: Some(false),
+            ..FixtureSnapshot::default()
+        };
+        let power = build_power_menu(&snapshot);
+        assert_eq!(power.title, "Quick status");
+        assert_eq!(
+            power
+                .items
+                .iter()
+                .find(|item| item.id == "power.toggle.always-on")
+                .unwrap()
+                .checked,
+            Some(false)
+        );
+        assert_eq!(
+            power
+                .items
+                .iter()
+                .find(|item| item.id == "power.toggle.wifi")
+                .unwrap()
+                .checked,
+            Some(false)
+        );
+        assert!(
+            matches!(power.items.iter().find(|item| item.id == "power.brightness.60").unwrap().action,
+            Some(MenuAction::SetValue { ref id, value: 60 }) if id == "system.brightness")
+        );
+        assert!(power
+            .items
+            .iter()
+            .any(|item| item.id == "power.brightness.10"));
+        assert!(!power
+            .items
+            .iter()
+            .any(|item| item.id == "power.brightness.0"));
+        assert!(
+            matches!(power.items.iter().find(|item| item.id == "power.volume.80").unwrap().action,
+            Some(MenuAction::SetValue { ref id, value: 80 }) if id == "audio.volume")
+        );
+        assert!(power
+            .items
+            .iter()
+            .find(|item| item.id == "power.hibernate")
+            .unwrap()
+            .action
+            .is_none());
+    }
+
+    #[test]
     fn power_and_window_close_require_confirmation() {
         let snapshot = FixtureSnapshot::default();
 
@@ -5667,3 +5806,5 @@ after_one_shot_action = true
         assert_eq!(config, decoded);
     }
 }
+pub mod display_idle;
+pub mod quick_status;

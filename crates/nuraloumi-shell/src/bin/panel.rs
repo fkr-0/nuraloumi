@@ -11,8 +11,10 @@ use nuraloumi_render_cairo::{
     RowKind, Scene, ScrollWindow, TextStyle, Theme as RenderTheme, Viewport,
 };
 use nuraloumi_shell::config_reload::{prepare_from_file, PreparedConfigReload};
+use nuraloumi_shell::display_idle::DisplayIdleController;
 use nuraloumi_shell::ipc::IpcResponse;
 use nuraloumi_shell::panel_status::{PanelStatusSample, PanelStatusSchedule};
+use nuraloumi_shell::quick_status;
 use nuraloumi_shell::surface_catalog::{IpcRuntime, SurfaceCatalog, SurfaceObservation};
 use nuraloumi_shell::{
     apply_launcher_preferences, blank_press_requests_dismiss, build_family,
@@ -801,6 +803,7 @@ fn run_live(
 
     let renderer = CairoRenderer::default();
     let mut panel = PanelController::default();
+    let mut display_idle = DisplayIdleController::default();
     let mut panel_geometry: Option<(u32, u32, i32)> = None;
     let mut panel_scene: Option<Scene> = None;
     let mut panel_pointer_press: Option<String> = None;
@@ -860,6 +863,16 @@ fn run_live(
     )?;
 
     loop {
+        let always_on = display_idle.always_on();
+        if snapshot.display_always_on != always_on {
+            snapshot.display_always_on = always_on;
+            if let Some(menu) = active_menu.as_mut() {
+                if menu.family == MenuFamily::Power {
+                    menu.shell.refresh_family(MenuFamily::Power, &snapshot)?;
+                    menu.scene = None;
+                }
+            }
+        }
         let launcher_open = active_menu
             .as_ref()
             .is_some_and(|menu| menu.family == MenuFamily::Launcher);
@@ -1679,11 +1692,24 @@ fn run_live(
                                     }
                                 }
                                 if !app_reused {
-                                    match execute_live_action(
-                                        action,
-                                        policy.enable_power_actions,
-                                        policy.enable_renderer_switch,
-                                    ) {
+                                    let result = if matches!(action, MenuAction::Toggle { id } if id == "display.always-on")
+                                    {
+                                        display_idle.toggle().map(|always_on| {
+                                            snapshot.display_always_on = always_on;
+                                            Some(ActionResult::executed(if always_on {
+                                                "display will stay on"
+                                            } else {
+                                                "display will blank after 10 minutes of idle"
+                                            }))
+                                        })
+                                    } else {
+                                        execute_live_action(
+                                            action,
+                                            policy.enable_power_actions,
+                                            policy.enable_renderer_switch,
+                                        )
+                                    };
+                                    match result {
                                         Ok(Some(result)) => {
                                             eprintln!(
                                             "nuraloumi-provider-result: executed={} dry_run={} message={}",
@@ -1774,6 +1800,23 @@ fn run_live(
             }
 
             if let Some(family) = switch_family {
+                if config.panel_edge == ShellPanelEdge::Top
+                    && (family == MenuFamily::Power) != (menu.family == MenuFamily::Power)
+                {
+                    // Entering/leaving the right-anchored status sheet requires
+                    // a new Wayland layer surface; repainting retains its old anchor.
+                    replace_live_menu(
+                        &mut backend,
+                        &config,
+                        &snapshot,
+                        output.as_ref(),
+                        &mut panel,
+                        &mut active_menu,
+                        family,
+                    )?;
+                    panel_scene = None;
+                    continue;
+                }
                 menu.family = family;
                 if family != MenuFamily::Launcher {
                     menu.shell.state.query.clear();
@@ -2173,7 +2216,14 @@ fn open_live_menu(
             let scale = output.scale.max(1) as u32;
             (output.mode_height > 0).then_some(output.mode_height as u32 / scale)
         })
-        .map(|height| bounded_menu_height(height, config.effective_panel_height()))
+        .map(|height| {
+            let available = bounded_menu_height(height, config.effective_panel_height());
+            if family == MenuFamily::Power {
+                available.min(574)
+            } else {
+                available
+            }
+        })
         .unwrap_or(640);
 
     // Sway has already removed the panel's exclusive zone from the menu's
@@ -2208,14 +2258,20 @@ fn open_live_menu(
     } else {
         None
     };
-    let surface = match backend.create_menu(WaylandMenuConfig {
+    let popup_config = WaylandMenuConfig {
         width: requested_width,
         height: requested_height,
         margin_top,
         margin_left,
         output: output.map(|output| output.id),
         namespace: "nuraloumi-panel-menu".into(),
-    }) {
+    };
+    let create = if family == MenuFamily::Power && config.panel_edge == ShellPanelEdge::Top {
+        backend.create_menu_right(popup_config)
+    } else {
+        backend.create_menu(popup_config)
+    };
+    let surface = match create {
         Ok(surface) => surface,
         Err(error) => {
             if let Some(dismiss_surface) = dismiss_surface {
@@ -2379,17 +2435,32 @@ fn render_menu_and_present(
     );
     let theme_tokens = config.active_theme_tokens();
     let presentation_menu = shell.renderer_presentation_menu();
-    let (scene, mut buffer) = render_menu_with_scroll(
-        renderer,
-        &presentation_menu,
-        &shell.state,
-        viewport,
-        theme_tokens,
-        RenderOptions::default(),
-        transition,
-        manual_scroll,
-    )
-    .map_err(|error| format!("Cairo menu render failed: {error}"))?;
+    let (scene, mut buffer) = if shell.menu.id == "power" && viewport.height >= 570.0 {
+        let scene = quick_status::scene(
+            &presentation_menu,
+            snapshot,
+            shell.state.selected_id.as_deref(),
+            shell.pending_confirmation.as_deref(),
+            viewport,
+            RenderTheme::from(theme_tokens),
+        );
+        let buffer = renderer
+            .render_scene(&scene)
+            .map_err(|error| format!("Cairo quick status render failed: {error}"))?;
+        (scene, buffer)
+    } else {
+        render_menu_with_scroll(
+            renderer,
+            &presentation_menu,
+            &shell.state,
+            viewport,
+            theme_tokens,
+            RenderOptions::default(),
+            transition,
+            manual_scroll,
+        )
+        .map_err(|error| format!("Cairo menu render failed: {error}"))?
+    };
     paint_window_thumbnail_overlays(&scene, &mut buffer, snapshot)?;
     present_buffer(backend, surface, &mut buffer)?;
     Ok(scene)
@@ -3200,6 +3271,7 @@ fn fixture_snapshot_from_probe(probe: &ProbeSnapshot) -> FixtureSnapshot {
     let brightness_writable = preferred_backlight.is_some_and(|device| device.writable);
     FixtureSnapshot {
         network: probe_value(&probe.network.meta, network_value, &probe.network.issues),
+        wifi_radio_enabled: probe.network.radio_enabled,
         audio: probe_value(&probe.audio.meta, audio_value, &probe.audio.issues),
         battery: battery_provider_value(&probe.battery),
         clock: probe_value(
@@ -3212,6 +3284,7 @@ fn fixture_snapshot_from_probe(probe: &ProbeSnapshot) -> FixtureSnapshot {
             brightness_value,
             &probe.backlight.issues,
         ),
+        display_always_on: true,
         renderer: Some(nuraloumi_providers::renderer::running_renderer().into()),
         renderer_switch_available: std::path::Path::new("/usr/local/sbin/sl101-renderer-switch")
             .exists(),
@@ -3286,7 +3359,9 @@ fn refresh_probe_snapshot(
     let media_player = snapshot.media_player.clone();
     let notifications = snapshot.notifications.clone();
     let notification_history = snapshot.notification_history.clone();
+    let display_always_on = snapshot.display_always_on;
     *snapshot = fixture_snapshot_from_probe(probe);
+    snapshot.display_always_on = display_always_on;
     snapshot.renderer_switch_available &= enable_renderer_switch;
     snapshot.tasks = tasks;
     snapshot.applications = applications;
@@ -3911,6 +3986,34 @@ fn execute_live_action(
         MenuAction::Toggle { id } if id == "audio.mute" => AudioProvider::new(SystemCommandRunner)
             .execute(AudioAction::ToggleMute)
             .map_err(|error| error.to_string())?,
+        MenuAction::SetValue { id, value } if id == "audio.volume" => {
+            let percent = u16::try_from(*value).map_err(|_| "volume must be 0..100")?;
+            if percent > 100 {
+                return Err("volume must be 0..100".into());
+            }
+            AudioProvider::new(SystemCommandRunner)
+                .execute(AudioAction::SetVolume(percent))
+                .map_err(|error| error.to_string())?
+        }
+        MenuAction::SetValue { id, value } if id == "system.brightness" => {
+            let percent = u8::try_from(*value).map_err(|_| "brightness must be 0..100")?;
+            if percent > 100 {
+                return Err("brightness must be 0..100".into());
+            }
+            let mut provider = BacklightProvider::system();
+            let current = provider.snapshot().map_err(|error| error.to_string())?;
+            let device = current
+                .devices
+                .iter()
+                .find(|device| device.writable)
+                .ok_or_else(|| "no writable backlight device is available".to_owned())?;
+            provider
+                .execute(BacklightAction::SetPercent {
+                    device: device.name.clone(),
+                    percent,
+                })
+                .map_err(|error| error.to_string())?
+        }
         MenuAction::Adjust { id, delta } if id == "audio.volume" => {
             let delta = i16::try_from(*delta)
                 .map_err(|_| format!("audio delta {delta} exceeds provider range"))?;

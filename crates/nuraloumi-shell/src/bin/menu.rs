@@ -1380,6 +1380,37 @@ fn execute_live_action(
         MenuAction::Toggle { id } if id == "audio.mute" => AudioProvider::new(SystemCommandRunner)
             .execute(AudioAction::ToggleMute)
             .map_err(|error| error.to_string())?,
+        MenuAction::Toggle { id } if id == "display.always-on" => {
+            return Err("display idle mode is owned by the running NuraLoumi panel".into());
+        }
+        MenuAction::SetValue { id, value } if id == "audio.volume" => {
+            let percent = u16::try_from(*value).map_err(|_| "volume must be 0..100")?;
+            if percent > 100 {
+                return Err("volume must be 0..100".into());
+            }
+            AudioProvider::new(SystemCommandRunner)
+                .execute(AudioAction::SetVolume(percent))
+                .map_err(|error| error.to_string())?
+        }
+        MenuAction::SetValue { id, value } if id == "system.brightness" => {
+            let percent = u8::try_from(*value).map_err(|_| "brightness must be 0..100")?;
+            if percent > 100 {
+                return Err("brightness must be 0..100".into());
+            }
+            let mut provider = BacklightProvider::system();
+            let current = provider.snapshot().map_err(|error| error.to_string())?;
+            let device = current
+                .devices
+                .iter()
+                .find(|device| device.writable)
+                .ok_or_else(|| "no writable backlight device is available".to_owned())?;
+            provider
+                .execute(BacklightAction::SetPercent {
+                    device: device.name.clone(),
+                    percent,
+                })
+                .map_err(|error| error.to_string())?
+        }
         MenuAction::Adjust { id, delta } if id == "audio.volume" => {
             let delta = i16::try_from(*delta)
                 .map_err(|_| format!("audio delta {delta} exceeds provider range"))?;
@@ -1505,6 +1536,7 @@ fn fixture_snapshot_from_probe(probe: &ProbeSnapshot) -> FixtureSnapshot {
 
     FixtureSnapshot {
         network: probe_value(&probe.network.meta, network_value, &probe.network.issues),
+        wifi_radio_enabled: probe.network.radio_enabled,
         audio: probe_value(&probe.audio.meta, audio_value, &probe.audio.issues),
         battery: probe_value(&probe.battery.meta, battery_value, &probe.battery.issues),
         clock: probe_value(
@@ -1517,6 +1549,7 @@ fn fixture_snapshot_from_probe(probe: &ProbeSnapshot) -> FixtureSnapshot {
             brightness_value,
             &probe.backlight.issues,
         ),
+        display_always_on: true,
         renderer: None,
         renderer_switch_available: false,
         brightness_writable,

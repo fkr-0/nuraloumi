@@ -49,6 +49,15 @@ struct OutputRecord {
     info: OutputInfo,
 }
 
+fn menu_anchor(right: bool) -> zwlr_layer_surface_v1::Anchor {
+    zwlr_layer_surface_v1::Anchor::Top
+        | if right {
+            zwlr_layer_surface_v1::Anchor::Right
+        } else {
+            zwlr_layer_surface_v1::Anchor::Left
+        }
+}
+
 #[cfg(test)]
 fn test_keyboard_layout(layout: &str) -> KeyboardState {
     let mut keyboard = KeyboardState::default();
@@ -409,6 +418,16 @@ impl WaylandBackend {
     }
 
     pub fn create_menu(&mut self, config: MenuConfig) -> Result<SurfaceId> {
+        self.create_menu_aligned(config, false)
+    }
+
+    /// Anchor a fixed-width transient menu to the output's top-right edge.
+    /// The compositor's panel exclusive zone already places it below the top bar.
+    pub fn create_menu_right(&mut self, config: MenuConfig) -> Result<SurfaceId> {
+        self.create_menu_aligned(config, true)
+    }
+
+    fn create_menu_aligned(&mut self, config: MenuConfig, right: bool) -> Result<SurfaceId> {
         validate_menu_config(&config)?;
         self.create_layer_surface(
             config.output,
@@ -418,6 +437,7 @@ impl WaylandBackend {
             LayerRole::Menu {
                 margin_top: config.margin_top,
                 margin_left: config.margin_left,
+                right,
             },
         )
     }
@@ -499,11 +519,15 @@ impl WaylandBackend {
             LayerRole::Menu {
                 margin_top,
                 margin_left,
+                right,
             } => {
-                layer.set_anchor(
-                    zwlr_layer_surface_v1::Anchor::Top | zwlr_layer_surface_v1::Anchor::Left,
+                layer.set_anchor(menu_anchor(right));
+                layer.set_margin(
+                    margin_top,
+                    if right { margin_left } else { 0 },
+                    0,
+                    if right { 0 } else { margin_left },
                 );
-                layer.set_margin(margin_top, 0, 0, margin_left);
             }
             LayerRole::DismissBackdrop {
                 margin_top,
@@ -821,6 +845,7 @@ enum LayerRole {
     Menu {
         margin_top: i32,
         margin_left: i32,
+        right: bool,
     },
     DismissBackdrop {
         margin_top: i32,
@@ -2162,6 +2187,17 @@ mod tests {
     }
 
     #[test]
+    fn right_aligned_status_popup_anchors_to_right_without_left_anchor() {
+        let anchor = menu_anchor(true);
+        assert!(anchor.contains(zwlr_layer_surface_v1::Anchor::Top));
+        assert!(anchor.contains(zwlr_layer_surface_v1::Anchor::Right));
+        assert!(!anchor.contains(zwlr_layer_surface_v1::Anchor::Left));
+        let left = menu_anchor(false);
+        assert!(left.contains(zwlr_layer_surface_v1::Anchor::Left));
+        assert!(!left.contains(zwlr_layer_surface_v1::Anchor::Right));
+    }
+
+    #[test]
     fn dismiss_backdrop_plan_is_full_output_overlay_without_keyboard_focus() {
         let role = LayerRole::DismissBackdrop {
             margin_top: 48,
@@ -2188,6 +2224,7 @@ mod tests {
             layer_keyboard_interactivity(LayerRole::Menu {
                 margin_top: 0,
                 margin_left: 0,
+                right: false,
             }),
             zwlr_layer_surface_v1::KeyboardInteractivity::Exclusive
         ));
