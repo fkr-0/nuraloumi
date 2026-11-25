@@ -140,6 +140,33 @@ impl GlyphTable {
         None
     }
 
+    /// Resolve only codepoints known to be present in the selected face.
+    /// The caller must query that exact face's cmap; font-family names alone
+    /// cannot establish glyph availability on a minimal musl image.
+    /// ASCII '*' is the last-resort marker, avoiding private-use tofu.
+    pub fn resolve_with_coverage(
+        &self,
+        id: &str,
+        mut contains: impl FnMut(char) -> bool,
+    ) -> Option<char> {
+        let preferred = self.resolve(id)?;
+        if contains(preferred) {
+            return Some(preferred);
+        }
+        let alternate_style = match self.style {
+            GlyphStyle::NerdFont => GlyphStyle::Unicode,
+            GlyphStyle::Unicode => GlyphStyle::NerdFont,
+        };
+        let alternate = Self::with_style(alternate_style).resolve(id)?;
+        if contains(alternate) {
+            Some(alternate)
+        } else if contains('*') {
+            Some('*')
+        } else {
+            None
+        }
+    }
+
     pub fn as_callback(&self) -> impl Fn(&str) -> Option<char> + '_ {
         move |id| self.resolve(id)
     }
@@ -189,5 +216,27 @@ mod tests {
         let table = GlyphTable::with_style(GlyphStyle::Unicode);
         assert_eq!(table.resolve("power.shutdown"), Some('⏻'));
         assert_eq!(table.resolve("unknown.category"), None);
+    }
+
+    #[test]
+    fn exact_face_coverage_never_emits_unavailable_private_use_glyphs() {
+        let table = GlyphTable::new();
+        assert_eq!(
+            table.resolve_with_coverage("power.shutdown", |ch| ch == '⏻'),
+            Some('⏻')
+        );
+        assert_eq!(
+            table.resolve_with_coverage("power.shutdown", |ch| ch == '*'),
+            Some('*')
+        );
+        assert_eq!(
+            table.resolve_with_coverage("power.shutdown", |_| false),
+            None
+        );
+        assert_eq!(table.resolve_with_coverage("absent", |_| true), None);
+        assert_eq!(
+            table.resolve_with_coverage("audio.mute", |ch| ch == '󰝟'),
+            Some('󰝟')
+        );
     }
 }
