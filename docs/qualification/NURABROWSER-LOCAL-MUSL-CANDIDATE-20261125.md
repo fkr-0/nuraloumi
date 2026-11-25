@@ -166,6 +166,13 @@ candidate archive, install anything on the tablet, or change a GitHub release.
   and `USE_SKIA=ON`. These reduce some code-generation paths but **do
   not** prove that system Mesa/LLVM never generates incompatible code;
   the earlier anonymous-code SIGILL remains unexplained.
+- A disposable, network-disabled ARMv7 Docker check could load the original
+  candidate through its own `ld-musl-armhf.so.1` and print the native
+  `nurabrowser-core --help` options with exit 0. A separate unqualified
+  headless page attempt under a 0.5-CPU/768-MiB cap did not return within
+  its 15-second timeout, and that **test-only** container was stopped.
+  Neither observation proves a sandboxed WebProcess or real page pixels;
+  neither changed the source archive or live SL101.
 - The official WPE producer's most recent runs on the release branch remain
   cancelled; the earlier successful PR workflow has no retained runtime
   artifact. A new exact-source CI artifact and ordinary package are missing.
