@@ -32,6 +32,75 @@ pub fn action_columns(width: f64) -> usize {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Frozen reference for the old prefix-allocation and remeasurement loop.
+    fn legacy_bounded_text(label: &str, width: f64, style: TextStyle) -> String {
+        if width <= 0.0 {
+            return String::new();
+        }
+        if DeterministicText::run_width(label, style) <= width {
+            return label.into();
+        }
+        let mut result = String::new();
+        for c in label.chars() {
+            let candidate = format!("{result}{c}…");
+            if DeterministicText::run_width(&candidate, style) > width {
+                break;
+            }
+            result.push(c);
+        }
+        if result.is_empty() && DeterministicText::run_width("…", style) > width {
+            String::new()
+        } else {
+            format!("{result}…")
+        }
+    }
+
+    #[test]
+    fn linear_ellipsis_matches_legacy_for_unicode_and_exact_width_boundaries() {
+        let labels = [
+            String::new(),
+            "iiiiiiiiiiiiiiiiiiii".into(),
+            "WWWWWWWWWWWWWWWW".into(),
+            "https://example.org/a-very-long-article-title?lang=de&format=compact".into(),
+            "e\u{301}👩\u{200d}💻🇩🇪 العربية 漢字 हिन्दी\u{200d}…".into(),
+            "no spaces!_:/\\[]{}()@#&%".into(),
+            "long-browser-address/".repeat(6),
+        ];
+        let styles = [
+            TextStyle {
+                size: 14.0,
+                bold: false,
+            },
+            TextStyle {
+                size: 16.0,
+                bold: true,
+            },
+        ];
+        for style in styles {
+            for label in &labels {
+                let mut widths = vec![0.0, 0.01, 3.3, 10.0, 48.0, 120.0, 300.0];
+                let mut prefix = String::new();
+                for c in label.chars() {
+                    prefix.push(c);
+                    let boundary = DeterministicText::run_width(&format!("{prefix}…"), style);
+                    widths.extend([boundary - 1e-6, boundary, boundary + 1e-6]);
+                }
+                for width in widths {
+                    assert_eq!(
+                        bounded_text(label, width, style),
+                        legacy_bounded_text(label, width, style),
+                        "label={label:?}, width={width}, style={style:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
 fn bounded_text(label: &str, width: f64, style: TextStyle) -> String {
     if width <= 0.0 {
         return String::new();
@@ -39,18 +108,24 @@ fn bounded_text(label: &str, width: f64, style: TextStyle) -> String {
     if DeterministicText::run_width(label, style) <= width {
         return label.into();
     }
+    // DeterministicText's advances are additive. Accumulate a single pass
+    // instead of allocating/measuring each growing prefix (quadratic work).
+    let ellipsis_width = DeterministicText::advance_for_char('…', style);
+    let mut advance = 0.0;
     let mut result = String::new();
     for c in label.chars() {
-        let candidate = format!("{result}{c}…");
-        if DeterministicText::run_width(&candidate, style) > width {
+        let next = advance + DeterministicText::advance_for_char(c, style);
+        if next + ellipsis_width > width {
             break;
         }
+        advance = next;
         result.push(c);
     }
-    if result.is_empty() && DeterministicText::run_width("…", style) > width {
+    if result.is_empty() && ellipsis_width > width {
         String::new()
     } else {
-        format!("{result}…")
+        result.push('…');
+        result
     }
 }
 
