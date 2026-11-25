@@ -26,7 +26,7 @@ class WpeMuslProducerCiTests(unittest.TestCase):
     def test_build_is_bounded_and_preserves_failure_status(self):
         for part in (
             "timeout-minutes: 360",
-            "timeout --signal=TERM --kill-after=120s 4h30m",
+            "timeout --signal=TERM --kill-after=120s 270m",
             "statuses=(",
             "PIPESTATUS[@]",
             "builder_rc=",
@@ -39,6 +39,13 @@ class WpeMuslProducerCiTests(unittest.TestCase):
             "if test \"$builder_rc\" -ne 0 || test \"$log_rc\" -ne 0",
         ):
             self.assertIn(part, self.workflow)
+
+    def test_timeout_interval_is_accepted_by_coreutils(self):
+        result = subprocess.run(
+            ["timeout", "--signal=TERM", "--kill-after=120s", "270m", "true"],
+            capture_output=True, text=True, timeout=5,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_real_arm64_host_executes_armv7_directly(self):
         job = self.workflow.split("  native-armv7-musl-wpe-candidate:", 1)[1]
