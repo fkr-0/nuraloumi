@@ -315,6 +315,27 @@ impl BrowserPress {
     }
 }
 
+/// A gesture that reached the scroll threshold invalidates its initial tap,
+/// but an overscroll at the list boundary must not repaint identical pixels.
+fn advance_browser_scroll(
+    drag: &mut BrowserScrollDrag,
+    press: &mut BrowserPress,
+    id: i32,
+    y: f64,
+    scroll_offset: &mut f64,
+    scene: &Scene,
+) -> bool {
+    let Some(next) = drag.motion(id, y, *scroll_offset, scene.scroll.max_offset) else {
+        return false;
+    };
+    press.touch_motion(id, None);
+    if next == *scroll_offset {
+        return false;
+    }
+    *scroll_offset = next;
+    true
+}
+
 // Browser chrome has a separate Wayland connection from the WPE page surface.
 // Link clicks can navigate WebKit without generating an event on our chrome
 // connection. Keep the idle refresh bounded, at less than one IPC wakeup per
@@ -503,12 +524,14 @@ fn run(
                 PlatformEvent::TouchMotion { id, x, y } => {
                     press.touch_motion(id, hit(&scene, &menu, x, y));
                     if let Some(active) = scene.as_ref() {
-                        if let Some(next) =
-                            drag.motion(id, y, scroll_offset, active.scroll.max_offset)
-                        {
-                            // A swipe may never turn into a same-row tap.
-                            press.touch_motion(id, None);
-                            scroll_offset = next;
+                        if advance_browser_scroll(
+                            &mut drag,
+                            &mut press,
+                            id,
+                            y,
+                            &mut scroll_offset,
+                            active,
+                        ) {
                             redraw = true;
                         }
                     }
@@ -692,6 +715,70 @@ mod tests {
         assert_eq!(press.touch_up(3), None);
         drag.end(3);
         assert_eq!(drag.motion(3, y - 40.0, 16.0, 300.0), None);
+    }
+
+    #[test]
+    fn boundary_overscroll_never_redraws_but_cancels_touch_activation() {
+        let ui = BrowserUi::fixture();
+        let menu = ui.menu();
+        let scene = browser_scene(
+            &menu,
+            &MenuState::new(&menu),
+            Viewport::new(720.0, 312.0, 1.0),
+            &nuraloumi_core::DARK_THEME,
+            0.0,
+        );
+        assert!(scene.scroll.max_offset > 0.0);
+        let y = scene.scroll.viewport.y + 20.0;
+        let action = tab_action(1);
+
+        let mut top_drag = BrowserScrollDrag::default();
+        let mut top_press = BrowserPress::default();
+        let mut top_offset = 0.0;
+        top_press.touch_down(7, Some(action.clone()));
+        top_drag.down(7, y, Some(&scene));
+        for step in 1..=64 {
+            let outside = y + f64::from(step * 2);
+            assert!(!advance_browser_scroll(
+                &mut top_drag,
+                &mut top_press,
+                7,
+                outside,
+                &mut top_offset,
+                &scene,
+            ));
+        }
+        assert_eq!(top_offset, 0.0);
+        assert_eq!(top_press.touch_up(7), None);
+        // Moving back into content changes pixels and must request one frame.
+        assert!(advance_browser_scroll(
+            &mut top_drag,
+            &mut top_press,
+            7,
+            y - 20.0,
+            &mut top_offset,
+            &scene,
+        ));
+        assert!(top_offset > 0.0);
+
+        let mut bottom_drag = BrowserScrollDrag::default();
+        let mut bottom_press = BrowserPress::default();
+        let mut bottom_offset = scene.scroll.max_offset;
+        bottom_press.touch_down(9, Some(action));
+        bottom_drag.down(9, y, Some(&scene));
+        for step in 1..=64 {
+            let outside = y - f64::from(step * 2);
+            assert!(!advance_browser_scroll(
+                &mut bottom_drag,
+                &mut bottom_press,
+                9,
+                outside,
+                &mut bottom_offset,
+                &scene,
+            ));
+        }
+        assert_eq!(bottom_offset, scene.scroll.max_offset);
+        assert_eq!(bottom_press.touch_up(9), None);
     }
 
     #[test]
