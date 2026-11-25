@@ -207,6 +207,10 @@ pub enum PlatformEvent {
         y: f64,
     },
     PointerLeave,
+    /// Vertical wl_pointer axis in Wayland logical surface units. Positive is down.
+    PointerAxis {
+        delta_y: f64,
+    },
     PointerButton {
         x: f64,
         y: f64,

@@ -11,12 +11,12 @@ use nuraloumi_shell::{
     dismiss_backdrop_enabled_for_renderer, dismiss_backdrop_margins, dispatch_keybinding,
     execute_window_command, launcher_search_input, load_config_or_default, load_fixture_snapshot,
     load_menu, parse_desktop_command, parse_family, parse_window_command,
-    record_user_application_activation, refresh_user_launcher_state, render_menu_follow_selection,
+    record_user_application_activation, refresh_user_launcher_state, render_menu_with_scroll,
     resolve_app_activation, successful_action_requests_dismiss, update_user_launcher_state,
     window_entries, ActionReport, AppActivation, ApplicationEntry as ShellApplicationEntry,
     BluetoothDeviceEntry, ControlCenterTab, DesktopCommand, DesktopControlCapabilities,
     DesktopEntry, FixtureSnapshot, HitRegion as ShellHitRegion, KeybindingRegistry,
-    MediaPlayerEntry as ShellMediaPlayerEntry, MenuAction, MenuFamily,
+    MediaPlayerEntry as ShellMediaPlayerEntry, MenuAction, MenuFamily, MenuScroll,
     NotificationHistoryEntry as ShellNotificationHistoryEntry, OverviewMode,
     PlatformEvent as ShellPlatformEvent, ProviderValue, SceneTransitionClock, SemanticInput,
     ShellConfig, ShellInput, ShellState, TaskEntry as ShellTaskEntry, ValueState, WifiNetworkEntry,
@@ -437,7 +437,8 @@ fn run_live(
     let surface = match backend.create_menu(WaylandMenuConfig {
         width: requested_width,
         height: requested_height,
-        margin_top: config.effective_panel_height() as i32,
+        // Sway already applies the panel exclusive zone to overlay placement.
+        margin_top: 0,
         margin_left: 0,
         output: output.as_ref().map(|output| output.id),
         namespace: "nuraloumi-menu".into(),
@@ -454,6 +455,7 @@ fn run_live(
     let renderer = CairoRenderer::default();
     let mut geometry: Option<(u32, u32, i32)> = None;
     let mut scene: Option<Scene> = None;
+    let mut scroll = MenuScroll::default();
     let mut touch_regions: BTreeMap<i32, Option<ShellHitRegion>> = BTreeMap::new();
     let mut initial_control_refresh_pending =
         policy.execute_provider_actions && shell.menu.id == "control-center";
@@ -527,6 +529,7 @@ fn run_live(
                             geometry,
                             motion.as_ref().map(|clock| clock.sample().transition),
                         ),
+                        scroll.offset(),
                     )?);
                 }
             }
@@ -582,6 +585,11 @@ fn run_live(
                     geometry = Some((width, height, scale));
                     redraw = true;
                 }
+                WaylandEvent::PointerAxis { delta_y } => {
+                    redraw = scene
+                        .as_ref()
+                        .is_some_and(|scene| scroll.wheel(scene.scroll, delta_y));
+                }
                 WaylandEvent::PointerButton { x, y, pressed, .. } => {
                     let input_enabled = motion
                         .as_ref()
@@ -610,6 +618,9 @@ fn run_live(
                     redraw = true;
                 }
                 WaylandEvent::TouchDown { id, x, y } => {
+                    if let Some(scene) = scene.as_ref() {
+                        scroll.touch_down(id, y, scene.scroll);
+                    }
                     let input_enabled = motion
                         .as_ref()
                         .is_none_or(|clock| !clock.blocks_hit_testing());
@@ -620,7 +631,11 @@ fn run_live(
                                 .and_then(|scene| shell_hit_region(scene, x, y))
                         })
                         .flatten();
-                    if blank_press_requests_dismiss(
+                    if !scene.as_ref().is_some_and(|scene| {
+                        scene.scroll.clipped
+                            && y >= scene.scroll.viewport.y
+                            && y < scene.scroll.viewport.bottom()
+                    }) && blank_press_requests_dismiss(
                         config.menu_dismissal,
                         input_enabled,
                         region.is_some(),
@@ -634,6 +649,9 @@ fn run_live(
                     redraw = true;
                 }
                 WaylandEvent::TouchMotion { id, x, y } => {
+                    if let Some(scene) = scene.as_ref() {
+                        redraw |= scroll.touch_motion(id, y, scene.scroll);
+                    }
                     let input_enabled = motion
                         .as_ref()
                         .is_none_or(|clock| !clock.blocks_hit_testing());
@@ -647,13 +665,20 @@ fn run_live(
                     touch_regions.insert(id, region);
                 }
                 WaylandEvent::TouchUp { id } => {
-                    let region = touch_regions.remove(&id).flatten();
+                    let dragged = scroll.touch_up(id);
+                    let region = if dragged {
+                        touch_regions.remove(&id);
+                        None
+                    } else {
+                        touch_regions.remove(&id).flatten()
+                    };
                     report =
                         shell.handle_platform_event(ShellPlatformEvent::TouchUp { id, region });
                     redraw = true;
                 }
                 WaylandEvent::TouchCancel { ids } => {
                     for id in ids {
+                        scroll.touch_up(id);
                         touch_regions.remove(&id);
                         let _ = shell.handle_platform_event(ShellPlatformEvent::TouchUp {
                             id,
@@ -676,6 +701,14 @@ fn run_live(
             }
 
             if let Some(report) = report {
+                if matches!(
+                    &report,
+                    ActionReport::NavigationChanged { .. }
+                        | ActionReport::SearchChanged { .. }
+                        | ActionReport::Dispatched { .. }
+                ) {
+                    scroll.reset();
+                }
                 let scene_changed = matches!(
                     &report,
                     ActionReport::Dispatched {
@@ -718,6 +751,7 @@ fn run_live(
                             geometry,
                             motion.as_ref().map(|clock| clock.sample().transition),
                         ),
+                        scroll.offset(),
                     )?);
                     if initial_control_refresh_pending {
                         initial_control_refresh_pending = false;
@@ -737,6 +771,7 @@ fn run_live(
                                 geometry,
                                 motion.as_ref().map(|clock| clock.sample().transition),
                             ),
+                            scroll.offset(),
                         )?);
                     }
                 }
@@ -753,6 +788,7 @@ fn run_live(
                 &shell,
                 &snapshot,
                 (geometry, Some(sample.transition)),
+                scroll.offset(),
             )?);
             if sample.complete {
                 motion = None;
@@ -783,6 +819,7 @@ fn run_live(
                             geometry,
                             motion.as_ref().map(|clock| clock.sample().transition),
                         ),
+                        scroll.offset(),
                     )?);
                 }
             }
@@ -798,6 +835,7 @@ fn render_and_present(
     shell: &ShellState,
     snapshot: &FixtureSnapshot,
     presentation: ((u32, u32, i32), Option<nuraloumi_core::Transition>),
+    manual_scroll: Option<f64>,
 ) -> Result<Scene, String> {
     let (geometry, transition) = presentation;
     let (logical_width, logical_height, scale) = geometry;
@@ -806,7 +844,7 @@ fn render_and_present(
         f64::from(logical_height),
         f64::from(scale.max(1)),
     );
-    let (scene, mut buffer) = render_menu_follow_selection(
+    let (scene, mut buffer) = render_menu_with_scroll(
         renderer,
         &shell.menu,
         &shell.state,
@@ -814,6 +852,7 @@ fn render_and_present(
         tokens,
         RenderOptions::default(),
         transition,
+        manual_scroll,
     )
     .map_err(|error| format!("Cairo render failed: {error}"))?;
     paint_window_thumbnail_overlays(&scene, &mut buffer, snapshot)?;

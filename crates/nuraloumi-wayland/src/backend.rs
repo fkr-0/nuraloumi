@@ -1691,6 +1691,14 @@ impl Dispatch<wl_pointer::WlPointer, ()> for BackendState {
                     },
                 });
             }
+            wl_pointer::Event::Axis { axis, value, .. } => {
+                if matches!(axis, WEnum::Value(wl_pointer::Axis::VerticalScroll)) {
+                    state.events.push_back(BackendEvent {
+                        surface: state.pointer_surface,
+                        event: PlatformEvent::PointerAxis { delta_y: value },
+                    });
+                }
+            }
             wl_pointer::Event::Leave { .. } => {
                 state.events.push_back(BackendEvent {
                     surface: state.pointer_surface,

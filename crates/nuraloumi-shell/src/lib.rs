@@ -300,6 +300,89 @@ pub fn selection_follow_scroll_offset(
     0.0
 }
 
+/// Manual viewport scrolling is presentation state, not keyboard selection.
+/// It is shared by the standalone menu and the panel-owned launcher, and never
+/// turns a swipe into a row activation.
+#[derive(Debug, Default)]
+pub struct MenuScroll {
+    offset: Option<f64>,
+    touches: BTreeMap<i32, TouchScrollGesture>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TouchScrollGesture {
+    start_y: f64,
+    last_y: f64,
+    dragging: bool,
+}
+
+impl MenuScroll {
+    pub fn offset(&self) -> Option<f64> {
+        self.offset
+    }
+
+    pub fn reset(&mut self) {
+        self.offset = None;
+    }
+
+    pub fn wheel(&mut self, window: nuraloumi_render_cairo::ScrollWindow, delta_y: f64) -> bool {
+        // Wayland wheel axes commonly arrive in 15-unit increments. Match one
+        // approximately 48px menu row per wheel notch, while retaining smooth
+        // fractional touchpad deltas.
+        self.scroll_by(window, delta_y * 3.0)
+    }
+
+    fn scroll_by(&mut self, window: nuraloumi_render_cairo::ScrollWindow, delta: f64) -> bool {
+        if !delta.is_finite() || window.max_offset <= 0.0 {
+            return false;
+        }
+        let original = self.offset.unwrap_or(window.offset);
+        let next = (original + delta).clamp(0.0, window.max_offset);
+        self.offset = Some(next);
+        (next - original).abs() > f64::EPSILON
+    }
+
+    pub fn touch_down(&mut self, id: i32, y: f64, window: nuraloumi_render_cairo::ScrollWindow) {
+        if y >= window.viewport.y && y < window.viewport.bottom() && window.max_offset > 0.0 {
+            self.touches.insert(
+                id,
+                TouchScrollGesture {
+                    start_y: y,
+                    last_y: y,
+                    dragging: false,
+                },
+            );
+        }
+    }
+
+    pub fn touch_motion(
+        &mut self,
+        id: i32,
+        y: f64,
+        window: nuraloumi_render_cairo::ScrollWindow,
+    ) -> bool {
+        let Some(gesture) = self.touches.get_mut(&id) else {
+            return false;
+        };
+        let delta = gesture.last_y - y;
+        gesture.last_y = y;
+        if !gesture.dragging {
+            if (gesture.start_y - y).abs() < 8.0 {
+                return false;
+            }
+            gesture.dragging = true;
+        }
+        self.scroll_by(window, delta)
+    }
+
+    /// True means the finger dragged; the caller must suppress touch-up click.
+    pub fn touch_up(&mut self, id: i32) -> bool {
+        self.touches
+            .remove(&id)
+            .is_some_and(|gesture| gesture.dragging)
+    }
+}
+
 /// Render a semantic menu while following its current selection through a
 /// clipped viewport. This is the common live-menu path for both the standalone
 /// menu and panel-owned launcher.
@@ -318,8 +401,39 @@ pub fn render_menu_follow_selection(
     ),
     String,
 > {
-    render_menu_with_glyphs(
+    render_menu_with_scroll(
         renderer, menu, state, viewport, tokens, options, transition, None,
+    )
+}
+
+/// Render a manually scrolled menu without snapping back to keyboard focus.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn render_menu_with_scroll(
+    renderer: &nuraloumi_render_cairo::CairoRenderer,
+    menu: &MenuModel,
+    state: &MenuState,
+    viewport: nuraloumi_render_cairo::Viewport,
+    tokens: &nuraloumi_core::ThemeTokens,
+    options: nuraloumi_render_cairo::RenderOptions,
+    transition: Option<nuraloumi_core::Transition>,
+    manual_offset: Option<f64>,
+) -> Result<
+    (
+        nuraloumi_render_cairo::Scene,
+        nuraloumi_render_cairo::RenderedBuffer,
+    ),
+    String,
+> {
+    render_menu_with_glyphs_and_scroll(
+        renderer,
+        menu,
+        state,
+        viewport,
+        tokens,
+        options,
+        transition,
+        None,
+        manual_offset,
     )
 }
 
@@ -333,6 +447,37 @@ pub fn render_menu_with_glyphs<'a>(
     options: nuraloumi_render_cairo::RenderOptions,
     transition: Option<nuraloumi_core::Transition>,
     glyph_resolver: Option<&'a dyn Fn(&str) -> Option<char>>,
+) -> Result<
+    (
+        nuraloumi_render_cairo::Scene,
+        nuraloumi_render_cairo::RenderedBuffer,
+    ),
+    String,
+> {
+    render_menu_with_glyphs_and_scroll(
+        renderer,
+        menu,
+        state,
+        viewport,
+        tokens,
+        options,
+        transition,
+        glyph_resolver,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn render_menu_with_glyphs_and_scroll<'a>(
+    renderer: &nuraloumi_render_cairo::CairoRenderer,
+    menu: &'a MenuModel,
+    state: &MenuState,
+    viewport: nuraloumi_render_cairo::Viewport,
+    tokens: &nuraloumi_core::ThemeTokens,
+    options: nuraloumi_render_cairo::RenderOptions,
+    transition: Option<nuraloumi_core::Transition>,
+    glyph_resolver: Option<&'a dyn Fn(&str) -> Option<char>>,
+    manual_offset: Option<f64>,
 ) -> Result<
     (
         nuraloumi_render_cairo::Scene,
@@ -382,9 +527,16 @@ pub fn render_menu_with_glyphs<'a>(
         adapter.with_glyph_resolver(move |id| table.resolve(id))
     };
     let interaction = nuraloumi_render_cairo::InteractionState {
-        selected_id: state.selected_id.clone(),
+        // Layout keeps the selected row visible. During manual scrolling that
+        // would undo every wheel/swipe movement on the next repaint.
+        selected_id: manual_offset
+            .is_none()
+            .then(|| state.selected_id.clone())
+            .flatten(),
         pressed_id: None,
-        scroll_offset: if searching_launcher {
+        scroll_offset: if let Some(offset) = manual_offset {
+            offset
+        } else if searching_launcher {
             0.0
         } else {
             selection_follow_scroll_offset(menu, state, viewport)
@@ -4541,6 +4693,68 @@ after_one_shot_action = true
         assert!(hit.rect.height >= 48.0);
         assert!(hit.rect.y >= scene.scroll.viewport.y);
         assert!(hit.rect.bottom() <= scene.scroll.viewport.bottom());
+    }
+
+    #[test]
+    fn manual_wheel_and_touch_scroll_are_clamped_and_swipes_do_not_click() {
+        let window = nuraloumi_render_cairo::ScrollWindow {
+            viewport: nuraloumi_render_cairo::Rect::new(0.0, 88.0, 448.0, 600.0),
+            content_height: 1500.0,
+            offset: 0.0,
+            max_offset: 900.0,
+            clipped: true,
+        };
+        let mut scroll = MenuScroll::default();
+        assert!(scroll.wheel(window, 15.0));
+        assert_eq!(scroll.offset(), Some(45.0));
+        scroll.touch_down(9, 200.0, window);
+        assert!(!scroll.touch_motion(9, 196.0, window));
+        assert!(scroll.touch_motion(9, 160.0, window));
+        assert_eq!(scroll.offset(), Some(81.0));
+        assert!(scroll.touch_up(9), "swipe release must suppress row click");
+        scroll.touch_down(10, 200.0, window);
+        assert!(
+            !scroll.touch_up(10),
+            "stationary tap must remain actionable"
+        );
+        assert!(scroll.wheel(window, 1_000.0));
+        assert_eq!(scroll.offset(), Some(900.0));
+        assert!(!scroll.wheel(window, 15.0));
+        scroll.reset();
+        assert_eq!(scroll.offset(), None);
+    }
+
+    #[test]
+    fn manual_scroll_does_not_snap_to_selected_last_app() {
+        let mut snapshot = FixtureSnapshot::default();
+        snapshot.applications = (0..20)
+            .map(|index| ApplicationEntry {
+                id: format!("app-{index:02}.desktop"),
+                label: format!("GUI App {index:02}"),
+                generic_name: None,
+                keywords: vec![],
+                launchable: true,
+                pinned: false,
+            })
+            .collect();
+        let menu = build_launcher_menu_for(&snapshot, OverviewMode::Apps);
+        let state = MenuState {
+            selected_id: Some("overview.app.app-19.desktop".into()),
+            ..MenuState::default()
+        };
+        let (scene, _) = render_menu_with_scroll(
+            &nuraloumi_render_cairo::CairoRenderer::default(),
+            &menu,
+            &state,
+            nuraloumi_render_cairo::Viewport::new(480.0, 320.0, 1.0),
+            &nuraloumi_core::DARK_THEME,
+            nuraloumi_render_cairo::RenderOptions::default(),
+            None,
+            Some(0.0),
+        )
+        .expect("render manually scrolled launcher");
+        assert!(scene.scroll.max_offset > 0.0);
+        assert_eq!(scene.scroll.offset, 0.0);
     }
 
     #[test]

@@ -19,12 +19,12 @@ use nuraloumi_shell::{
     dismiss_backdrop_enabled_for_renderer, dismiss_backdrop_margins, dispatch_keybinding,
     execute_window_command, launcher_search_input, load_config_or_default, load_fixture_snapshot,
     panel_affordances, parse_desktop_command, parse_family, parse_window_command,
-    record_user_application_activation, refresh_user_launcher_state, render_menu_follow_selection,
+    record_user_application_activation, refresh_user_launcher_state, render_menu_with_scroll,
     resolve_app_activation, successful_action_requests_dismiss, update_user_launcher_state,
     window_entries, ActionReport, AppActivation, ApplicationEntry as ShellApplicationEntry,
     BluetoothDeviceEntry, ControlCenterTab, DesktopCommand, DesktopControlCapabilities,
     DesktopEntry, FixtureSnapshot, HitRegion as ShellHitRegion, KeybindingRegistry,
-    MediaPlayerEntry as ShellMediaPlayerEntry, MenuAction, MenuFamily,
+    MediaPlayerEntry as ShellMediaPlayerEntry, MenuAction, MenuFamily, MenuScroll,
     NotificationHistoryEntry as ShellNotificationHistoryEntry, OverviewMode, PanelAffordance,
     PanelController, PanelEdge as ShellPanelEdge, PlatformEvent as ShellPlatformEvent,
     ProviderValue, SceneTransitionClock, ShellConfig, ShellState, TaskEntry as ShellTaskEntry,
@@ -56,6 +56,12 @@ const PANEL_MENU_GAP: u32 = 0;
 #[no_mangle]
 pub extern "C" fn round(value: f64) -> f64 {
     sl101_round_bits(value)
+}
+
+fn menu_overlay_margins(_panel_edge: ShellPanelEdge) -> (i32, i32) {
+    // The compositor applies the panel exclusive zone on all four edges.
+    // The overlay must not reserve the same region a second time.
+    (0, 0)
 }
 
 // Press feedback is transient: it never changes the selected menu tab or
@@ -269,6 +275,7 @@ struct LiveMenu {
     shell: ShellState,
     geometry: Option<(u32, u32, i32)>,
     scene: Option<Scene>,
+    scroll: MenuScroll,
     touch_regions: BTreeMap<i32, Option<ShellHitRegion>>,
     motion: Option<SceneTransitionClock>,
 }
@@ -697,6 +704,7 @@ fn apply_live_config_reload(
                     menu.surface,
                     renderer,
                     &menu.shell,
+                    menu.scroll.offset(),
                     snapshot,
                     config,
                     (geometry, None),
@@ -955,6 +963,7 @@ fn run_live(
                         menu.surface,
                         &renderer,
                         &menu.shell,
+                        menu.scroll.offset(),
                         &snapshot,
                         &config,
                         (
@@ -1328,6 +1337,12 @@ fn run_live(
                     menu.geometry = Some((width, height, scale));
                     redraw = true;
                 }
+                WaylandEvent::PointerAxis { delta_y } => {
+                    redraw = menu
+                        .scene
+                        .as_ref()
+                        .is_some_and(|scene| menu.scroll.wheel(scene.scroll, delta_y));
+                }
                 WaylandEvent::PointerButton { x, y, pressed, .. } => {
                     let input_enabled = menu
                         .motion
@@ -1359,6 +1374,9 @@ fn run_live(
                     }
                 }
                 WaylandEvent::TouchDown { id, x, y } => {
+                    if let Some(scene) = menu.scene.as_ref() {
+                        menu.scroll.touch_down(id, y, scene.scroll);
+                    }
                     let input_enabled = menu
                         .motion
                         .as_ref()
@@ -1370,7 +1388,11 @@ fn run_live(
                                 .and_then(|scene| shell_hit_region(scene, x, y))
                         })
                         .flatten();
-                    if blank_press_requests_dismiss(
+                    if !menu.scene.as_ref().is_some_and(|scene| {
+                        scene.scroll.clipped
+                            && y >= scene.scroll.viewport.y
+                            && y < scene.scroll.viewport.bottom()
+                    }) && blank_press_requests_dismiss(
                         config.menu_dismissal,
                         input_enabled,
                         region.is_some(),
@@ -1385,6 +1407,9 @@ fn run_live(
                     }
                 }
                 WaylandEvent::TouchMotion { id, x, y } => {
+                    if let Some(scene) = menu.scene.as_ref() {
+                        redraw |= menu.scroll.touch_motion(id, y, scene.scroll);
+                    }
                     let input_enabled = menu
                         .motion
                         .as_ref()
@@ -1399,7 +1424,12 @@ fn run_live(
                     menu.touch_regions.insert(id, region);
                 }
                 WaylandEvent::TouchUp { id } => {
-                    let region = menu.touch_regions.remove(&id).flatten();
+                    let region = if menu.scroll.touch_up(id) {
+                        menu.touch_regions.remove(&id);
+                        None
+                    } else {
+                        menu.touch_regions.remove(&id).flatten()
+                    };
                     report = menu
                         .shell
                         .handle_platform_event(ShellPlatformEvent::TouchUp { id, region });
@@ -1407,6 +1437,7 @@ fn run_live(
                 }
                 WaylandEvent::TouchCancel { ids } => {
                     for id in ids {
+                        menu.scroll.touch_up(id);
                         menu.touch_regions.remove(&id);
                         let _ = menu
                             .shell
@@ -1430,6 +1461,14 @@ fn run_live(
             }
 
             if let Some(action_report) = report {
+                if matches!(
+                    &action_report,
+                    ActionReport::NavigationChanged { .. }
+                        | ActionReport::SearchChanged { .. }
+                        | ActionReport::Dispatched { .. }
+                ) {
+                    menu.scroll.reset();
+                }
                 if matches!(
                     &action_report,
                     nuraloumi_shell::ActionReport::SearchChanged { .. }
@@ -1797,6 +1836,7 @@ fn run_live(
                         menu.surface,
                         &renderer,
                         &menu.shell,
+                        menu.scroll.offset(),
                         &snapshot,
                         &config,
                         (
@@ -1848,6 +1888,7 @@ fn run_live(
                         menu.surface,
                         &renderer,
                         &menu.shell,
+                        menu.scroll.offset(),
                         &snapshot,
                         &config,
                         (
@@ -1918,6 +1959,7 @@ fn run_live(
                             menu.surface,
                             &renderer,
                             &menu.shell,
+                            menu.scroll.offset(),
                             &snapshot,
                             &config,
                             (geometry, None),
@@ -1958,6 +2000,7 @@ fn run_live(
                                     menu.surface,
                                     &renderer,
                                     &menu.shell,
+                                    menu.scroll.offset(),
                                     &snapshot,
                                     &config,
                                     (geometry, None),
@@ -1999,6 +2042,7 @@ fn run_live(
                         menu.surface,
                         &renderer,
                         &menu.shell,
+                        menu.scroll.offset(),
                         &snapshot,
                         &config,
                         (geometry, None),
@@ -2026,6 +2070,7 @@ fn run_live(
                             menu.surface,
                             &renderer,
                             &menu.shell,
+                            menu.scroll.offset(),
                             &snapshot,
                             &config,
                             (
@@ -2047,6 +2092,7 @@ fn run_live(
                     menu.surface,
                     &renderer,
                     &menu.shell,
+                    menu.scroll.offset(),
                     &snapshot,
                     &config,
                     (menu_geometry, Some(sample.transition)),
@@ -2126,19 +2172,10 @@ fn open_live_menu(
         })
         .unwrap_or(640);
 
-    let panel_menu_offset = config
-        .effective_panel_height()
-        .saturating_add(PANEL_MENU_GAP);
-    let margin_top = if config.panel_edge == ShellPanelEdge::Top {
-        panel_menu_offset as i32
-    } else {
-        0
-    };
-    let margin_left = if config.panel_edge == ShellPanelEdge::Left {
-        panel_menu_offset as i32
-    } else {
-        0
-    };
+    // Sway has already removed the panel's exclusive zone from the menu's
+    // available layout area. Adding panel_height here reserves it twice:
+    // a visible 48px gap at the top and a menu clipped below the display.
+    let (margin_top, margin_left) = menu_overlay_margins(config.panel_edge);
     let dismiss_backdrop_enabled = dismiss_backdrop_enabled_for_renderer(
         config.menu_dismissal,
         env::var("WLR_RENDERER").ok().as_deref(),
@@ -2197,6 +2234,7 @@ fn open_live_menu(
         shell,
         geometry: None,
         scene: None,
+        scroll: MenuScroll::default(),
         touch_regions: BTreeMap::new(),
         motion: (!config.reduced_motion).then(|| SceneTransitionClock::new(false)),
     })
@@ -2320,6 +2358,7 @@ fn render_menu_and_present(
     surface: SurfaceId,
     renderer: &CairoRenderer,
     shell: &ShellState,
+    manual_scroll: Option<f64>,
     snapshot: &FixtureSnapshot,
     config: &ShellConfig,
     presentation: ((u32, u32, i32), Option<nuraloumi_core::Transition>),
@@ -2333,7 +2372,7 @@ fn render_menu_and_present(
     );
     let theme_tokens = config.active_theme_tokens();
     let presentation_menu = shell.renderer_presentation_menu();
-    let (scene, mut buffer) = render_menu_follow_selection(
+    let (scene, mut buffer) = render_menu_with_scroll(
         renderer,
         &presentation_menu,
         &shell.state,
@@ -2341,6 +2380,7 @@ fn render_menu_and_present(
         theme_tokens,
         RenderOptions::default(),
         transition,
+        manual_scroll,
     )
     .map_err(|error| format!("Cairo menu render failed: {error}"))?;
     paint_window_thumbnail_overlays(&scene, &mut buffer, snapshot)?;
@@ -4217,6 +4257,8 @@ mod tests {
     #[test]
     fn panel_target_mapping_is_stable_and_search_requests_focus() {
         assert_eq!(PANEL_MENU_GAP, 0, "menu must abut the panel exclusive zone");
+        assert_eq!(menu_overlay_margins(ShellPanelEdge::Top), (0, 0));
+        assert_eq!(menu_overlay_margins(ShellPanelEdge::Left), (0, 0));
         assert_eq!(panel_target_for_id("player"), panel_target_for_id("audio"));
         assert_eq!(
             panel_target_for_id("apps"),

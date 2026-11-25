@@ -22,6 +22,81 @@ pub struct LayoutMetrics {
     pub icon_gap: f64,
 }
 
+/// Five Control Center categories use simple Cairo strokes, not private-use
+/// Nerd Font characters. The tablet's minimal musl font set cannot guarantee
+/// those codepoints and otherwise paints missing-glyph rectangles.
+fn paint_control_category_icon(
+    item_id: &str,
+    bounds: Rect,
+    color: Color,
+    paint: &mut Vec<PaintNode>,
+) -> bool {
+    type Stroke = (f64, f64, f64, f64);
+    let category = item_id.strip_prefix("control.tab.").or_else(|| {
+        item_id
+            .strip_prefix("control.")
+            .and_then(|rest| rest.split_once('.').map(|(category, _)| category))
+    });
+    let segments: &[Stroke] = match category {
+        Some("media") => &[
+            (0.27, 0.18, 0.27, 0.82),
+            (0.27, 0.18, 0.78, 0.5),
+            (0.78, 0.5, 0.27, 0.82),
+        ],
+        Some("network") => &[
+            (0.12, 0.36, 0.31, 0.23),
+            (0.31, 0.23, 0.69, 0.23),
+            (0.69, 0.23, 0.88, 0.36),
+            (0.28, 0.55, 0.44, 0.45),
+            (0.44, 0.45, 0.56, 0.45),
+            (0.56, 0.45, 0.72, 0.55),
+            (0.48, 0.76, 0.52, 0.76),
+        ],
+        Some("display") => &[
+            (0.13, 0.18, 0.87, 0.18),
+            (0.87, 0.18, 0.87, 0.68),
+            (0.87, 0.68, 0.13, 0.68),
+            (0.13, 0.68, 0.13, 0.18),
+            (0.50, 0.68, 0.50, 0.87),
+            (0.32, 0.87, 0.68, 0.87),
+        ],
+        Some("system") => &[
+            (0.50, 0.08, 0.50, 0.29),
+            (0.50, 0.71, 0.50, 0.92),
+            (0.08, 0.50, 0.29, 0.50),
+            (0.71, 0.50, 0.92, 0.50),
+            (0.22, 0.22, 0.36, 0.36),
+            (0.64, 0.64, 0.78, 0.78),
+            (0.78, 0.22, 0.64, 0.36),
+            (0.36, 0.64, 0.22, 0.78),
+            (0.36, 0.36, 0.64, 0.36),
+            (0.64, 0.36, 0.64, 0.64),
+            (0.64, 0.64, 0.36, 0.64),
+            (0.36, 0.64, 0.36, 0.36),
+        ],
+        Some("notifications") => &[
+            (0.32, 0.31, 0.50, 0.17),
+            (0.50, 0.17, 0.68, 0.31),
+            (0.32, 0.31, 0.32, 0.67),
+            (0.68, 0.31, 0.68, 0.67),
+            (0.32, 0.67, 0.22, 0.75),
+            (0.22, 0.75, 0.78, 0.75),
+            (0.78, 0.75, 0.68, 0.67),
+            (0.44, 0.84, 0.56, 0.84),
+        ],
+        _ => return false,
+    };
+    for &(x0, y0, x1, y1) in segments {
+        paint.push(PaintNode::Line {
+            from: Point::new(bounds.x + x0 * bounds.width, bounds.y + y0 * bounds.height),
+            to: Point::new(bounds.x + x1 * bounds.width, bounds.y + y1 * bounds.height),
+            width: 1.8,
+            color,
+        });
+    }
+    true
+}
+
 impl Default for LayoutMetrics {
     fn default() -> Self {
         Self::from_core_metrics(&nuraloumi_core::UI_METRICS)
@@ -531,26 +606,28 @@ pub fn layout_menu_scaled<M: MenuSource, T: TextMeasurer>(
                             1.0,
                         )),
                     });
-                    if let Some(glyph) = item.glyph {
-                        paint.push(PaintNode::Text {
-                            origin: Point::new(
-                                glyph_box.x + 3.0,
-                                centered_baseline(
-                                    glyph_box,
-                                    text,
-                                    TextStyle {
-                                        size: 13.0 * scale,
-                                        bold: true,
-                                    },
+                    if !paint_control_category_icon(&item.id, glyph_box, theme.accent, &mut paint) {
+                        if let Some(glyph) = item.glyph {
+                            paint.push(PaintNode::Text {
+                                origin: Point::new(
+                                    glyph_box.x + 3.0,
+                                    centered_baseline(
+                                        glyph_box,
+                                        text,
+                                        TextStyle {
+                                            size: 13.0 * scale,
+                                            bold: true,
+                                        },
+                                    ),
                                 ),
-                            ),
-                            text: glyph.to_string(),
-                            style: TextStyle {
-                                size: 13.0 * scale,
-                                bold: true,
-                            },
-                            color: theme.accent,
-                        });
+                                text: glyph.to_string(),
+                                style: TextStyle {
+                                    size: 13.0 * scale,
+                                    bold: true,
+                                },
+                                color: theme.accent,
+                            });
+                        }
                     }
                 }
 
@@ -716,6 +793,46 @@ pub fn layout_menu_scaled<M: MenuSource, T: TextMeasurer>(
 mod launcher_tab_tests {
     use super::*;
     use crate::{MenuItemView, MenuView, ToyText};
+
+    #[test]
+    fn control_center_categories_draw_icons_without_private_font_glyphs() {
+        let mut menu = MenuView {
+            id: "control-center".into(),
+            title: "Control Center".into(),
+            items: Vec::new(),
+        };
+        for category in ["media", "network", "display", "system", "notifications"] {
+            let id = format!("control.tab.{category}");
+            let mut strokes = Vec::new();
+            assert!(paint_control_category_icon(
+                &id,
+                Rect::new(0.0, 0.0, 18.0, 18.0),
+                Theme::dark().accent,
+                &mut strokes,
+            ));
+            assert!(
+                strokes.len() >= 3
+                    && strokes
+                        .iter()
+                        .all(|node| matches!(node, PaintNode::Line { .. }))
+            );
+            let mut entry = MenuItemView::action(id, category);
+            entry.glyph = Some('󰒓'); // Not present on the tablet's stock font.
+            menu.items.push(entry);
+        }
+        let scene = layout_menu(
+            &menu,
+            &InteractionState::default(),
+            Viewport::new(448.0, 400.0, 1.0),
+            &Theme::dark(),
+            &ToyText,
+            false,
+        );
+        assert!(scene.paint.iter().all(|node| !matches!(
+            node,
+            PaintNode::Text { text, .. } if text.contains('󰒓')
+        )));
+    }
 
     fn launcher_fixture() -> MenuView {
         let mut items = Vec::new();
