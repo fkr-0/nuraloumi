@@ -40,6 +40,15 @@ class WpeMuslProducerCiTests(unittest.TestCase):
         ):
             self.assertIn(part, self.workflow)
 
+    def test_real_arm64_host_executes_armv7_directly(self):
+        job = self.workflow.split("  native-armv7-musl-wpe-candidate:", 1)[1]
+        self.assertIn("runs-on: ubuntu-24.04-arm", job)
+        self.assertIn("bash scripts/ci-probe-armv7-native-compat.sh", job)
+        self.assertIn("docker run --rm --cidfile", job)
+        self.assertIn("--platform linux/arm/v7", job)
+        self.assertNotIn("setup-qemu-action", job)
+        self.assertNotIn("qemu-arm-static", job)
+
     def test_build_shell_syntax_parses_without_docker(self):
         part = self.workflow.split(
             "      - name: Build native Alpine 3.22 ARMv7 candidate", 1

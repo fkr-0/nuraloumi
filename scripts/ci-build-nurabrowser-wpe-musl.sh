@@ -1,5 +1,5 @@
 #!/bin/sh
-# Alpine 3.22 ARMv7/QEMU *candidate* builder. Not a qualified runtime producer.
+# Alpine 3.22 native ARMv7 *candidate* builder. Not a qualified runtime producer.
 # Called inside an isolated linux/arm/v7 container with /work read-only, /out writable.
 set -eu
 
@@ -16,7 +16,7 @@ test ! -e /out/stage
 case "${CI_WPE_RESUME:-0}" in 0|1) ;; *) echo 'invalid resume mode' >&2; exit 2 ;; esac
 
 # Build on the target libc/ISA rather than mixing glibc and musl development
-# sysroots. This may take several hours under QEMU. Dependencies are explicit.
+# sysroots. Dependencies are explicit; hosted Arm64 must pass native AArch32 preflight.
 apk add --no-cache \
   build-base binutils cmake ninja pkgconf python3 perl ruby bison flex gperf \
   git curl tar xz meson linux-headers \
