@@ -40,6 +40,14 @@ cc -std=gnu11 -Wall -Wextra -Werror $sanitizer_flags \
   $(pkg-config --libs gstreamer-1.0) \
   -o "$scratch/test-media-bus"
 "$scratch/test-media-bus"
+# The named video decoder must remain addressable after gst_parse_launch
+# constructs the multi-chain demux pipeline; no device or VDE is needed.
+cc -std=gnu11 -Wall -Wextra -Werror $sanitizer_flags \
+  $(pkg-config --cflags gstreamer-1.0) \
+  "$root/tests/test-gst-pipeline-topology.c" \
+  $(pkg-config --libs gstreamer-1.0) \
+  -o "$scratch/test-gst-pipeline-topology"
+"$scratch/test-gst-pipeline-topology" | grep -Fq 'decoder_found=1'
 # Both are in the renderer source, not in the test harness: the exact
 # decoder name must remain stable across tracks in one long-lived playerd.
 grep -Fq 'v4l2slh264dec name=video_decoder capture-stride-align=64' \

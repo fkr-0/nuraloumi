@@ -41,6 +41,14 @@ docker run --rm --platform linux/amd64 --network none \
       $(pkg-config --libs gstreamer-app-1.0 gstreamer-video-1.0 gstreamer-allocators-1.0 gstreamer-pbutils-1.0 egl glesv2 gbm wayland-client) \
       -o /out/lib/libnuraloumi-video.so
   '
+# A stale private renderer once passed the source checks while the shipped
+# ELF omitted the decoder name required by verify_plugin(). Validate the
+# actual generated ARM artifact before any release staging is allowed.
+if ! strings "$out/lib/libnuraloumi-video.so" |
+    grep -Fq 'v4l2slh264dec name=video_decoder capture-stride-align=64'; then
+  echo 'NURAL_VIDEO_CROSS_BUILD=BLOCKED decoder-name-missing-in-ARM-ELF' >&2
+  exit 82
+fi
 cp -a "$mesa"/. "$out/lib/"
 cp "$gst" "$out/gst/libgstv4l2codecs.so"
 readelf -h "$out/lib/libnuraloumi-video.so" | grep -E 'Machine:|Class:'
