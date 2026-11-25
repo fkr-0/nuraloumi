@@ -11,6 +11,7 @@ use std::{
     os::unix::{ffi::OsStrExt, fs::OpenOptionsExt},
     path::{Path, PathBuf},
     ptr,
+    sync::atomic::{AtomicU64, Ordering},
 };
 use video_engine::{VideoEngine, VideoPoll};
 
@@ -18,6 +19,7 @@ const MAX_TRACKS: usize = 256;
 const MAX_PATH_BYTES: usize = 4096;
 const MAX_M3U_BYTES: u64 = 256 * 1024;
 const MAX_STATE_BYTES: u64 = 256 * 1024;
+static PLAYER_TMP_NONCE: AtomicU64 = AtomicU64::new(0);
 const GST_FORMAT_TIME: c_int = 3;
 const GST_STATE_NULL: c_int = 1;
 const GST_STATE_PAUSED: c_int = 3;
@@ -344,6 +346,16 @@ pub fn load_playlist(path: &Path) -> Result<Playlist, String> {
     state.validate()?;
     Ok(state)
 }
+fn playlist_temp_path(parent: &Path, timestamp_ns: u128) -> PathBuf {
+    // Two concurrent saves can observe the same clock tick. Their temp paths
+    // must still differ, even when their destination files share a directory.
+    let nonce = PLAYER_TMP_NONCE.fetch_add(1, Ordering::Relaxed);
+    parent.join(format!(
+        ".player-{}-{timestamp_ns}-{nonce}.tmp",
+        std::process::id()
+    ))
+}
+
 pub fn save_playlist(path: &Path, state: &Playlist) -> Result<(), String> {
     state.validate()?;
     let encoded = serde_json::to_vec_pretty(state).map_err(|e| e.to_string())?;
@@ -352,14 +364,11 @@ pub fn save_playlist(path: &Path, state: &Playlist) -> Result<(), String> {
     }
     let parent = path.parent().ok_or("playlist path has no parent")?;
     fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    let tmp = parent.join(format!(
-        ".player-{}-{}.tmp",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|e| e.to_string())?
-            .as_nanos()
-    ));
+    let timestamp_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_nanos();
+    let tmp = playlist_temp_path(parent, timestamp_ns);
     let result = (|| {
         let mut f = OpenOptions::new()
             .write(true)
@@ -1210,6 +1219,25 @@ mod tests {
         .unwrap();
         assert!(load_playlist(&pth).is_err());
         let _ = fs::remove_file(pth);
+    }
+    #[test]
+    fn player_temp_paths_are_unique_with_identical_timestamps_across_threads() {
+        let paths = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        (0..128)
+                            .map(|_| playlist_temp_path(Path::new("/tmp"), 42))
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .flat_map(|handle| handle.join().unwrap())
+                .collect::<std::collections::HashSet<_>>()
+        });
+        assert_eq!(paths.len(), 8 * 128);
     }
     #[test]
     fn mutators_reject_invalid_indices_and_volume() {
