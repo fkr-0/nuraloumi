@@ -17,7 +17,8 @@ class CryptoBuildContract(unittest.TestCase):
                      "libgcrypt-1.10.3.tar.bz2", "gcc14-armv7.patch",
                      "auxv.patch", "CVE-2026-88822.patch",
                      "CVE-2026-88823.patch", "CVE-2026-95691.patch",
-                     "CVE-2026-95692.patch", "CVE-2026-107496.patch"):
+                     "CVE-2026-95692.patch", "CVE-2026-107496.patch",
+                     "CVE-2026-107493.patch", "CVE-2026-124709.patch"):
             with self.subTest(name=name):
                 self.assertIn("check_source " + name + " ", self.text)
 
@@ -36,6 +37,12 @@ class CryptoBuildContract(unittest.TestCase):
         self.assertNotIn("runtime.json", self.text)
         self.assertNotIn("ssh ", self.text)
         self.assertNotIn("sudo ", self.text)
+
+    def test_source_manifest_and_toolchain_are_recorded(self):
+        self.assertIn('"$out/SOURCE-MANIFEST.json"', self.text)
+        self.assertIn('"$out/BUILD-TOOLCHAIN.txt"', self.text)
+        self.assertIn("openssl_alpine_release=3.5.9-r2", self.text)
+        self.assertIn("source_manifest_sha256=", self.text)
 
     def test_crypto_abi_pairs_remain_together(self):
         for soname in ("libnettle.so.8", "libhogweed.so.6",

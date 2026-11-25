@@ -23,8 +23,8 @@ done
 test -r /usr/include/gmp.h
 test -r /usr/include/gpg-error.h
 
-# Exact Alpine 3.22 stable package source pins. OpenSSL includes the 3.5.9-r1
-# security patchset; do not fall back to an unpatched r0 library for release.
+# Exact Alpine 3.22 stable package source pins. OpenSSL includes the 3.5.9-r2
+# security patchset; do not fall back to the older r0/r1 libraries for release.
 check_source() {
   printf '%s  %s\n' "$2" "$inputs/$1" | sha512sum -c -
 }
@@ -38,8 +38,21 @@ check_source CVE-2026-88823.patch ca38eeb1aa261d1051100b0e37a9699ccad73de551825b
 check_source CVE-2026-95691.patch 2c9c869d0427b08c1480307583c1803971fb6223e5876dd20f61fd64102f095373fb32f5cc7bbbd2bf62aca82c229d740a95c39d5556ec72fd41f371e4a311b6
 check_source CVE-2026-95692.patch f23fa46c18fca5e475286f4a5fe57834ccca8603a34f54ab0032af16d296f82eee6a9614f70aec4632fc9024f6af9ded9f2698693f02b3ade889c9d58d2cbe59
 check_source CVE-2026-107496.patch 0bbd1f64e7bc62c8bbba9c85131a51cbfb6f7715156457d575df1e557d649340b8074195860f83be18fe3ed6852111f10053702d72658012f9c3a4c3fd504cea
+check_source CVE-2026-107493.patch 5d1e0eda23be8661b3e75771f835ea7359dbbcb6ca2341c863577a256668758d90f03b11c50f50c8d3c9c4f282c12f825474d2b4d8c0444f47fcc5f630d1a3e2
+check_source CVE-2026-124709.patch cbbf250b02a6799d47a9ffff81b2e3ed8524f298748bf8619893b3f963aa42ceb7a39e787574d0d39dc974037caf7bf2d1c50930251bcb324ec7094fc07e67ee
+test -f "$inputs/SOURCE-MANIFEST.json"
+grep -F '"openssl_alpine_release": "3.5.9-r2"' "$inputs/SOURCE-MANIFEST.json" >/dev/null
+grep -F '"alpine_aports_revision": "c1a97dc220098b43d75d03ed5776a948908abfaf"' \
+  "$inputs/SOURCE-MANIFEST.json" >/dev/null
 
 mkdir -p "$out/work" "$out/logs" "$out/replacements"
+cp "$inputs/SOURCE-MANIFEST.json" "$out/SOURCE-MANIFEST.json"
+(
+  printf 'target=%s\n' "$(cc -dumpmachine)"
+  printf 'alpine_release=%s\n' "$(cat /etc/alpine-release)"
+  cc --version | head -n 1
+  apk info -v
+) > "$out/BUILD-TOOLCHAIN.txt"
 tar -xzf "$inputs/nettle-3.10.2.tar.gz" -C "$out/work"
 tar -xjf "$inputs/libgcrypt-1.10.3.tar.bz2" -C "$out/work"
 tar -xzf "$inputs/openssl-3.5.9.tar.gz" -C "$out/work"
@@ -75,7 +88,8 @@ export LDFLAGS='-Wl,-z,relro,-z,now'
 (
   cd "$out/work/openssl-3.5.9"
   for name in auxv.patch CVE-2026-88822.patch CVE-2026-88823.patch \
-      CVE-2026-95691.patch CVE-2026-95692.patch CVE-2026-107496.patch; do
+      CVE-2026-95691.patch CVE-2026-95692.patch CVE-2026-107496.patch \
+      CVE-2026-107493.patch CVE-2026-124709.patch; do
     patch -p1 -i "$inputs/$name" >> "$out/logs/openssl-patches.log"
   done
   perl ./Configure linux-armv4 --prefix=/usr --libdir=lib \
@@ -110,6 +124,7 @@ for object in "$out/replacements/"*.so.*; do
 done
 (cd "$out/replacements" && find . -type f -exec sha256sum '{}' + | sort) \
   > "$out/REPLACEMENTS-SHA256SUMS.txt"
-printf 'qualification=UNQUALIFIED\nnormal_deployment=FORBIDDEN\n' \
-  > "$out/CANDIDATE-ONLY.txt"
+manifest_sha=$(sha256sum "$out/SOURCE-MANIFEST.json" | cut -d' ' -f1)
+printf 'qualification=UNQUALIFIED\nnormal_deployment=FORBIDDEN\nopenssl_alpine_release=3.5.9-r2\nsource_manifest_sha256=%s\n' \
+  "$manifest_sha" > "$out/CANDIDATE-ONLY.txt"
 echo 'D16_CRYPTO_REPLACEMENTS=BUILT release_qualification=UNQUALIFIED'
