@@ -68,7 +68,7 @@ pub struct BookmarksStatus {
     pub offset: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrowserUi {
     pub page: PageStatus,
     pub tabs: TabsStatus,

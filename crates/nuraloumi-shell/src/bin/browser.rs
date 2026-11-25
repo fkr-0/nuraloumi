@@ -330,6 +330,16 @@ fn browser_refresh_interval_ms(loading: bool) -> i32 {
     }
 }
 
+/// Reconcile the model without scheduling a Cairo frame for identical
+/// snapshots. The small bounded clone is cheaper than repainting the surface.
+fn refresh_chrome_if_changed(ui: &mut BrowserUi, rpc: &mut impl BrowserRpc) -> bool {
+    let previous = ui.clone();
+    if let Err(message) = ui.refresh(rpc) {
+        ui.status = message;
+    }
+    *ui != previous
+}
+
 /// Wait for a chrome Wayland event or a bounded status refresh. No busy loop:
 /// poll sleeps until either a Wayland event or the next lightweight IPC poll.
 fn dispatch_until_event(backend: &mut WaylandBackend, loading: bool) -> Result<bool, String> {
@@ -417,12 +427,7 @@ fn run(
     let mut scroll_offset = 0.0;
     loop {
         let tick = dispatch_until_event(&mut backend, ui.page.is_loading)?;
-        let mut redraw = tick;
-        if tick {
-            if let Err(message) = ui.refresh(&mut rpc) {
-                ui.status = message;
-            }
-        }
+        let mut redraw = tick && refresh_chrome_if_changed(&mut ui, &mut rpc);
         for event in backend.drain_events().collect::<Vec<_>>() {
             if event.surface.is_some() && event.surface != Some(surface) {
                 continue;
@@ -697,6 +702,59 @@ mod tests {
         assert_eq!(browser_refresh_interval_ms(true), 350);
         assert_eq!(browser_refresh_interval_ms(false), 1_500);
         assert!(browser_refresh_interval_ms(false) < 2_000);
+    }
+
+    #[test]
+    fn unchanged_idle_webkit_snapshots_do_not_trigger_cairo_repaints() {
+        let fixture = BrowserUi::fixture();
+        let mut rpc = FixtureRpc::from_ui(&fixture);
+        let mut ui = BrowserUi::default();
+
+        assert!(refresh_chrome_if_changed(&mut ui, &mut rpc));
+        for _ in 0..64 {
+            assert!(!refresh_chrome_if_changed(&mut ui, &mut rpc));
+        }
+        rpc.request("open", Some("https://example.org/changed"))
+            .unwrap();
+        assert!(refresh_chrome_if_changed(&mut ui, &mut rpc));
+        assert_eq!(ui.address, "https://example.org/changed");
+        assert!(!refresh_chrome_if_changed(&mut ui, &mut rpc));
+
+        rpc.request("tab-new", None).unwrap();
+        assert!(refresh_chrome_if_changed(&mut ui, &mut rpc));
+        assert_eq!(ui.tabs.active, 2);
+        assert!(!refresh_chrome_if_changed(&mut ui, &mut rpc));
+    }
+
+    #[test]
+    fn idle_status_poll_does_not_cancel_held_touch_without_a_model_change() {
+        let fixture = BrowserUi::fixture();
+        let mut rpc = FixtureRpc::from_ui(&fixture);
+        let mut ui = BrowserUi::default();
+        assert!(refresh_chrome_if_changed(&mut ui, &mut rpc));
+
+        let action = tab_action(1);
+        let mut press = BrowserPress::default();
+        press.touch_down(7, Some(action.clone()));
+        if refresh_chrome_if_changed(&mut ui, &mut rpc) {
+            press.reset(); // exactly the live redraw branch
+        }
+        assert_eq!(press.touch_up(7), Some(action));
+    }
+
+    #[test]
+    fn repeated_transport_error_does_not_repaint_until_status_changes() {
+        struct OfflineRpc;
+        impl BrowserRpc for OfflineRpc {
+            fn request(&mut self, _: &str, _: Option<&str>) -> Result<Value, String> {
+                Err("WPE transport unavailable".into())
+            }
+        }
+        let mut ui = BrowserUi::default();
+        let mut rpc = OfflineRpc;
+        assert!(refresh_chrome_if_changed(&mut ui, &mut rpc));
+        assert_eq!(ui.status, "WPE transport unavailable");
+        assert!(!refresh_chrome_if_changed(&mut ui, &mut rpc));
     }
 
     #[test]

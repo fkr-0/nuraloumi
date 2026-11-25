@@ -13,15 +13,16 @@ address bar and Back/Forward state stale until an unrelated chrome interaction.
 
 The event loop now waits with `poll()` in both states: 350 ms while loading and
 1,500 ms when idle. A timeout invokes the existing bounded `BrowserUi::refresh`
-RPC, then redraws. At idle this adds at most roughly 0.67 refresh requests per
-second, while preserving immediate Wayland input dispatch. The interval is
-defined and regression-checked explicitly.
+RPC, then redraws only when the browser model changes. At idle this adds at
+most roughly 0.67 refresh requests per second, while preserving immediate
+Wayland input dispatch. The interval and redraw decision are regression-checked
+explicitly.
 
 ## Executed host checks
 
 | Check | Result |
 | --- | --- |
-| `cargo test -p nuraloumi-shell --bin nuraloumi-browser` | PASS, 5/5 |
+| `cargo test -p nuraloumi-shell --bin nuraloumi-browser` | PASS, 8/8 (after repaint tests) |
 | `cargo test -p nuraloumi-shell --test browser_scene_layout` | PASS, 5/5 |
 | `cargo run -q -p nuraloumi-shell --bin nuraloumi-browser -- --fixture --headless` | PASS, two tabs/two bookmarks |
 | `cargo clippy -p nuraloumi-shell --bin nuraloumi-browser -- -D warnings` | PASS |
@@ -43,6 +44,29 @@ Additional executed checks after adding this regression:
 - `cargo test -p nuraloumi-shell --test browser_supervisor_lifecycle`: **PASS, 6/6**.
 - `cargo clippy -p nuraloumi-shell --lib --bin nuraloumi-browser -- -D warnings`: **PASS**.
 - `rustfmt --check crates/nuraloumi-shell/src/browser/mod.rs`: **PASS**.
+
+## Idle Cairo repaint suppression
+
+The 1,500 ms idle poll (350 ms during loading) is still needed to notice a
+WebKit navigation that does not generate an event on the chrome's Wayland
+connection. Previously every timeout scheduled a full Cairo redraw, even when
+the RPC snapshot was identical. The loop now compares the bounded `BrowserUi`
+state before and after refresh and redraws only on a model transition; Wayland
+input and other explicit damage still request redraw independently. The
+comparison includes the active URI, tab/history state, address draft,
+bookmarks, loading indicators and transport status.
+
+The browser binary tests exercise 64 consecutive identical RPC snapshots with
+no scheduled redraw; a changed URL and a new tab each require one, while
+subsequent unchanged snapshots do not. Repeated identical transport failures
+cause one initial status redraw, not a repaint loop. An unchanged idle poll
+also preserves an in-progress touch press until release.
+
+For an otherwise static UI this suppresses approximately **40 unnecessary
+Cairo repaint requests per minute** by event-loop contract. It does **not**
+eliminate the 0.67 Hz RPC polling, prove an ARMv7 CPU/RSS win, measure WayVNC
+pixels or certify native WPE behavior. No target installation or runtime
+mutation was performed for this change.
 
 ## Qualification boundary
 
