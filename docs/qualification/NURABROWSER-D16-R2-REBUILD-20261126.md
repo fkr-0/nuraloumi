@@ -50,6 +50,12 @@ compilation used the proper ARMv7/musl target. The committed build script now
 passes the GCC target as both `--build` and `--host` for libgcrypt. **A new
 canonical build with this correction is required**; do not promote the
 first-run output from a diagnostically mismatched configuration.
+The independent, corrected canonical run has since rebuilt and staged
+Nettle/Hogweed and reached libgcrypt configure with both Build and Host
+reported as `armv7-alpine-linux-musleabihf`, `cross compiling... no`, and
+`GPG Error >= 1.27... yes (1.55)` **without the prior mismatch warning**.
+At this writing, it is still compiling; neither container has produced a
+qualified final overlay.
 
 Static decoded-ISA diagnostic: three linked first-run crypto libraries
 (`libnettle.so.8`, `libhogweed.so.6`, `libgcrypt.so.20`) were copied into an
