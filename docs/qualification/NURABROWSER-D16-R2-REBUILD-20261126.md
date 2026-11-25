@@ -29,7 +29,9 @@ merely to make compilation pass.
 - The source fetcher validated **12/12** vendor SHA-512 pins (OpenSSL 3.5.9,
   Nettle 3.10.2, libgcrypt 1.10.3 and nine Alpine patch inputs). It refuses
   preexisting destinations, oversized or hash-mismatched downloads.
-- Source/builder consistency and synthetic failure tests: **10/10 pass**.
+- Source/builder consistency and synthetic failure tests: **12/12 pass**.
+- Independent host-side application of the eight Alpine OpenSSL patches to a
+  fresh OpenSSL 3.5.9 source tree: **8/8 pass** with no fuzz, offsets or rejects.
 
 Independent build environment: Linux ARMv7/musl Alpine 3.22 Docker image
 `sha256:cd4d0a952d38d42d376bcbf178818ed567b4640f60e6049b8dcffbc406ae433f`
@@ -37,6 +39,17 @@ with GCC 14.2, GMP and libgpg-error headers; this is ARMv7 userspace under
 emulation on an x86_64 host, not an ARMv7-native GitHub runner. Host-side
 `BUILD-TOOLCHAIN.txt` SHA256 at build start:
 `363586a17dcddeab66a090cc3d84df839622541bf9ddf2c12fabc5774ea973f9`.
+
+Observed first offline build (diagnostic, not a release): Nettle and Hogweed
+linked and installed correctly with `Tag_FP_arch: VFPv3-D16` and
+`Tag_ABI_VFP_args: VFP registers`, without a NEON ELF attribute. The older
+libgcrypt `config.guess` in this first run reported
+`armv7l-unknown-linux-gnueabihf` and warned that Alpine's musl
+`libgpg-error` was built for a different triplet, even though the actual GCC
+compilation used the proper ARMv7/musl target. The committed build script now
+passes the GCC target as both `--build` and `--host` for libgcrypt. **A new
+canonical build with this correction is required**; do not promote the
+first-run output from a diagnostically mismatched configuration.
 
 ## Reproducible commands (no tablet access)
 
