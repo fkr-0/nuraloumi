@@ -314,6 +314,7 @@ struct TouchScrollGesture {
     start_y: f64,
     last_y: f64,
     dragging: bool,
+    cancelled: bool,
 }
 
 impl MenuScroll {
@@ -323,6 +324,7 @@ impl MenuScroll {
 
     pub fn reset(&mut self) {
         self.offset = None;
+        self.touches.clear();
     }
 
     pub fn wheel(&mut self, window: nuraloumi_render_cairo::ScrollWindow, delta_y: f64) -> bool {
@@ -344,12 +346,19 @@ impl MenuScroll {
 
     pub fn touch_down(&mut self, id: i32, y: f64, window: nuraloumi_render_cairo::ScrollWindow) {
         if y >= window.viewport.y && y < window.viewport.bottom() && window.max_offset > 0.0 {
+            let multi_touch = !self.touches.is_empty();
+            if multi_touch {
+                for gesture in self.touches.values_mut() {
+                    gesture.cancelled = true;
+                }
+            }
             self.touches.insert(
                 id,
                 TouchScrollGesture {
                     start_y: y,
                     last_y: y,
                     dragging: false,
+                    cancelled: multi_touch,
                 },
             );
         }
@@ -364,6 +373,9 @@ impl MenuScroll {
         let Some(gesture) = self.touches.get_mut(&id) else {
             return false;
         };
+        if gesture.cancelled {
+            return false;
+        }
         let delta = gesture.last_y - y;
         gesture.last_y = y;
         if !gesture.dragging {
@@ -379,7 +391,7 @@ impl MenuScroll {
     pub fn touch_up(&mut self, id: i32) -> bool {
         self.touches
             .remove(&id)
-            .is_some_and(|gesture| gesture.dragging)
+            .is_some_and(|gesture| gesture.dragging || gesture.cancelled)
     }
 }
 
@@ -4722,6 +4734,69 @@ after_one_shot_action = true
         assert!(!scroll.wheel(window, 15.0));
         scroll.reset();
         assert_eq!(scroll.offset(), None);
+    }
+
+    #[test]
+    fn wheel_fractional_reverse_empty_and_provider_scroll_bounds() {
+        let mut window = nuraloumi_render_cairo::ScrollWindow {
+            viewport: nuraloumi_render_cairo::Rect::new(0.0, 80.0, 400.0, 200.0),
+            content_height: 700.0,
+            offset: 0.0,
+            max_offset: 500.0,
+            clipped: true,
+        };
+        let mut scroll = MenuScroll::default();
+        for _ in 0..10 {
+            assert!(scroll.wheel(window, 0.25));
+        }
+        assert_eq!(scroll.offset(), Some(7.5));
+        for _ in 0..10 {
+            assert!(scroll.wheel(window, -0.25));
+        }
+        assert_eq!(scroll.offset(), Some(0.0));
+        assert!(!scroll.wheel(window, -15.0));
+        assert!(!scroll.wheel(window, f64::NAN));
+        assert!(scroll.wheel(window, 500.0));
+        assert_eq!(scroll.offset(), Some(500.0));
+        assert!(!scroll.wheel(window, 15.0));
+
+        // Provider refresh can reduce total row count while manual state is
+        // retained. New events must clamp against the refreshed scene bounds.
+        window.max_offset = 30.0;
+        window.offset = 30.0;
+        assert!(scroll.wheel(window, -0.25));
+        assert_eq!(scroll.offset(), Some(30.0));
+        window.max_offset = 0.0;
+        window.content_height = 0.0;
+        assert!(!scroll.wheel(window, 15.0));
+    }
+
+    #[test]
+    fn touch_threshold_and_multitouch_cancel_prevent_ghost_clicks() {
+        let window = nuraloumi_render_cairo::ScrollWindow {
+            viewport: nuraloumi_render_cairo::Rect::new(0.0, 80.0, 400.0, 200.0),
+            content_height: 700.0,
+            offset: 0.0,
+            max_offset: 500.0,
+            clipped: true,
+        };
+        let mut scroll = MenuScroll::default();
+        scroll.touch_down(1, 150.0, window);
+        assert!(!scroll.touch_motion(1, 142.01, window));
+        assert!(!scroll.touch_up(1), "sub-threshold tap remains clickable");
+        scroll.touch_down(2, 150.0, window);
+        assert!(scroll.touch_motion(2, 142.0, window));
+        assert!(scroll.touch_up(2), "8px swipe suppresses activation");
+
+        scroll.touch_down(3, 150.0, window);
+        scroll.touch_down(4, 160.0, window);
+        assert!(!scroll.touch_motion(3, 100.0, window));
+        assert!(!scroll.touch_motion(4, 100.0, window));
+        assert!(scroll.touch_up(3));
+        assert!(scroll.touch_up(4));
+        scroll.touch_down(5, 150.0, window);
+        scroll.reset();
+        assert!(!scroll.touch_up(5));
     }
 
     #[test]
