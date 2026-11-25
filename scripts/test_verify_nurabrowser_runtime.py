@@ -27,6 +27,30 @@ ROLES = {
 }
 
 
+class DecodedISAGate(unittest.TestCase):
+    def test_d15_and_normal_vfp_instruction_are_allowed(self):
+        gate.verify_decoded_isa("  0008: vldr d15, [pc, #4]\n"
+                                "  000c: vmov.f64 d0, d15\n"
+                                "00000000 <symbol_d16>:\n")
+
+    def test_upper_vfp_registers_rejected_even_with_d16_attributes(self):
+        for operand in ("d16", "d17", "d23", "d30", "d31"):
+            with self.subTest(operand=operand):
+                with self.assertRaisesRegex(ValueError, "upper VFP"):
+                    gate.verify_decoded_isa(f"  1950c0: vldr {operand}, [pc, #136]\n")
+
+    def test_neon_q_registers_and_decoded_opcodes_rejected(self):
+        for line in ("  0004: vld1.32 {d0, d1}, [r0]",
+                     "  0004: vst1.32 {d0}, [r0]",
+                     "  0004: vrev64.8 d0, d1",
+                     "  0004: vmov q0, q1",
+                     "  0004: sdiv r0, r1, r2",
+                     "  0004: udiv r0, r1, r2"):
+            with self.subTest(line=line):
+                with self.assertRaisesRegex(ValueError, "forbidden|NEON"):
+                    gate.verify_decoded_isa(line)
+
+
 class BrowserRuntimeContract(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

@@ -35,6 +35,26 @@ def require(ok, reason):
         raise ValueError(reason)
 
 
+# ELF attributes alone cannot certify the Tegra 2 register file. LLVM and
+# hand-written assembly can emit d16-d31 despite a VFPv3-D16 attribute.
+UPPER_VFP = re.compile(r"(?:^|[\s,{])d(?:1[6-9]|2[0-9]|3[01])(?=[^a-zA-Z0-9_]|$)", re.I)
+NEON_Q = re.compile(r"(?:^|[\s,{])q[0-9]+(?=[^a-zA-Z0-9_]|$)", re.I)
+FORBIDDEN_OPCODE = re.compile(
+    r"\b(?:sdiv|udiv|vld[1-4]|vst[1-4]|vdup|vext|vtbl|vtbx|"
+    r"vzip|vuzp|vtrn|vrev(?:16|32|64)?|vswp|vq[a-z0-9.]+)\b", re.I
+)
+
+
+def verify_decoded_isa(disassembly):
+    """Reject incompatible decoded ARM/Thumb instructions and register usage."""
+    require(not UPPER_VFP.search(disassembly),
+            "upper VFP register d16-d31 detected")
+    require(not NEON_Q.search(disassembly),
+            "NEON q-register detected")
+    require(not FORBIDDEN_OPCODE.search(disassembly),
+            "forbidden ARM/NEON/hardware-division instruction detected")
+
+
 def inspect_elf(path, abi):
     """Production inspector: verify ELF target, loader and basic ISA attributes."""
     def readelf(*options):
@@ -57,8 +77,7 @@ def inspect_elf(path, abi):
             f"unreadable DT_NEEDED closure: {path}")
     disassembly = subprocess.run(["llvm-objdump", "-d", str(path)], check=True,
                                  capture_output=True, text=True, timeout=60).stdout
-    require(not re.search(r"\b(?:sdiv|udiv|vld[1-4]|vst[1-4]|vdup|vext|vtbl|vtbx|vzip|vuzp|vtrn|vq[a-z0-9.]+)\b",
-                          disassembly, re.I), f"forbidden ARM instruction: {path}")
+    verify_decoded_isa(disassembly)
 
 
 def verify(root, source_sha, target, producer_revision, inspector=inspect_elf):
