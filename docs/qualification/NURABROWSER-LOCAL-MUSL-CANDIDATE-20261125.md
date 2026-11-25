@@ -125,7 +125,15 @@ candidate archive, install anything on the tablet, or change a GitHub release.
 - The targeted WPE contract and new overlay tests passed **42/42** locally.
   This verifies guardrails and synthetic cases, not runtime/device behavior.
 - A read-only SSH check confirmed the SL101 still runs Nura edge ARMv7 with
-  its existing Sway/WayVNC sessions. No live file was changed.
+  its existing Sway/WayVNC sessions. It also has system Mesa 26.2.4 and LLVM
+  23.1.2; their ELF attributes alone do not qualify generated code. No live
+  file was changed.
+- The original closure's `libepoxy.so.0` contains dynamic library names
+  `libEGL.so.1`, `libGLESv2.so.2`, `libGL.so.1`, `libGLX.so.1`
+  and `libOpenGL.so.0`, none bundled privately. They may be selected
+  conditionally. A recorded runtime `dlopen` trace is needed to identify
+  the actual graphics path and close it without relying on unqualified
+  system Mesa/LLVM; direct `DT_NEEDED` completeness is insufficient.
 - The official WPE producer's most recent runs on the release branch remain
   cancelled; the earlier successful PR workflow has no retained runtime
   artifact. A new exact-source CI artifact and ordinary package are missing.

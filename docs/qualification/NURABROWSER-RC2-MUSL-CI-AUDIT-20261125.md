@@ -40,3 +40,36 @@
 ## Concrete next action
 
 Use a bounded, reproducible cross-build or faster native ARMv7 builder to complete WPE 2.54.2 inside the CI window; capture a producer artifact that includes the full target runtime tree. Validate every ELF instruction and dependency, including WebProcess spawned modules and sandbox executables, and run actual source-matched musl sandbox/page tests. Only after independently reviewed PASS evidence may the source-pinned `runtime.json` and regular release job be generated. Keep the device's existing validated software-rendering fallback and rollback unchanged.
+
+## Later same-day official CI re-verification: exact RC.2 integration baseline
+
+The ordinary `SL101 Alpine armv7 musl package` workflow subsequently
+completed successfully at exact SHA
+`41a901b99cd142009f7e603c8440264d3201d6d5` on both refs:
+
+| Ref | Official run | Independently downloaded artifact |
+| --- | --- | --- |
+| `main` | `45521908820` | `nuraloumi-musl-armv7-build-audit-45-41a901b99cd142009f7e603c8440264d3201d6d5` |
+| `release/0.0.8-rc.2` | `45521908746` | `nuraloumi-musl-armv7-build-audit-44-41a901b99cd142009f7e603c8440264d3201d6d5` |
+
+The three files downloaded from each run are **byte-identical** between
+`main` and the release ref. Independent local SHA-256:
+
+- `BINARY-LIST.txt` (516 bytes):
+  `7c3ac02ca48d5bcecb35cd1dbfcf4952c74a5f6814f3764891a3be1b1d26d6f1`
+- `BUILD-LOG.txt` (14,121 bytes):
+  `7ec4ec375244aca813d47fdad725e8dcc81e761cca81597228433b1e87195267`
+- `ELF-AUDIT.txt` (13,588 bytes):
+  `4536ebee16e4e60d0c59a5182c86ac30041d45c885389e23b6579519e65ce02e`
+
+The 28 distinct binary names match the 28 `PASS` ELF-audit rows exactly,
+in order, and the log contains `SL101_CROSS_BUILD=PASS`. **This verifies the
+official text audit for the exact source baseline**, not the existence or
+independent disassembly of the binary bytes: neither download includes ELF
+objects, a native WPE runtime, `runtime.json`, nor `nuraloumi-ci.tar`.
+The separate WPE producer still has no qualified same-commit artifact.
+
+The follow-up D16 crypto/auditor code is committed *locally* as
+`393c7c5564e5b99f086dd4e5bd219bc4fe8916ed` on an isolated integration
+worktree. It has **not** been published or built by these earlier official
+runs, and must not inherit their PASS conclusions.
