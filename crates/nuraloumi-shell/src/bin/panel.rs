@@ -2133,6 +2133,19 @@ fn run_live(
     }
 }
 
+// Preserve the output boundary even on reduced-resolution fixtures.
+fn bounded_menu_height(output_height: u32, panel_height: u32) -> u32 {
+    output_height
+        .saturating_sub(
+            panel_height
+                .saturating_add(PANEL_MENU_GAP)
+                .saturating_add(16),
+        )
+        .min(720)
+        .min(output_height.saturating_sub(panel_height))
+        .max(1)
+}
+
 fn open_live_menu(
     backend: &mut WaylandBackend,
     config: &ShellConfig,
@@ -2160,16 +2173,7 @@ fn open_live_menu(
             let scale = output.scale.max(1) as u32;
             (output.mode_height > 0).then_some(output.mode_height as u32 / scale)
         })
-        .map(|height| {
-            height
-                .saturating_sub(
-                    config
-                        .effective_panel_height()
-                        .saturating_add(PANEL_MENU_GAP)
-                        .saturating_add(16),
-                )
-                .clamp(240, 720)
-        })
+        .map(|height| bounded_menu_height(height, config.effective_panel_height()))
         .unwrap_or(640);
 
     // Sway has already removed the panel's exclusive zone from the menu's
@@ -4006,6 +4010,13 @@ fn next_value(args: &mut impl Iterator<Item = String>, option: &str) -> Result<S
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn menu_height_stays_within_panel_exclusive_zone() {
+        assert_eq!(super::bounded_menu_height(800, 48), 720);
+        assert_eq!(super::bounded_menu_height(240, 48), 176);
+        assert_eq!(super::bounded_menu_height(200, 48), 136);
+        assert!(48 + super::bounded_menu_height(240, 48) <= 240);
+    }
     use super::*;
 
     #[test]

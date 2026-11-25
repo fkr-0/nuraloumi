@@ -342,6 +342,15 @@ fn run_workspace_probe() -> Result<(), String> {
     Ok(())
 }
 
+// A minimum 240px menu must never override the compositor's available height.
+fn bounded_menu_height(output_height: u32, panel_height: u32) -> u32 {
+    output_height
+        .saturating_sub(panel_height.saturating_add(16))
+        .min(720)
+        .min(output_height.saturating_sub(panel_height))
+        .max(1)
+}
+
 fn run_live(
     mut shell: ShellState,
     mut config: ShellConfig,
@@ -399,11 +408,7 @@ fn run_live(
             let scale = output.scale.max(1) as u32;
             (output.mode_height > 0).then_some(output.mode_height as u32 / scale)
         })
-        .map(|height| {
-            height
-                .saturating_sub(config.effective_panel_height().saturating_add(16))
-                .clamp(240, 720)
-        })
+        .map(|height| bounded_menu_height(height, config.effective_panel_height()))
         .unwrap_or(640);
 
     let dismiss_backdrop_enabled = dismiss_backdrop_enabled_for_renderer(
@@ -1776,6 +1781,13 @@ fn parse_input(step: &str) -> Result<ShellInput, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn menu_height_stays_within_panel_exclusive_zone() {
+        assert_eq!(super::bounded_menu_height(800, 48), 720);
+        assert_eq!(super::bounded_menu_height(240, 48), 176);
+        assert_eq!(super::bounded_menu_height(200, 48), 136);
+        assert!(48 + super::bounded_menu_height(240, 48) <= 240);
+    }
     use super::*;
 
     #[test]
