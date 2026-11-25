@@ -115,9 +115,19 @@ if [ -d "$out/stage-openssl/usr/lib/ossl-modules" ]; then
   cp -L "$out/stage-openssl/usr/lib/ossl-modules/"*.so \
     "$out/replacements/ossl-modules/"
 fi
-for object in "$out/replacements/"*.so.*; do
-  readelf -A "$object" | grep -F 'Tag_FP_arch: VFPv3-D16' >/dev/null
-  if readelf -A "$object" | grep -Eq 'NEON|Advanced_SIMD'; then
+test -f "$out/replacements/ossl-modules/legacy.so"
+for object in "$out/replacements/"*.so.* "$out/replacements/ossl-modules/"*.so; do
+  test -f "$object"
+  attributes=$(readelf -A "$object")
+  if ! printf '%s\n' "$attributes" | grep -F 'Tag_FP_arch: VFPv3-D16' >/dev/null; then
+    echo "missing VFPv3-D16 ARM attribute: $object" >&2
+    exit 1
+  fi
+  if ! printf '%s\n' "$attributes" | grep -F 'Tag_ABI_VFP_args: VFP registers' >/dev/null; then
+    echo "missing ARM hardfloat ABI attribute: $object" >&2
+    exit 1
+  fi
+  if printf '%s\n' "$attributes" | grep -Eq 'NEON|Advanced_SIMD'; then
     echo "incompatible ARM ISA: $object" >&2
     exit 1
   fi

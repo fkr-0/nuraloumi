@@ -50,6 +50,13 @@ class CryptoBuildContract(unittest.TestCase):
             self.assertIn("copy_soname stage-", self.text)
             self.assertIn(soname, self.text)
 
+    def test_legacy_module_and_hardfloat_attributes_are_gated(self):
+        self.assertIn('test -f "$out/replacements/ossl-modules/legacy.so"',
+                      self.text)
+        self.assertIn('"$out/replacements/ossl-modules/"*.so', self.text)
+        self.assertIn("Tag_ABI_VFP_args: VFP registers", self.text)
+        self.assertIn("Tag_FP_arch: VFPv3-D16", self.text)
+
 
 if __name__ == "__main__":
     unittest.main()
