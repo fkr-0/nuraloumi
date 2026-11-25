@@ -57,6 +57,12 @@ class ArmRunnerProbeTests(unittest.TestCase):
             self.assertIn(snippet, self.probe)
         self.assertNotIn("qemu-arm-static", self.probe)
 
+    def test_docker_cidfile_path_is_initially_absent(self):
+        # Docker creates --cidfile itself; mktemp must not pre-create it.
+        self.assertIn('ciddir=$(mktemp -d)', self.probe)
+        self.assertIn('cidfile="$ciddir/container-id"', self.probe)
+        self.assertNotIn('cidfile=$(mktemp)', self.probe)
+
     def test_probe_shell_syntax(self):
         result = subprocess.run(
             ["bash", "-n", str(PROBE)],

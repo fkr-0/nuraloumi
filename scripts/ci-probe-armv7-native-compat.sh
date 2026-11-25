@@ -18,12 +18,14 @@ command -v readelf >/dev/null
 # An ARMv7 container is not enough: QEMU can masquerade as an ARMv7 guest.
 # Inspect the *host kernel's executable* for the live container init process.
 docker pull --platform linux/arm/v7 alpine:3.22
-cidfile=$(mktemp)
+ciddir=$(mktemp -d)
+cidfile="$ciddir/container-id"
 cleanup() {
   if test -s "$cidfile"; then
     docker rm --force "$(cat "$cidfile")" >/dev/null 2>&1 || true
   fi
   rm -f "$cidfile"
+  rmdir "$ciddir"
 }
 trap cleanup EXIT
 cid=$(docker run --rm -d --cidfile "$cidfile" --platform linux/arm/v7 \
