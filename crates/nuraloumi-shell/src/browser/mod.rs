@@ -177,22 +177,27 @@ impl BrowserUi {
         if tabs.tabs.is_empty() || tabs.tabs.len() > MAX_TABS || tabs.active >= tabs.tabs.len() {
             return Err("Invalid WebKit tab count or active tab index".into());
         }
-        let page_number = self.bookmark_page.min(7);
-        let bookmarks: BookmarksStatus =
-            serde_json::from_value(rpc.request("bookmarks", Some(&page_number.to_string()))?)
-                .map_err(|_| "Malformed bookmark state".to_owned())?;
-        if bookmarks.entries.len() > MAX_BOOKMARK_PAGE
-            || bookmarks.total > 64
-            || bookmarks.offset != page_number * MAX_BOOKMARK_PAGE
-        {
-            return Err("Unbounded or inconsistent bookmark state".into());
+        // Hidden bookmark rows cannot affect the visible chrome. Avoid one
+        // bounded IPC round trip and JSON decode on every loading/idle poll;
+        // opening or paging the list always refreshes it before display.
+        if self.bookmarks_open {
+            let page_number = self.bookmark_page.min(7);
+            let bookmarks: BookmarksStatus =
+                serde_json::from_value(rpc.request("bookmarks", Some(&page_number.to_string()))?)
+                    .map_err(|_| "Malformed bookmark state".to_owned())?;
+            if bookmarks.entries.len() > MAX_BOOKMARK_PAGE
+                || bookmarks.total > 64
+                || bookmarks.offset != page_number * MAX_BOOKMARK_PAGE
+            {
+                return Err("Unbounded or inconsistent bookmark state".into());
+            }
+            self.bookmarks = bookmarks;
         }
         if !self.editing_address {
             self.address = page.uri.clone();
         }
         self.page = page;
         self.tabs = tabs;
-        self.bookmarks = bookmarks;
         self.status.clear();
         Ok(())
     }
@@ -570,9 +575,75 @@ mod tests {
     }
 
     #[test]
+    fn collapsed_bookmarks_avoid_periodic_rpc_but_open_and_reopen_are_fresh() {
+        #[derive(Default)]
+        struct CountingRpc {
+            pages: usize,
+            tabs: usize,
+            bookmarks: usize,
+        }
+        impl BrowserRpc for CountingRpc {
+            fn request(&mut self, cmd: &str, argument: Option<&str>) -> Result<Value, String> {
+                match cmd {
+                    "uri" => self.pages += 1,
+                    "tabs" => self.tabs += 1,
+                    "bookmarks" => self.bookmarks += 1,
+                    _ => {}
+                }
+                let mut fake = FakeRpc;
+                fake.request(cmd, argument)
+            }
+        }
+
+        let mut ui = BrowserUi::default();
+        let mut rpc = CountingRpc::default();
+        for _ in 0..64 {
+            ui.refresh(&mut rpc).unwrap();
+        }
+        assert_eq!((rpc.pages, rpc.tabs, rpc.bookmarks), (64, 64, 0));
+        assert!(ui.page.bookmarked); // Current-page star is still live.
+        assert!(ui.bookmarks.entries.is_empty());
+
+        ui.activate(
+            MenuAction::Custom {
+                kind: "browser.bookmark.open".into(),
+                payload: String::new(),
+            },
+            &mut rpc,
+        )
+        .unwrap();
+        assert_eq!(rpc.bookmarks, 1);
+        assert_eq!(ui.bookmarks.total, 1);
+        assert_eq!(ui.bookmarks.entries[0].title, "Example");
+
+        ui.activate(
+            MenuAction::Custom {
+                kind: "browser.bookmark.hide".into(),
+                payload: String::new(),
+            },
+            &mut rpc,
+        )
+        .unwrap();
+        for _ in 0..64 {
+            ui.refresh(&mut rpc).unwrap();
+        }
+        assert_eq!((rpc.pages, rpc.tabs, rpc.bookmarks), (129, 129, 1));
+        ui.activate(
+            MenuAction::Custom {
+                kind: "browser.bookmark.open".into(),
+                payload: String::new(),
+            },
+            &mut rpc,
+        )
+        .unwrap();
+        assert_eq!((rpc.pages, rpc.tabs, rpc.bookmarks), (130, 130, 2));
+    }
+
+    #[test]
     fn bookmark_paging_and_snapshot_bounds_are_checked() {
         let mut ui = BrowserUi {
             bookmark_page: 1,
+            bookmarks_open: true,
             ..BrowserUi::default()
         };
         ui.refresh(&mut FakeRpc).unwrap();
