@@ -336,6 +336,17 @@ fn advance_browser_scroll(
     true
 }
 
+/// Key events repaint only when they change visible chrome or selection.
+/// The subsequent action-dispatch branch independently repaints on activation.
+fn browser_key_changed(
+    previous_ui: &BrowserUi,
+    previous_state: &MenuState,
+    ui: &BrowserUi,
+    state: &MenuState,
+) -> bool {
+    previous_ui != ui || previous_state != state
+}
+
 // Browser chrome has a separate Wayland connection from the WPE page surface.
 // Link clicks can navigate WebKit without generating an event on our chrome
 // connection. Keep the idle refresh bounded, at less than one IPC wakeup per
@@ -465,6 +476,8 @@ fn run(
                 }
                 PlatformEvent::Close => return Ok(()),
                 PlatformEvent::Key { key, pressed: true } => {
+                    let previous_ui = ui.clone();
+                    let previous_state = state.clone();
                     match key {
                         Key::Escape if ui.editing_address => ui.cancel_address(),
                         Key::Escape => return Ok(()),
@@ -502,7 +515,7 @@ fn run(
                         Key::Text(text) if text == "q" => return Ok(()),
                         _ => {}
                     }
-                    redraw = true;
+                    redraw |= browser_key_changed(&previous_ui, &previous_state, &ui, &state);
                 }
                 PlatformEvent::PointerButton {
                     x,
@@ -779,6 +792,36 @@ mod tests {
         }
         assert_eq!(bottom_offset, scene.scroll.max_offset);
         assert_eq!(bottom_press.touch_up(9), None);
+    }
+
+    #[test]
+    fn noop_keyboard_repeat_does_not_trigger_full_cairo_redraws() {
+        let mut ui = BrowserUi::fixture();
+        let menu = ui.menu();
+        let mut state = MenuState::new(&menu);
+        for _ in 0..64 {
+            let previous_ui = ui.clone();
+            let previous_state = state.clone();
+            ui.backspace(); // no-op outside address editing
+            assert!(!browser_key_changed(
+                &previous_ui,
+                &previous_state,
+                &ui,
+                &state,
+            ));
+        }
+
+        let previous_ui = ui.clone();
+        ui.focus_address();
+        assert!(browser_key_changed(&previous_ui, &state, &ui, &state));
+
+        let previous_ui = ui.clone();
+        ui.text_input("/changed");
+        assert!(browser_key_changed(&previous_ui, &state, &ui, &state));
+
+        let previous_state = state.clone();
+        state.handle(&menu, SemanticInput::Down);
+        assert!(browser_key_changed(&ui, &previous_state, &ui, &state));
     }
 
     #[test]
