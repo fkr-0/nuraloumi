@@ -21,6 +21,7 @@ use wayland_protocols::ext::workspace::v1::client::{
     ext_workspace_handle_v1::{self, ExtWorkspaceHandleV1},
     ext_workspace_manager_v1::{self, ExtWorkspaceManagerV1},
 };
+use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
 use wayland_protocols_wlr::foreign_toplevel::v1::client::{
     zwlr_foreign_toplevel_handle_v1::{self, ZwlrForeignToplevelHandleV1},
     zwlr_foreign_toplevel_manager_v1::{self, ZwlrForeignToplevelManagerV1},
@@ -40,6 +41,8 @@ use crate::{
     PanelConfig, PanelEdge, PlatformEvent, Result, SurfaceId, ToplevelEvent, ToplevelId,
     ToplevelInfo, ToplevelSource, WorkspaceEvent, WorkspaceId, WorkspaceInfo,
 };
+
+mod video;
 
 struct OutputRecord {
     proxy: wl_output::WlOutput,
@@ -66,7 +69,7 @@ fn test_keyboard_layout(layout: &str) -> KeyboardState {
 
 struct SurfaceRecord {
     surface: wl_surface::WlSurface,
-    layer: ZwlrLayerSurfaceV1,
+    role: SurfaceRole,
     requested_width: u32,
     requested_height: u32,
     width: u32,
@@ -79,7 +82,33 @@ struct SurfaceRecord {
     buffers: ShmBuffers,
 }
 
+enum SurfaceRole {
+    Layer(ZwlrLayerSurfaceV1),
+    Window {
+        xdg: xdg_surface::XdgSurface,
+        toplevel: xdg_toplevel::XdgToplevel,
+        pending_size: Option<(u32, u32)>,
+    },
+}
+
 impl SurfaceRecord {
+    fn new(surface: wl_surface::WlSurface, role: SurfaceRole, width: u32, height: u32) -> Self {
+        Self {
+            surface,
+            role,
+            requested_width: width,
+            requested_height: height,
+            width: 0,
+            height: 0,
+            scale: 1,
+            configured: false,
+            closed: false,
+            redraw_pending: false,
+            entered_outputs: BTreeSet::new(),
+            buffers: ShmBuffers::new(),
+        }
+    }
+
     fn expected_pixel_size(&self) -> Option<(u32, u32)> {
         if !self.configured || self.width == 0 || self.height == 0 {
             return None;
@@ -177,6 +206,8 @@ fn keyboard_protocol_availability(
 struct BackendState {
     compositor: Option<wl_compositor::WlCompositor>,
     compositor_global: Option<u32>,
+    wm_base: Option<(u32, xdg_wm_base::XdgWmBase)>,
+    video: video::VideoState,
     shm: Option<wl_shm::WlShm>,
     shm_global: Option<u32>,
     layer_shell: Option<ZwlrLayerShellV1>,
@@ -489,26 +520,107 @@ impl WaylandBackend {
 
         self.state.surfaces.insert(
             id,
-            SurfaceRecord {
-                surface: surface.clone(),
-                layer,
-                requested_width: width,
-                requested_height: height,
-                width: 0,
-                height: 0,
-                scale: 1,
-                configured: false,
-                closed: false,
-                redraw_pending: false,
-                entered_outputs: BTreeSet::new(),
-                buffers: ShmBuffers::new(),
-            },
+            SurfaceRecord::new(surface.clone(), SurfaceRole::Layer(layer), width, height),
         );
         surface.commit();
         self.connection
             .flush()
             .map_err(|error| BackendError::Dispatch(error.to_string()))?;
         Ok(id)
+    }
+
+    /// Creates a normal compositor-managed window with a preferred initial size.
+    pub fn create_window(
+        &mut self,
+        width: u32,
+        height: u32,
+        app_id: &str,
+        title: &str,
+    ) -> Result<SurfaceId> {
+        if width == 0 || height == 0 || width > i32::MAX as u32 || height > i32::MAX as u32 {
+            return Err(BackendError::InvalidSurfaceConfig(
+                "invalid window size".into(),
+            ));
+        }
+        let compositor = self
+            .state
+            .compositor
+            .as_ref()
+            .ok_or(BackendError::MissingGlobal("wl_compositor"))?;
+        let (_, wm_base) = self
+            .state
+            .wm_base
+            .as_ref()
+            .ok_or(BackendError::MissingGlobal("xdg_wm_base"))?;
+        self.state.next_surface_id = self.state.next_surface_id.wrapping_add(1).max(1);
+        let id = SurfaceId(self.state.next_surface_id);
+        let surface = compositor.create_surface(&self.qh, id);
+        let xdg = wm_base.get_xdg_surface(&surface, &self.qh, id);
+        let toplevel = xdg.get_toplevel(&self.qh, id);
+        toplevel.set_app_id(app_id.into());
+        toplevel.set_title(title.into());
+        self.state.surfaces.insert(
+            id,
+            SurfaceRecord::new(
+                surface.clone(),
+                SurfaceRole::Window {
+                    xdg,
+                    toplevel,
+                    pending_size: None,
+                },
+                width,
+                height,
+            ),
+        );
+        surface.commit();
+        self.flush()?;
+        Ok(id)
+    }
+
+    pub fn set_window_min_size(&mut self, id: SurfaceId, width: u32, height: u32) -> Result<()> {
+        let record = self
+            .state
+            .surfaces
+            .get(&id)
+            .ok_or(BackendError::UnknownSurface(id.0))?;
+        if record.closed {
+            return Err(BackendError::SurfaceClosed(id.0));
+        }
+        let SurfaceRole::Window { toplevel, .. } = &record.role else {
+            return Err(BackendError::InvalidSurfaceConfig(
+                "minimum size requires a window".into(),
+            ));
+        };
+        let width = i32::try_from(width)
+            .map_err(|_| BackendError::InvalidSurfaceConfig("invalid minimum width".into()))?;
+        let height = i32::try_from(height)
+            .map_err(|_| BackendError::InvalidSurfaceConfig("invalid minimum height".into()))?;
+        toplevel.set_min_size(width, height);
+        // Minimum size takes effect on the next wl_surface commit, which must
+        // occur only after acknowledgement of the initial configure.
+        Ok(())
+    }
+
+    pub fn set_window_fullscreen(&mut self, id: SurfaceId, fullscreen: bool) -> Result<()> {
+        let record = self
+            .state
+            .surfaces
+            .get(&id)
+            .ok_or(BackendError::UnknownSurface(id.0))?;
+        if record.closed {
+            return Err(BackendError::SurfaceClosed(id.0));
+        }
+        let SurfaceRole::Window { toplevel, .. } = &record.role else {
+            return Err(BackendError::InvalidSurfaceConfig(
+                "fullscreen requires a window".into(),
+            ));
+        };
+        if fullscreen {
+            toplevel.set_fullscreen(None);
+        } else {
+            toplevel.unset_fullscreen();
+        }
+        self.flush()
     }
 
     pub fn present(&mut self, id: SurfaceId, frame: Frame<'_>) -> Result<()> {
@@ -599,8 +711,21 @@ impl WaylandBackend {
             .remove(&id)
             .ok_or(BackendError::UnknownSurface(id.0))?;
         clear_surface_input_routes(&mut self.state, id);
-        if record.layer.is_alive() {
-            record.layer.destroy();
+        self.destroy_video_surface(id);
+        match &record.role {
+            SurfaceRole::Layer(layer) => {
+                if layer.is_alive() {
+                    layer.destroy();
+                }
+            }
+            SurfaceRole::Window { xdg, toplevel, .. } => {
+                if toplevel.is_alive() {
+                    toplevel.destroy();
+                }
+                if xdg.is_alive() {
+                    xdg.destroy();
+                }
+            }
         }
         if record.surface.is_alive() {
             record.surface.destroy();
@@ -724,6 +849,12 @@ impl Dispatch<wl_registry::WlRegistry, ()> for BackendState {
                     state.compositor = Some(registry.bind(name, version.min(6), qh, ()));
                     state.compositor_global = Some(name);
                 }
+                "xdg_wm_base" if state.wm_base.is_none() => {
+                    state.wm_base = Some((name, registry.bind(name, 1, qh, ())));
+                }
+                "wl_subcompositor" | "wp_viewporter" | "zwp_linux_dmabuf_v1" => {
+                    state.video.bind(registry, name, &interface, version, qh);
+                }
                 "wl_shm" if state.shm.is_none() => {
                     state.shm = Some(registry.bind(name, 1, qh, ()));
                     state.shm_global = Some(name);
@@ -769,6 +900,11 @@ impl Dispatch<wl_registry::WlRegistry, ()> for BackendState {
                 _ => {}
             },
             wl_registry::Event::GlobalRemove { name } => {
+                state.video.remove_global(name);
+                if state.wm_base.as_ref().is_some_and(|(id, _)| *id == name) {
+                    // Retain the binding for existing xdg objects until they are destroyed.
+                    state.wm_base = None;
+                }
                 state.foreign_toplevel.remove_global(name);
                 state.workspace.remove_global(name);
                 state.keyboard_protocol_globals.remove(&name);
@@ -1263,6 +1399,95 @@ impl Dispatch<wl_surface::WlSurface, SurfaceId> for BackendState {
                 }
             }
             _ => {}
+        }
+    }
+}
+
+impl Dispatch<xdg_wm_base::XdgWmBase, ()> for BackendState {
+    fn event(
+        _state: &mut Self,
+        proxy: &xdg_wm_base::XdgWmBase,
+        event: xdg_wm_base::Event,
+        _data: &(),
+        _connection: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        if let xdg_wm_base::Event::Ping { serial } = event {
+            proxy.pong(serial);
+        }
+    }
+}
+
+impl Dispatch<xdg_toplevel::XdgToplevel, SurfaceId> for BackendState {
+    fn event(
+        state: &mut Self,
+        _proxy: &xdg_toplevel::XdgToplevel,
+        event: xdg_toplevel::Event,
+        id: &SurfaceId,
+        _connection: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        let Some(record) = state.surfaces.get_mut(id) else {
+            return;
+        };
+        match event {
+            xdg_toplevel::Event::Configure { width, height, .. } => {
+                if let SurfaceRole::Window { pending_size, .. } = &mut record.role {
+                    let choose = |configured: i32, current: u32, requested: u32| {
+                        u32::try_from(configured)
+                            .ok()
+                            .filter(|size| *size > 0)
+                            .unwrap_or(if current == 0 { requested } else { current })
+                    };
+                    *pending_size = Some((
+                        choose(width, record.width, record.requested_width),
+                        choose(height, record.height, record.requested_height),
+                    ));
+                }
+            }
+            xdg_toplevel::Event::Close => {
+                record.closed = true;
+                state.events.push_back(BackendEvent {
+                    surface: Some(*id),
+                    event: PlatformEvent::Close,
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<xdg_surface::XdgSurface, SurfaceId> for BackendState {
+    fn event(
+        state: &mut Self,
+        proxy: &xdg_surface::XdgSurface,
+        event: xdg_surface::Event,
+        id: &SurfaceId,
+        _connection: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        if let xdg_surface::Event::Configure { serial } = event {
+            proxy.ack_configure(serial);
+            let Some(record) = state.surfaces.get_mut(id) else {
+                return;
+            };
+            let SurfaceRole::Window { pending_size, .. } = &mut record.role else {
+                return;
+            };
+            if let Some((width, height)) = pending_size.take() {
+                (record.width, record.height) = (width, height);
+            } else if !record.configured {
+                (record.width, record.height) = (record.requested_width, record.requested_height);
+            }
+            record.configured = true;
+            state.events.push_back(BackendEvent {
+                surface: Some(*id),
+                event: PlatformEvent::Configure {
+                    width: record.width,
+                    height: record.height,
+                    scale: record.scale,
+                },
+            });
         }
     }
 }

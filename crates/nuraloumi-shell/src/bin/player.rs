@@ -3,24 +3,27 @@
 #![allow(dead_code)]
 #[path = "../player_engine.rs"]
 mod player_engine;
+#[path = "../player_frames.rs"]
+mod player_frames;
 use nuraloumi_core::{MenuAction, MenuItem, MenuModel, MenuState, SemanticInput};
 use nuraloumi_render_cairo::{
     CairoRenderer, Color, Fill, HitRegion, PaintNode, Point, Rect, RowKind, Scene, TextStyle,
     Viewport,
 };
-use nuraloumi_shell::{dismiss_backdrop_margins, load_config_or_default, ShellConfig};
+use nuraloumi_shell::{load_config_or_default, ShellConfig};
 use nuraloumi_wayland::{
-    BackendError, DismissBackdropConfig, Frame, Key, MenuConfig as WaylandMenuConfig, PixelFormat,
-    PlatformEvent as WaylandEvent, SurfaceId, WaylandBackend,
+    BackendError, Frame, Key, PixelFormat, PlatformEvent as WaylandEvent, SurfaceId, WaylandBackend,
 };
 use player_engine::{Command, LoopMode, Playlist, Reply, Snapshot};
 use std::{
     collections::HashSet,
     env, fs,
-    io::{Read, Write},
+    io::{self, Read, Write},
+    os::fd::{AsFd, AsRawFd},
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
     process::{Command as ProcCommand, ExitCode, Stdio},
+    sync::mpsc,
     time::{Duration, Instant},
 };
 
@@ -83,10 +86,10 @@ fn compact_scene(viewport: Viewport, snapshot: &Snapshot, focused: Option<&str>)
         stroke: None,
     });
     scene.paint.push(PaintNode::Text {
-        origin: Point::new(31.0, 36.0),
-        text: "←".into(),
+        origin: Point::new(25.0, 34.0),
+        text: "Back".into(),
         style: TextStyle {
-            size: 20.0,
+            size: 14.0,
             bold: false,
         },
         color: foreground,
@@ -96,25 +99,6 @@ fn compact_scene(viewport: Viewport, snapshot: &Snapshot, focused: Option<&str>)
         rect: close,
         actionable: true,
         enabled: true,
-        kind: RowKind::Action,
-    });
-    // Lane 10 owns the regular toplevel. Show an inactive expand affordance
-    // instead of suggesting that a non-existent IPC action succeeded.
-    let expand = Rect::new(width - 66.0, 4.0, 48.0, 48.0);
-    scene.paint.push(PaintNode::Text {
-        origin: Point::new(expand.x + 12.0, 36.0),
-        text: "↗".into(),
-        style: TextStyle {
-            size: 20.0,
-            bold: false,
-        },
-        color: muted,
-    });
-    scene.hits.push(HitRegion {
-        item_id: "expand-unavailable".into(),
-        rect: expand,
-        actionable: false,
-        enabled: false,
         kind: RowKind::Action,
     });
     let track = snapshot
@@ -135,20 +119,20 @@ fn compact_scene(viewport: Viewport, snapshot: &Snapshot, focused: Option<&str>)
     let gap = 4.0;
     let button_width = ((width - 36.0 - 5.0 * gap) / 6.0).max(48.0);
     let controls = [
-        ("previous", "|◀", "Previous track"),
-        ("seek-back", "−15", "Seek back 15 seconds"),
-        ("stop", "■", "Stop"),
+        ("previous", "Prev", "Previous track"),
+        ("seek-back", "-15", "Seek back 15 seconds"),
+        ("stop", "Stop", "Stop"),
         (
             "toggle",
             if snapshot.status == "Playing" {
-                "Ⅱ"
+                "Pause"
             } else {
-                "▶"
+                "Play"
             },
             "Play or pause",
         ),
         ("seek-forward", "+15", "Seek forward 15 seconds"),
-        ("next", "▶|", "Next track"),
+        ("next", "Next", "Next track"),
     ];
     for (index, (id, symbol, _hint)) in controls.iter().enumerate() {
         let rect = Rect::new(
@@ -164,10 +148,10 @@ fn compact_scene(viewport: Viewport, snapshot: &Snapshot, focused: Option<&str>)
             stroke: None,
         });
         scene.paint.push(PaintNode::Text {
-            origin: Point::new(rect.x + 9.0, rect.y + 33.0),
+            origin: Point::new(rect.x + 7.0, rect.y + 32.0),
             text: (*symbol).into(),
             style: TextStyle {
-                size: 18.0,
+                size: 14.0,
                 bold: false,
             },
             color: foreground,
@@ -275,6 +259,14 @@ fn compact_scene(viewport: Viewport, snapshot: &Snapshot, focused: Option<&str>)
             kind: RowKind::Action,
         });
     }
+    label(
+        &mut scene,
+        18.0,
+        418.0,
+        "Hardware video: 854x480 at 24 fps".into(),
+        13.0,
+        muted,
+    );
     if let Some(error) = &snapshot.error {
         scene.paint.push(PaintNode::Text {
             origin: Point::new(18.0, 431.0),
@@ -342,14 +334,18 @@ fn list_scene(
     let full = width - 36.0;
     match page {
         Page::Queue { start, selected } => {
-            add("back", "← Player".into(), Rect::new(18.0, 8.0, full, 48.0));
+            add(
+                "back",
+                "Back to Player".into(),
+                Rect::new(18.0, 8.0, full, 48.0),
+            );
             for (row, i) in (*start..(*start + 4).min(snapshot.playlist.tracks.len())).enumerate() {
                 let marker = if Some(i) == snapshot.playlist.current {
-                    "▶"
+                    "[Now]"
                 } else if i == *selected {
-                    "●"
+                    "[*]"
                 } else {
-                    "○"
+                    "-"
                 };
                 add(
                     &format!("track-{i}"),
@@ -358,12 +354,12 @@ fn list_scene(
                 );
             }
             let controls = [
-                ("q-prevpage", "◀ Page"),
-                ("q-nextpage", "Page ▶"),
-                ("q-play", "▶ Play"),
-                ("q-up", "↑ Move"),
-                ("q-down", "↓ Move"),
-                ("q-remove", "✕ Remove"),
+                ("q-prevpage", "Prev page"),
+                ("q-nextpage", "Next page"),
+                ("q-play", "Play"),
+                ("q-up", "Move up"),
+                ("q-down", "Move down"),
+                ("q-remove", "Remove"),
                 ("q-open", "+ Add"),
             ];
             let cell = (width - 54.0) / 3.0;
@@ -383,12 +379,12 @@ fn list_scene(
         Page::Files { start, .. } => {
             add(
                 "f-back",
-                "← Player".into(),
+                "Back to Player".into(),
                 Rect::new(18.0, 8.0, full, 48.0),
             );
             add(
                 "f-updir",
-                "↑ Parent directory".into(),
+                "Parent directory".into(),
                 Rect::new(18.0, 60.0, full, 48.0),
             );
             for (row, i) in (*start..(*start + 4).min(files.len())).enumerate() {
@@ -397,7 +393,7 @@ fn list_scene(
                     &format!("file-{i}"),
                     format!(
                         "{} {}",
-                        if file.directory { "▸" } else { "♫" },
+                        if file.directory { "Dir:" } else { "File:" },
                         basename(&file.path.to_string_lossy())
                     ),
                     Rect::new(18.0, 116.0 + row as f64 * 51.0, full, 48.0),
@@ -406,12 +402,12 @@ fn list_scene(
             let cell = (width - 44.0) / 2.0;
             add(
                 "f-prev",
-                "◀ Previous".into(),
+                "Previous".into(),
                 Rect::new(18.0, 330.0, cell, 48.0),
             );
             add(
                 "f-next",
-                "Next ▶".into(),
+                "Next".into(),
                 Rect::new(26.0 + cell, 330.0, cell, 48.0),
             );
         }
@@ -765,7 +761,7 @@ fn model(s: &Snapshot, page: &Page, files: &[FileEntry]) -> MenuModel {
     let mut items = Vec::new();
     match page {
         Page::Now => {
-            items.push(action("dismiss", "← Close", "dismiss", ""));
+            items.push(action("dismiss", "Close", "dismiss", ""));
             items.push(MenuItem::status("now-title", "Now playing"));
             let title = s
                 .playlist
@@ -789,24 +785,24 @@ fn model(s: &Snapshot, page: &Page, files: &[FileEntry]) -> MenuModel {
                     format!("Error: {}", error.chars().take(74).collect::<String>()),
                 ));
             }
-            items.push(action("previous", "⏮ Previous", "previous", ""));
+            items.push(action("previous", "Previous", "previous", ""));
             items.push(action(
                 "toggle",
                 if s.status == "Playing" {
-                    "⏸ Pause"
+                    "Pause"
                 } else {
-                    "▶ Play"
+                    "Play"
                 },
                 "toggle",
                 "",
             ));
-            items.push(action("stop", "■ Stop", "stop", ""));
-            items.push(action("next", "⏭ Next", "next", ""));
-            items.push(action("seek-back", "↶ Seek −15s", "seek_back", ""));
-            items.push(action("seek-forward", "↷ Seek +15s", "seek_forward", ""));
+            items.push(action("stop", "Stop", "stop", ""));
+            items.push(action("next", "Next", "next", ""));
+            items.push(action("seek-back", "Seek -15s", "seek_back", ""));
+            items.push(action("seek-forward", "Seek +15s", "seek_forward", ""));
             items.push(action("scrub", "Seek position", "scrub", ""));
             items.push(action("loop", "Repeat mode", "loop", ""));
-            items.push(action("volume-down", "− Volume", "volume_down", ""));
+            items.push(action("volume-down", "- Volume", "volume_down", ""));
             items.push(action(
                 "volume-up",
                 format!("+ Volume ({}%)", (s.playlist.volume * 100.0).round()),
@@ -827,21 +823,21 @@ fn model(s: &Snapshot, page: &Page, files: &[FileEntry]) -> MenuModel {
             ));
             items.push(action("open", "Open media file…", "files", ""));
             items.push(
-                MenuItem::status("gpu", "Video: experimental VDE/GPU")
+                MenuItem::status("gpu", "Hardware video: 854x480 at 24 fps")
                     .with_subtitle(s.gpu_status.clone()),
             );
         }
         Page::Queue { start, selected } => {
             items.push(MenuItem::status("queue-head", "Ordered playlist"));
-            items.push(action("back", "← Player", "home", ""));
+            items.push(action("back", "Back to Player", "home", ""));
             let end = (start + 4).min(s.playlist.tracks.len());
             for i in *start..end {
                 let marker = if Some(i) == s.playlist.current {
-                    "▶"
+                    "[Now]"
                 } else if i == *selected {
-                    "●"
+                    "[*]"
                 } else {
-                    "○"
+                    "-"
                 };
                 items.push(action(
                     &format!("track-{i}"),
@@ -850,17 +846,12 @@ fn model(s: &Snapshot, page: &Page, files: &[FileEntry]) -> MenuModel {
                     i.to_string(),
                 ));
             }
-            items.push(action(
-                "q-prevpage",
-                "↑ Previous page",
-                "queue_prevpage",
-                "",
-            ));
-            items.push(action("q-nextpage", "↓ Next page", "queue_nextpage", ""));
-            items.push(action("q-play", "▶ Play selected", "queue_play", ""));
-            items.push(action("q-up", "↑ Move selected earlier", "queue_up", ""));
-            items.push(action("q-down", "↓ Move selected later", "queue_down", ""));
-            items.push(action("q-remove", "✕ Remove selected", "queue_remove", ""));
+            items.push(action("q-prevpage", "Previous page", "queue_prevpage", ""));
+            items.push(action("q-nextpage", "Next page", "queue_nextpage", ""));
+            items.push(action("q-play", "Play selected", "queue_play", ""));
+            items.push(action("q-up", "Move selected earlier", "queue_up", ""));
+            items.push(action("q-down", "Move selected later", "queue_down", ""));
+            items.push(action("q-remove", "Remove selected", "queue_remove", ""));
             items.push(action("q-open", "+ Add media file…", "files", ""));
         }
         Page::Files { dir, start } => {
@@ -882,8 +873,8 @@ fn model(s: &Snapshot, page: &Page, files: &[FileEntry]) -> MenuModel {
                     p.into_owned()
                 }
             }));
-            items.push(action("f-back", "← Player", "home", ""));
-            items.push(action("f-updir", "↑ Parent directory", "parent_dir", ""));
+            items.push(action("f-back", "Back to Player", "home", ""));
+            items.push(action("f-updir", "Parent directory", "parent_dir", ""));
             let end = (start + 4).min(files.len());
             for (i, entry) in files.iter().enumerate().take(end).skip(*start) {
                 let name = entry.path.file_name().unwrap_or_default().to_string_lossy();
@@ -891,19 +882,79 @@ fn model(s: &Snapshot, page: &Page, files: &[FileEntry]) -> MenuModel {
                     &format!("file-{i}"),
                     format!(
                         "{} {}",
-                        if entry.directory { "▸" } else { "♫" },
+                        if entry.directory { "Dir:" } else { "File:" },
                         name.chars().take(49).collect::<String>()
                     ),
                     "entry",
                     i.to_string(),
                 ));
             }
-            items.push(action("f-prev", "↑ Previous files", "files_prevpage", ""));
-            items.push(action("f-next", "↓ More files", "files_nextpage", ""));
+            items.push(action("f-prev", "Previous files", "files_prevpage", ""));
+            items.push(action("f-next", "More files", "files_nextpage", ""));
         }
     };
     MenuModel::new("player", "Media Player", items)
 }
+const CONTROLS_HEIGHT: u32 = 440;
+
+fn controls_offset(height: u32) -> u32 {
+    height.saturating_sub(CONTROLS_HEIGHT)
+}
+
+fn video_destination(
+    width: u32,
+    height: u32,
+    frame_width: u32,
+    frame_height: u32,
+) -> Option<(i32, i32, i32, i32)> {
+    let area_height = controls_offset(height) as u64;
+    let width = u64::from(width);
+    let (fw, fh) = (u64::from(frame_width), u64::from(frame_height));
+    if width == 0 || area_height == 0 || fw == 0 || fh == 0 {
+        return None;
+    }
+    let w = width.min(area_height * fw / fh).max(1);
+    let h = area_height.min(w * fh / fw).max(1);
+    Some((
+        ((width - w) / 2) as i32,
+        ((area_height - h) / 2) as i32,
+        w as i32,
+        h as i32,
+    ))
+}
+
+fn position_controls(scene: &mut Scene, y: f64, height: f64) {
+    for node in &mut scene.paint {
+        match node {
+            PaintNode::FillRect { rect, .. }
+            | PaintNode::RoundedRect { rect, .. }
+            | PaintNode::Chevron { rect, .. }
+            | PaintNode::CheckMark { rect, .. }
+            | PaintNode::ClipPush(rect) => rect.y += y,
+            PaintNode::Text { origin, .. } => origin.y += y,
+            PaintNode::Line { from, to, .. } => {
+                from.y += y;
+                to.y += y;
+            }
+            PaintNode::ClipPop => {}
+        }
+    }
+    for hit in &mut scene.hits {
+        hit.rect.y += y;
+    }
+    scene.viewport.height = height;
+    scene.panel_rect.height = height;
+    if y > 0.0 {
+        scene.paint.insert(
+            0,
+            PaintNode::FillRect {
+                rect: Rect::new(0.0, 0.0, scene.viewport.width, y),
+                color: Color::rgb(0, 0, 0),
+            },
+        );
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw(
     backend: &mut WaylandBackend,
@@ -919,22 +970,25 @@ fn draw(
     height: u32,
     scale: i32,
 ) -> Result<Scene, String> {
-    let viewport = Viewport::new(width as f64, height as f64, f64::from(scale.max(1)));
-    let (scene, mut buffer) = if matches!(page, Page::Now) {
-        let compact = compact_scene(viewport, snapshot, state.selected_id.as_deref());
-        let rendered = renderer.render_scene(&compact).map_err(|e| e.to_string())?;
-        (compact, rendered)
+    let offset = controls_offset(height) as f64;
+    let viewport = Viewport::new(
+        width as f64,
+        height as f64 - offset,
+        f64::from(scale.max(1)),
+    );
+    let mut scene = if matches!(page, Page::Now) {
+        compact_scene(viewport, snapshot, state.selected_id.as_deref())
     } else {
-        let list = list_scene(
+        list_scene(
             viewport,
             snapshot,
             page,
             files,
             state.selected_id.as_deref(),
-        );
-        let buffer = renderer.render_scene(&list).map_err(|e| e.to_string())?;
-        (list, buffer)
+        )
     };
+    position_controls(&mut scene, offset, height as f64);
+    let mut buffer = renderer.render_scene(&scene).map_err(|e| e.to_string())?;
     let info = buffer.info();
     let (w, h, stride) = (info.width as u32, info.height as u32, info.stride as usize);
     let result = buffer
@@ -953,30 +1007,6 @@ fn draw(
         .map_err(|e| e.to_string())?;
     match result {
         Ok(()) | Err(BackendError::WouldBlock) => Ok(scene),
-        Err(e) => Err(e.to_string()),
-    }
-}
-fn transparent(
-    backend: &mut WaylandBackend,
-    surface: SurfaceId,
-    w: u32,
-    h: u32,
-    scale: i32,
-) -> Result<(), String> {
-    let s = u32::try_from(scale.max(1)).map_err(|e| e.to_string())?;
-    let width = w.checked_mul(s).ok_or("backdrop width overflow")?;
-    let height = h.checked_mul(s).ok_or("backdrop height overflow")?;
-    let len = (width as usize)
-        .checked_mul(height as usize)
-        .and_then(|v| v.checked_mul(4))
-        .filter(|v| *v <= 16 * 1024 * 1024)
-        .ok_or("backdrop allocation limit")?;
-    let data = vec![0; len];
-    match backend.present(
-        surface,
-        Frame::packed(width, height, PixelFormat::Argb8888, &data),
-    ) {
-        Ok(()) | Err(BackendError::WouldBlock) => Ok(()),
         Err(e) => Err(e.to_string()),
     }
 }
@@ -1006,7 +1036,7 @@ fn handle_action(
     page: &mut Page,
     files: &[FileEntry],
     snapshot: &mut Snapshot,
-    fixture_mode: bool,
+    send_control: &mut impl FnMut(Command, &mut Snapshot),
 ) {
     let MenuAction::Custom { kind, payload } = action else {
         return;
@@ -1168,39 +1198,118 @@ fn handle_action(
         _ => None,
     };
     if let Some(command) = command {
-        send_and_update(command, snapshot, fixture_mode);
+        send_control(command, snapshot);
     }
 }
-fn run(config: ShellConfig, mut snap: Snapshot, fixture_mode: bool) -> Result<(), String> {
-    let mut backend = WaylandBackend::connect().map_err(|e| e.to_string())?;
-    if !backend.capabilities().layer_shell {
-        return Err("layer shell unavailable".into());
-    }
-    backend.blocking_dispatch().map_err(|e| e.to_string())?;
-    let output = backend.outputs().into_iter().next();
-    let dismiss = {
-        let (t, r, b, l) = dismiss_backdrop_margins(config.panel_edge, config.panel_height);
-        backend
-            .create_dismiss_backdrop(DismissBackdropConfig {
-                margin_top: t,
-                margin_right: r,
-                margin_bottom: b,
-                margin_left: l,
-                output: output.as_ref().map(|o| o.id),
-                namespace: "nuraloumi-player-dismiss".into(),
-            })
-            .ok()
-    };
-    let surface = backend
-        .create_menu(WaylandMenuConfig {
-            width: config.menu_width.min(550),
-            height: 440,
-            margin_top: config.panel_height as i32,
-            margin_left: 0,
-            output: output.as_ref().map(|o| o.id),
-            namespace: "nuraloumi-player".into(),
+type PlayerReply = (bool, Result<Reply, String>);
+
+struct PlayerRpc {
+    commands: mpsc::SyncSender<(Command, bool)>,
+    replies: mpsc::Receiver<PlayerReply>,
+    wake: UnixStream,
+}
+
+impl PlayerRpc {
+    fn start() -> io::Result<Self> {
+        let (wake, mut notify) = UnixStream::pair()?;
+        wake.set_nonblocking(true)?;
+        notify.set_nonblocking(true)?;
+        let (commands, work) = mpsc::sync_channel::<(Command, bool)>(8);
+        let (send_reply, replies) = mpsc::channel();
+        std::thread::Builder::new()
+            .name("nuraloumi-player-rpc".into())
+            .spawn(move || {
+                while let Ok((command, status)) = work.recv() {
+                    if send_reply.send((status, send(&command, false))).is_err() {
+                        break;
+                    }
+                    let _ = notify.write(&[1]);
+                }
+            })?;
+        Ok(Self {
+            commands,
+            replies,
+            wake,
         })
+    }
+}
+fn release_video_on_close(
+    backend: &mut WaylandBackend,
+    surface: SurfaceId,
+    receiver: Option<&player_frames::Receiver>,
+    in_flight: &mut HashSet<u32>,
+) {
+    let Some(receiver) = receiver.filter(|r| r.peer_fd() >= 0) else {
+        return;
+    };
+    if in_flight.is_empty() || backend.clear_video(surface).is_err() {
+        return;
+    }
+    let deadline = Instant::now() + Duration::from_millis(500);
+    while !in_flight.is_empty() && Instant::now() < deadline {
+        if backend.flush().is_err() {
+            break;
+        }
+        let mut fd = libc::pollfd {
+            fd: backend.poll_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let ready = unsafe { libc::poll(&mut fd, 1, 20) };
+        let dispatched = if ready > 0 {
+            backend.blocking_dispatch()
+        } else {
+            backend.dispatch_pending()
+        };
+        if dispatched.is_err() {
+            break;
+        }
+        for seq in backend.take_video_releases() {
+            in_flight.remove(&seq);
+            let _ = receiver.acknowledge(2, seq);
+        }
+    }
+}
+
+fn run(
+    config: ShellConfig,
+    mut snap: Snapshot,
+    fixture_mode: bool,
+    open: Option<String>,
+) -> Result<(), String> {
+    let runtime = env::var_os("XDG_RUNTIME_DIR").ok_or("XDG_RUNTIME_DIR required")?;
+    let mut video = if fixture_mode {
+        None
+    } else {
+        Some(
+            player_frames::Receiver::bind(Path::new(&runtime))
+                .map_err(|e| format!("player video socket: {e}"))?,
+        )
+    };
+    let mut backend = WaylandBackend::connect().map_err(|e| e.to_string())?;
+    let surface = backend
+        .create_window(
+            config.menu_width.clamp(480, 854),
+            720,
+            "nuraloumi-player",
+            "Media player",
+        )
         .map_err(|e| e.to_string())?;
+    backend
+        .set_window_min_size(surface, 360, 496)
+        .map_err(|e| e.to_string())?;
+    let mut rpc = PlayerRpc::start().map_err(|e| e.to_string())?;
+    let commands = rpc.commands.clone();
+    let mut send_control = |command, snapshot: &mut Snapshot| {
+        if fixture_mode {
+            snapshot.error = Some("fixture mode: controls cannot output sound".into());
+        } else if commands.try_send((command, false)).is_err() {
+            snapshot.error = Some("Player is busy".into());
+        }
+    };
+    if let Some(path) = open {
+        send_control(Command::Add { path }, &mut snap);
+    }
     let renderer = CairoRenderer::default();
     let mut page = Page::Now;
     let mut geometry = None;
@@ -1211,44 +1320,93 @@ fn run(config: ShellConfig, mut snap: Snapshot, fixture_mode: bool) -> Result<()
     let mut pointer_seek: Option<f64> = None;
     let mut touch = TouchActivation::default();
     let mut dirty = true;
-    let mut ticks = 0u64;
-    loop {
+    let mut status_in_flight = false;
+    let mut displayed_size = None;
+    let mut next_status = Instant::now() + Duration::from_millis(250);
+    let mut pending_video: Option<player_frames::Frame> = None;
+    let mut in_flight = HashSet::new();
+    let result = (|| loop {
         backend.flush().map_err(|e| e.to_string())?;
-        let mut pollfd = libc::pollfd {
-            fd: backend.poll_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        let polled = unsafe { libc::poll(&mut pollfd, 1, 250) };
+        let mut pollfds = [
+            libc::pollfd {
+                fd: backend.poll_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: video
+                    .as_ref()
+                    .filter(|v| v.peer_fd() < 0 && in_flight.is_empty())
+                    .map_or(-1, |v| v.listener_fd()),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: video.as_ref().map_or(-1, |v| v.peer_fd()),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: rpc.wake.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
+        let polled = unsafe { libc::poll(pollfds.as_mut_ptr(), pollfds.len() as _, 100) };
         if polled < 0 {
-            return Err("Wayland poll failed".into());
+            if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err("player poll failed".into());
         }
-        if polled > 0 {
+        if pollfds[0].revents != 0 {
             backend.blocking_dispatch().map_err(|e| e.to_string())?;
         } else {
             backend.dispatch_pending().map_err(|e| e.to_string())?;
         }
-        for ev in backend.drain_events().collect::<Vec<_>>() {
-            if ev.surface == dismiss {
-                match ev.event {
-                    WaylandEvent::Configure {
-                        width,
-                        height,
-                        scale,
-                    } => transparent(
-                        &mut backend,
-                        dismiss.ok_or("backdrop missing")?,
-                        width,
-                        height,
-                        scale,
-                    )?,
-                    WaylandEvent::PointerButton { pressed: true, .. }
-                    | WaylandEvent::TouchDown { .. }
-                    | WaylandEvent::Close => return Ok(()),
-                    _ => {}
-                }
-                continue;
+        let released = backend.take_video_releases();
+        for seq in &released {
+            in_flight.remove(seq);
+        }
+        let callbacks = backend.take_video_callbacks();
+        if let Some(receiver) = video.as_mut() {
+            let mut disconnect = false;
+            if receiver.peer_fd() >= 0 {
+                disconnect = callbacks
+                    .into_iter()
+                    .map(|seq| (1, seq))
+                    .chain(released.into_iter().map(|seq| (2, seq)))
+                    .any(|(kind, seq)| receiver.acknowledge(kind, seq).is_err());
             }
+            if pollfds[1].revents & libc::POLLIN != 0 {
+                if let Err(e) = receiver.accept() {
+                    if e.kind() != io::ErrorKind::WouldBlock {
+                        return Err(e.to_string());
+                    }
+                }
+            }
+            if !disconnect && pollfds[2].revents != 0 {
+                match receiver.read() {
+                    Ok(Some(player_frames::Packet::Frame(frame))) if pending_video.is_none() => {
+                        pending_video = Some(frame)
+                    }
+                    Ok(Some(player_frames::Packet::Detach)) => {
+                        pending_video = None;
+                        backend.clear_video(surface).map_err(|e| e.to_string())?;
+                        displayed_size = None;
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+                    _ => disconnect = true,
+                }
+            }
+            if disconnect {
+                receiver.disconnect();
+                pending_video = None;
+                displayed_size = None;
+                backend.clear_video(surface).map_err(|e| e.to_string())?;
+            }
+        }
+        for ev in backend.drain_events().collect::<Vec<_>>() {
             if ev.surface.is_some() && ev.surface != Some(surface) {
                 continue;
             }
@@ -1260,6 +1418,13 @@ fn run(config: ShellConfig, mut snap: Snapshot, fixture_mode: bool) -> Result<()
                     scale,
                 } => {
                     geometry = Some((width, height, scale));
+                    if let Some((fw, fh)) = displayed_size {
+                        if let Some(destination) = video_destination(width, height, fw, fh) {
+                            backend
+                                .resize_video(surface, destination)
+                                .map_err(|e| e.to_string())?;
+                        }
+                    }
                     dirty = true;
                 }
                 WaylandEvent::Close => return Ok(()),
@@ -1361,7 +1526,7 @@ fn run(config: ShellConfig, mut snap: Snapshot, fixture_mode: bool) -> Result<()
                             if let Some(command) =
                                 seek_at(&snap, x, geometry.map_or(0.0, |g| g.0 as f64))
                             {
-                                send_and_update(command, &mut snap, fixture_mode);
+                                send_control(command, &mut snap);
                                 dirty = true;
                             }
                         } else if pointer_down.is_some() && pointer_down == at {
@@ -1390,7 +1555,7 @@ fn run(config: ShellConfig, mut snap: Snapshot, fixture_mode: bool) -> Result<()
                             if let Some(command) =
                                 seek_at(&snap, x, geometry.map_or(0.0, |g| g.0 as f64))
                             {
-                                send_and_update(command, &mut snap, fixture_mode);
+                                send_control(command, &mut snap);
                                 dirty = true;
                             }
                         } else if Some(selected.as_str()) == released {
@@ -1411,19 +1576,41 @@ fn run(config: ShellConfig, mut snap: Snapshot, fixture_mode: bool) -> Result<()
                     Page::Files { dir, .. } => browse_entries(dir),
                     _ => Vec::new(),
                 };
-                handle_action(action, &mut page, &files, &mut snap, fixture_mode);
+                handle_action(action, &mut page, &files, &mut snap, &mut send_control);
                 dirty = true;
             }
         }
-        ticks += 1;
-        if ticks.is_multiple_of(2) && !fixture_mode {
-            if let Ok(reply) = send(&Command::Status, false) {
-                let changed = reply.state.position_ms / 1000 != snap.position_ms / 1000
-                    || reply.state.status != snap.status
-                    || reply.state.playlist != snap.playlist
-                    || reply.state.error != snap.error;
-                snap = reply.state;
-                dirty |= changed;
+        if pollfds[3].revents & libc::POLLIN != 0 {
+            let mut wake_bytes = [0; 32];
+            let _ = rpc.wake.read(&mut wake_bytes);
+        }
+        for (status, reply) in rpc.replies.try_iter() {
+            if status {
+                status_in_flight = false;
+            }
+            match reply {
+                Ok(reply) => {
+                    dirty |= !status
+                        || reply.state.position_ms / 1000 != snap.position_ms / 1000
+                        || reply.state.status != snap.status
+                        || reply.state.playlist != snap.playlist
+                        || reply.state.error != snap.error;
+                    snap = reply.state;
+                    if !reply.ok {
+                        snap.error = reply.error;
+                    }
+                }
+                Err(e) if !status => {
+                    snap.error = Some(e);
+                    dirty = true;
+                }
+                Err(_) => {}
+            }
+        }
+        if !fixture_mode && Instant::now() >= next_status {
+            next_status = Instant::now() + Duration::from_millis(250);
+            if !status_in_flight {
+                status_in_flight = rpc.commands.try_send((Command::Status, true)).is_ok();
             }
         }
         if dirty {
@@ -1461,7 +1648,31 @@ fn run(config: ShellConfig, mut snap: Snapshot, fixture_mode: bool) -> Result<()
             }
             dirty = false;
         }
-    }
+        if let (Some(frame), Some((width, height, _))) = (&pending_video, geometry) {
+            if let Some(destination) = video_destination(width, height, frame.width, frame.height) {
+                match backend.present_video(
+                    surface,
+                    frame.fd.as_fd(),
+                    frame.width,
+                    frame.height,
+                    frame.stride,
+                    frame.sequence,
+                    destination,
+                    true, // Grate exports bottom-up XR24 rows on Tegra20.
+                ) {
+                    Ok(()) => {
+                        displayed_size = Some((frame.width, frame.height));
+                        in_flight.insert(frame.sequence);
+                        pending_video = None;
+                    }
+                    Err(BackendError::WouldBlock) => {}
+                    Err(e) => return Err(e.to_string()),
+                }
+            }
+        }
+    })();
+    release_video_on_close(&mut backend, surface, video.as_ref(), &mut in_flight);
+    result
 }
 fn main() -> ExitCode {
     let args = match args() {
@@ -1480,11 +1691,11 @@ fn main() -> ExitCode {
         }
     };
     let open_requested = args.open.is_some();
-    if let Some(path) = args.open {
+    if let Some(path) = args.open.as_ref().filter(|_| args.status) {
         if args.fixture {
             snapshot.error = Some("fixture mode: cannot open media".into());
         } else {
-            send_and_update(Command::Add { path }, &mut snapshot, false);
+            send_and_update(Command::Add { path: path.clone() }, &mut snapshot, false);
         }
     }
     if args.status {
@@ -1504,7 +1715,7 @@ fn main() -> ExitCode {
         }
     }
     let cfg = load_config_or_default(args.config.as_deref()).unwrap_or_default();
-    match run(cfg, snapshot, args.fixture) {
+    match run(cfg, snapshot, args.fixture, args.open) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("nuraloumi-player: {e}");
@@ -1543,6 +1754,47 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn compact_player_shows_readable_transport_labels_and_video_profile() {
+        let mut snapshot = fixture();
+        for (status, toggle) in [("Paused", "Play"), ("Playing", "Pause")] {
+            snapshot.status = status.into();
+            let scene = compact_scene(Viewport::new(448.0, 440.0, 1.0), &snapshot, None);
+            for expected in [
+                "Back",
+                "Prev",
+                "-15",
+                "Stop",
+                toggle,
+                "+15",
+                "Next",
+                "Hardware video: 854x480 at 24 fps",
+            ] {
+                assert!(
+                    scene.paint.iter().any(|node| {
+                        matches!(node, PaintNode::Text { text, .. } if text == expected)
+                    }),
+                    "missing label: {expected}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn video_preserves_aspect_and_controls_stay_below_it() {
+        let (x, y, width, height) = video_destination(550, 720, 854, 480).unwrap();
+        assert_eq!(x * 2 + width, 550);
+        assert!(y + height <= controls_offset(720) as i32);
+        assert!((f64::from(width) / f64::from(height) - 854.0 / 480.0).abs() < 0.01);
+        assert!(video_destination(480, 440, 854, 480).is_none());
+        let mut scene = compact_scene(Viewport::new(550.0, 440.0, 1.0), &fixture(), None);
+        position_controls(&mut scene, 280.0, 720.0);
+        assert_eq!(scene.viewport.height, 720.0);
+        assert!(scene.hits.iter().all(|hit| hit.rect.y >= 280.0));
+        assert!(scene.hit_test(30.0, 160.0).is_none());
+        assert_eq!(scene.hit_test(30.0, 440.0), Some("previous"));
+    }
+
     #[test]
     fn scrubber_clamps_extremes_and_blocks_unknown_duration() {
         let mut s = fixture();

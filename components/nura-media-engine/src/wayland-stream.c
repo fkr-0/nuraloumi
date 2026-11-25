@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 /* No direct KMS / privileged compositor access. Bounded persistent xdg
  * surface and per-buffer lifetime tied to Wayland release events. */
 #include "wayland-stream.h"
@@ -9,8 +10,18 @@
 #include <stdio.h>
 #include <string.h>
 #include <errno.h>
+#include <endian.h>
+#include <stddef.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/un.h>
+#include <unistd.h>
 
 #define MAX_STREAM_BUFS 4
+#define VIDEO_SOCKET "nuraloumi-video.sock"
+#define VIDEO_MAGIC 0x4e565631U
+#define VIDEO_FRAME_CALLBACK 1U
+#define VIDEO_BUFFER_RELEASE 2U
 struct stream_bo {
     struct sl101_stream *parent;
     struct wl_buffer *buffer;
@@ -21,6 +32,8 @@ struct stream_bo {
 };
 struct sl101_stream {
     struct wl_display *display;
+    int video_socket;
+    unsigned awaiting_frame;
     struct wl_registry *registry;
     struct wl_compositor *compositor;
     struct zwp_linux_dmabuf_v1 *dma;
@@ -78,21 +91,113 @@ static void frame_done(void *data,struct wl_callback *callback,uint32_t ms){
     s->callback=NULL;
 }
 static const struct wl_callback_listener frame_listener={frame_done};
-static void released(void *data,struct wl_buffer *buffer){
-    struct stream_bo *p=data;
-    if(!p->inuse||p->buffer!=buffer)return;
+static void release_slot(struct stream_bo *p){
     struct sl101_stream *s=p->parent;
     if(p->bo)gbm_surface_release_buffer(p->surface,p->bo);
     p->bo=NULL;
-    wl_buffer_destroy(p->buffer);
+    if(p->buffer)wl_buffer_destroy(p->buffer);
     p->buffer=NULL;
     p->inuse=0;
     s->releases++;
     if(s->releases<=2||s->releases%25==0)
         printf("WAYLAND_RELEASE frame=%u total=%u\n",p->frame,s->releases);
 }
+static void released(void *data,struct wl_buffer *buffer){
+    struct stream_bo *p=data;
+    if(p->inuse&&p->buffer==buffer)release_slot(p);
+}
 static const struct wl_buffer_listener release_listener={released};
+
+/* 0 means a headless caller with no graphical player, 1 selects embedding. */
+static int connect_video(struct sl101_stream *s){
+    const char *runtime=getenv("XDG_RUNTIME_DIR");
+    if(!runtime||!*runtime)return 0;
+    struct sockaddr_un address={.sun_family=AF_UNIX};
+    int length=snprintf(address.sun_path,sizeof(address.sun_path),"%s/%s",
+                        runtime,VIDEO_SOCKET);
+    if(length<0||(size_t)length>=sizeof(address.sun_path))return -1;
+    struct stat st;
+    if(lstat(address.sun_path,&st)<0)return errno==ENOENT?0:-1;
+    if(runtime[0]!='/'||!S_ISSOCK(st.st_mode)||st.st_uid!=geteuid()||
+       (st.st_mode&0777)!=0600)return -1;
+    if(lstat(runtime,&st)<0||!S_ISDIR(st.st_mode)||st.st_uid!=geteuid()||
+       (st.st_mode&0777)!=0700)return -1;
+    s->video_socket=socket(AF_UNIX,SOCK_SEQPACKET|SOCK_CLOEXEC|SOCK_NONBLOCK,0);
+    if(s->video_socket<0)return -1;
+    if(connect(s->video_socket,(const struct sockaddr *)&address,
+               offsetof(struct sockaddr_un,sun_path)+(size_t)length+1)<0)return -1;
+    struct ucred peer;
+    socklen_t size=sizeof(peer);
+    if(getsockopt(s->video_socket,SOL_SOCKET,SO_PEERCRED,&peer,&size)<0||
+       size!=sizeof(peer)||peer.uid!=geteuid()||peer.pid<=0)return -1;
+    return 1;
+}
+
+static int send_video(struct sl101_stream *s,int fd,uint32_t frame,
+                      uint32_t width,uint32_t height,uint32_t stride){
+    uint32_t payload[]={htole32(VIDEO_MAGIC),htole32(frame),htole32(width),
+                        htole32(height),htole32(stride)};
+    struct iovec iov={.iov_base=payload,.iov_len=sizeof(payload)};
+    struct msghdr message={.msg_iov=&iov,.msg_iovlen=1};
+    union {
+        struct cmsghdr alignment;
+        unsigned char bytes[CMSG_SPACE(sizeof(int))];
+    } control={0};
+    if(fd>=0){
+        message.msg_control=control.bytes;
+        message.msg_controllen=sizeof(control.bytes);
+        struct cmsghdr *cmsg=CMSG_FIRSTHDR(&message);
+        cmsg->cmsg_level=SOL_SOCKET;
+        cmsg->cmsg_type=SCM_RIGHTS;
+        cmsg->cmsg_len=CMSG_LEN(sizeof(fd));
+        memcpy(CMSG_DATA(cmsg),&fd,sizeof(fd));
+    }
+    return sendmsg(s->video_socket,&message,MSG_NOSIGNAL)==(ssize_t)sizeof(payload);
+}
+
+static int receive_video_event(struct sl101_stream *s){
+    uint32_t payload[2];
+    ssize_t size=recv(s->video_socket,payload,sizeof(payload),MSG_TRUNC);
+    if(size<0&&(errno==EINTR||errno==EAGAIN||errno==EWOULDBLOCK))return 1;
+    if(size!=(ssize_t)sizeof(payload))return 0;
+    unsigned frame=le32toh(payload[1]);
+    switch(le32toh(payload[0])){
+    case VIDEO_FRAME_CALLBACK:
+        if(s->done||frame!=s->awaiting_frame)return 0;
+        s->done=1;
+        s->callbacks++;
+        return 1;
+    case VIDEO_BUFFER_RELEASE:
+        for(unsigned i=0;i<MAX_STREAM_BUFS;i++){
+            struct stream_bo *slot=&s->slots[i];
+            if(slot->inuse&&slot->frame==frame){
+                release_slot(slot);
+                return 1;
+            }
+        }
+        return 0;
+    default:
+        return 0;
+    }
+}
+
+static int pump_video(struct sl101_stream *s,unsigned *flag,unsigned limit){
+    for(unsigned i=0;i<limit;i++){
+        if(flag&&*flag)return 1;
+        struct pollfd event={s->video_socket,POLLIN,0};
+        int ready=poll(&event,1,60);
+        if(ready<0&&errno!=EINTR)return 0;
+        if(ready>0){
+            if(event.revents&POLLIN){
+                if(!receive_video_event(s))return 0;
+            }else if(event.revents&(POLLERR|POLLHUP|POLLNVAL))return 0;
+        }
+    }
+    return !flag||*flag;
+}
+
 static int pump(struct sl101_stream *s,unsigned *flag,unsigned limit){
+    if(s->video_socket>=0)return pump_video(s,flag,limit);
     for(unsigned i=0;i<limit;i++){
         if(flag&&*flag)return 1;
         if(s->closed)return 0;
@@ -111,6 +216,16 @@ static int pump(struct sl101_stream *s,unsigned *flag,unsigned limit){
 struct sl101_stream *sl101_stream_open(void){
     struct sl101_stream *s=calloc(1,sizeof(*s));
     if(!s)return NULL;
+    s->video_socket=-1;
+    int connected=connect_video(s);
+    if(connected<0){
+        puts("WAYLAND_EMBEDDED_VIDEO_SOCKET_FAILED");
+        goto fail;
+    }
+    if(connected){
+        puts("WAYLAND_STREAM_READY embedded_dmabuf=1");
+        return s;
+    }
     s->display=wl_display_connect(NULL);
     if(!s->display)goto fail;
     s->registry=wl_display_get_registry(s->display);
@@ -140,21 +255,37 @@ static struct stream_bo *free_slot(struct sl101_stream *s){
 }
 int sl101_stream_submit(struct sl101_stream *s,struct gbm_surface *surface,
                         struct gbm_bo *bo,int fd,unsigned frame){
-    if(!s||s->closed||!bo||fd<0)return 0;
+    if(!s||s->closed||!bo||fd<0)goto reject;
     struct stream_bo *slot=free_slot(s);
     for(unsigned i=0;!slot&&i<20;i++){
-        if(!pump(s,NULL,1))return 0;
+        if(!pump(s,NULL,1))goto reject;
         slot=free_slot(s);
     }
-    if(!slot){puts("WAYLAND_BACKPRESSURE slots=full");return 0;}
+    if(!slot){puts("WAYLAND_BACKPRESSURE slots=full");goto reject;}
     uint64_t mod=gbm_bo_get_modifier(bo);
     uint32_t fourcc=gbm_bo_get_format(bo);
     if(fourcc!=0x34325258U||mod!=0){
-        puts("WAYLAND_INVALID_OUTPUT expected=XR24-LINEAR");return 0;
+        puts("WAYLAND_INVALID_OUTPUT expected=XR24-LINEAR");goto reject;
+    }
+    if(s->video_socket>=0){
+        if(!frame||!send_video(s,fd,frame,gbm_bo_get_width(bo),
+                               gbm_bo_get_height(bo),gbm_bo_get_stride(bo))){
+            puts("WAYLAND_EMBEDDED_VIDEO_SEND_FAILED");
+            goto reject;
+        }
+        *slot=(struct stream_bo){
+            .parent=s,.surface=surface,.bo=bo,.inuse=1,.frame=frame,
+        };
+        s->awaiting_frame=frame;
+        s->done=0;
+        s->submitted++;
+        if(pump(s,&s->done,35))return 1;
+        printf("WAYLAND_FRAME_TIMEOUT seq=%u\n",frame);
+        return 0;
     }
     struct zwp_linux_buffer_params_v1 *params=
         zwp_linux_dmabuf_v1_create_params(s->dma);
-    if(!params)return 0;
+    if(!params)goto reject;
     zwp_linux_buffer_params_v1_add(params,fd,0,0,gbm_bo_get_stride(bo),
                                    (uint32_t)(mod>>32),(uint32_t)mod);
     /* Version >=3 supports immediate create, without a round-trip per frame.
@@ -162,7 +293,7 @@ int sl101_stream_submit(struct sl101_stream *s,struct gbm_surface *surface,
     struct wl_buffer *buffer=zwp_linux_buffer_params_v1_create_immed(
         params,gbm_bo_get_width(bo),gbm_bo_get_height(bo),fourcc,0);
     zwp_linux_buffer_params_v1_destroy(params);
-    if(!buffer)return 0;
+    if(!buffer)goto reject;
     slot->parent=s;
     slot->surface=surface;
     slot->bo=bo;
@@ -185,10 +316,16 @@ int sl101_stream_submit(struct sl101_stream *s,struct gbm_surface *surface,
     /* Never destroy the current buffer: a future replacement commit or
      * final detach must trigger wl_buffer.release before releasing its BO. */
     return 1;
+reject:
+    if(bo)gbm_surface_release_buffer(surface,bo);
+    return 0;
 }
 int sl101_stream_close(struct sl101_stream *s){
     if(!s)return 1;
     int clean=1;
+    if(s->video_socket>=0&&s->submitted){
+        if(!send_video(s,-1,0,0,0,0))clean=0;
+    }
     if(s->surface){
         wl_surface_attach(s->surface,NULL,0,0);
         wl_surface_commit(s->surface);
@@ -223,6 +360,7 @@ int sl101_stream_close(struct sl101_stream *s){
     if(s->compositor)wl_compositor_destroy(s->compositor);
     if(s->registry)wl_registry_destroy(s->registry);
     if(s->display)wl_display_disconnect(s->display);
+    if(s->video_socket>=0)close(s->video_socket);
     free(s);
     return clean;
 }

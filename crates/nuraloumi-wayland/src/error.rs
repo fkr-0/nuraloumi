@@ -32,10 +32,10 @@ impl fmt::Display for BackendError {
             Self::UnknownSurface(id) => write!(f, "unknown NuraLoumi surface id {id}"),
             Self::SurfaceClosed(id) => write!(f, "surface {id} was closed by the compositor"),
             Self::SurfaceNotConfigured(id) => {
-                write!(f, "surface {id} has not received a layer-shell configure")
+                write!(f, "surface {id} has not received a Wayland configure")
             }
             Self::InvalidSurfaceConfig(message) => {
-                write!(f, "invalid layer-shell surface configuration: {message}")
+                write!(f, "invalid Wayland surface configuration: {message}")
             }
             Self::UnsupportedBufferScale {
                 surface_version,
@@ -46,9 +46,9 @@ impl fmt::Display for BackendError {
             ),
             Self::WouldBlock => write!(
                 f,
-                "all shm buffers are busy; wait for wl_buffer.release before presenting again"
+                "surface is busy; wait for a Wayland presentation event before presenting again"
             ),
-            Self::InvalidFrame(message) => write!(f, "invalid software frame: {message}"),
+            Self::InvalidFrame(message) => write!(f, "invalid frame: {message}"),
             Self::Allocation(error) => write!(f, "wl_shm allocation failed: {error}"),
         }
     }

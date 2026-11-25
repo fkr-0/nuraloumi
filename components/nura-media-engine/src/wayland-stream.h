@@ -7,7 +7,7 @@
 struct sl101_stream;
 struct sl101_stream *sl101_stream_open(void);
 /* Caller retains GBM surface and EGL context until stream_close().
- * Takes ownership of BO only after successful submission. */
+ * Takes ownership of BO on every call, including failed submissions. */
 int sl101_stream_submit(struct sl101_stream *,struct gbm_surface *,
                         struct gbm_bo *,int fd,unsigned frame);
 int sl101_stream_close(struct sl101_stream *);

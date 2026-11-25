@@ -417,6 +417,7 @@ int nura_video_render_loop(NuraVideo *handle){
         struct gbm_bo *bo=gbm_surface_lock_front_buffer(surface);
         if(!bo){puts("STREAM_GBM_LOCK_FAIL");break;}
         const int outfd=gbm_bo_get_fd(bo);
+        if(outfd<0)gbm_surface_release_buffer(surface,bo);
         if(outfd<0 || !sl101_stream_submit(stream,surface,bo,outfd,frame)){
             if(outfd>=0)close(outfd);
             puts("STREAM_WAYLAND_SUBMIT_FAIL");break;
