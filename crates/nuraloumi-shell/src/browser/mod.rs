@@ -475,6 +475,70 @@ mod tests {
         }
     }
 
+    /// Simulate an in-page WebKit link: the chrome receives no input event,
+    /// only a different snapshot on its next bounded IPC refresh.
+    struct ExternalLinkRpc {
+        phase: usize,
+    }
+
+    impl BrowserRpc for ExternalLinkRpc {
+        fn request(&mut self, cmd: &str, _argument: Option<&str>) -> Result<Value, String> {
+            let (uri, title, loading, back) = match self.phase {
+                0 => ("https://example.org/one", "First", false, false),
+                1 => ("https://example.org/two", "Second", true, true),
+                _ => ("https://example.org/two", "Second", false, true),
+            };
+            match cmd {
+                "uri" => Ok(serde_json::json!({
+                    "uri": uri, "title": title, "is_loading": loading,
+                    "can_go_back": back, "can_go_forward": false,
+                    "bookmarked": false
+                })),
+                "tabs" => Ok(serde_json::json!({
+                    "active": 0,
+                    "tabs": [{"uri": uri, "title": title, "loading": loading},
+                             {"uri": "https://example.org/other", "title": "Other", "loading": false}]
+                })),
+                "bookmarks" => Ok(serde_json::json!({
+                    "offset": 0, "total": 0, "entries": []
+                })),
+                _ => Err("unexpected external-link mock command".into()),
+            }
+        }
+    }
+
+    #[test]
+    fn external_webkit_link_refreshes_address_tabs_and_history_without_chrome_input() {
+        let mut ui = BrowserUi::default();
+        let mut rpc = ExternalLinkRpc { phase: 0 };
+        ui.refresh(&mut rpc).unwrap();
+        assert_eq!(ui.address, "https://example.org/one");
+        assert!(!ui.menu().item_by_id("browser.back").unwrap().enabled);
+
+        rpc.phase = 1;
+        ui.refresh(&mut rpc).unwrap();
+        assert_eq!(ui.address, "https://example.org/two");
+        assert!(ui.menu().item_by_id("browser.back").unwrap().enabled);
+        assert!(ui.menu().item_by_id("browser.stop").unwrap().enabled);
+        assert!(!ui.menu().item_by_id("browser.reload").unwrap().enabled);
+
+        rpc.phase = 2;
+        ui.refresh(&mut rpc).unwrap();
+        assert_eq!(ui.tabs.tabs[0].title, "Second");
+        assert!(!ui.menu().item_by_id("browser.stop").unwrap().enabled);
+        assert!(ui.menu().item_by_id("browser.reload").unwrap().enabled);
+        assert!(ui.menu().item_by_id("browser.tab.1").unwrap().enabled);
+
+        ui.focus_address();
+        ui.address.clear();
+        ui.text_input("example.net/draft");
+        rpc.phase = 0;
+        ui.refresh(&mut rpc).unwrap();
+        assert_eq!(ui.address, "example.net/draft");
+        ui.cancel_address();
+        assert_eq!(ui.address, "https://example.org/one");
+    }
+
     #[test]
     fn fixture_has_real_menu_actions_and_horizontal_tabs() {
         let ui = BrowserUi::fixture();

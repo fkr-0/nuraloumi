@@ -27,6 +27,23 @@ defined and regression-checked explicitly.
 | `cargo clippy -p nuraloumi-shell --bin nuraloumi-browser -- -D warnings` | PASS |
 | `rustfmt --check crates/nuraloumi-shell/src/bin/browser.rs` | PASS |
 
+## Independent model transition regression
+
+The browser chrome now has a deterministic fake-RPC sequence covering an
+external WebKit link with no chrome input: initial page, loading next page,
+finished next page, updated address/title/Back/Stop/Reload actions and a
+second tab. It also verifies that a user-typed draft remains intact across a
+subsequent background refresh and that Escape restores the current page URI.
+This checks the model update seam; it does not simulate Wayland events or prove
+native WebKit pixel delivery.
+
+Additional executed checks after adding this regression:
+
+- `cargo test -p nuraloumi-shell browser::`: **PASS, 8/8 browser library tests**.
+- `cargo test -p nuraloumi-shell --test browser_supervisor_lifecycle`: **PASS, 6/6**.
+- `cargo clippy -p nuraloumi-shell --lib --bin nuraloumi-browser -- -D warnings`: **PASS**.
+- `rustfmt --check crates/nuraloumi-shell/src/browser/mod.rs`: **PASS**.
+
 ## Qualification boundary
 
 This is a **host-only UI correctness fix**, not a WPE render, GPU/FPS,
