@@ -16,7 +16,10 @@ bookmarks sets `bookmarks_open` before refresh; that refresh retrieves and
 validates the actual list. Paging also refreshes the list; hiding and later
 reopening it never relies on a previously cached list for the first display.
 Bounds and offset validation remain mandatory whenever bookmark rows are
-visible. A visible list still receives all three IPC queries on each poll.
+visible. Failed expansion restores the collapsed state so cached rows cannot
+masquerade as fresh; failed paging restores the previous page to keep its
+cached offset consistent. A visible list still receives all three IPC queries
+on each poll.
 
 ## Deterministic request-count regression
 
@@ -39,9 +42,10 @@ latency, power or WayVNC performance data. Poll wakeups remain unchanged.
 
 ## Qualification boundary
 
-Host tests cover the hidden/open/hide/reopen transition, existing bookmark
-paging and bounds, external WebKit navigation, browser binary behavior, scene
-layout and supervisor lifecycle. Native ARMv7/WebKit rendering, WayVNC pixels,
-touch, sustained navigation, RSS, temperature and crash/restart recovery remain
+Host tests cover the hidden/open/hide/reopen transition, failed expansion and
+paging rollback, existing bookmark bounds, external WebKit navigation, browser
+binary behavior, scene layout and supervisor lifecycle. Native ARMv7/WebKit
+rendering, WayVNC pixels, touch, sustained navigation, RSS, temperature and
+crash/restart recovery remain
 physical qualification steps after the pinned runtime closure is eligible.
 No release or deployment decision follows from this host optimization alone.

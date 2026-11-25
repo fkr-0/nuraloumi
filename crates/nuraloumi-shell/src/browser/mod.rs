@@ -279,7 +279,12 @@ impl BrowserUi {
             "browser.bookmark.toggle" => self.command(rpc, "bookmark-toggle", None),
             "browser.bookmark.open" => {
                 self.bookmarks_open = true;
-                self.refresh(rpc)
+                let result = self.refresh(rpc);
+                if result.is_err() {
+                    // Never reveal previously cached rows if reopening fails.
+                    self.bookmarks_open = false;
+                }
+                result
             }
             "browser.bookmark.hide" => {
                 self.bookmarks_open = false;
@@ -287,8 +292,14 @@ impl BrowserUi {
             }
             "browser.bookmark.goto" => self.command(rpc, "open", Some(&payload)),
             "browser.bookmark.page" => {
+                let previous = self.bookmark_page;
                 self.bookmark_page = payload.parse::<usize>().unwrap_or(0).min(7);
-                self.refresh(rpc)
+                let result = self.refresh(rpc);
+                if result.is_err() {
+                    // Keep the visible cached rows paired with their page.
+                    self.bookmark_page = previous;
+                }
+                result
             }
             _ => Ok(()),
         };
@@ -637,6 +648,51 @@ mod tests {
         )
         .unwrap();
         assert_eq!((rpc.pages, rpc.tabs, rpc.bookmarks), (130, 130, 2));
+    }
+
+    #[test]
+    fn bookmark_fetch_failure_does_not_expose_stale_rows_or_wrong_page() {
+        struct FailingBookmarkRpc;
+        impl BrowserRpc for FailingBookmarkRpc {
+            fn request(&mut self, cmd: &str, argument: Option<&str>) -> Result<Value, String> {
+                if cmd == "bookmarks" {
+                    return Err("Bookmark storage unavailable".into());
+                }
+                let mut fake = FakeRpc;
+                fake.request(cmd, argument)
+            }
+        }
+
+        let mut ui = BrowserUi::default();
+        ui.refresh(&mut FailingBookmarkRpc).unwrap();
+        assert!(ui
+            .activate(
+                MenuAction::Custom {
+                    kind: "browser.bookmark.open".into(),
+                    payload: String::new(),
+                },
+                &mut FailingBookmarkRpc,
+            )
+            .is_err());
+        assert!(!ui.bookmarks_open);
+        assert!(ui.menu().item_by_id("browser.bookmark.0").is_none());
+        assert_eq!(ui.status, "Bookmark storage unavailable");
+
+        ui.bookmarks_open = true;
+        ui.bookmark_page = 1;
+        ui.refresh(&mut FakeRpc).unwrap();
+        assert_eq!(ui.bookmarks.offset, 8);
+        assert!(ui
+            .activate(
+                MenuAction::Custom {
+                    kind: "browser.bookmark.page".into(),
+                    payload: "2".into(),
+                },
+                &mut FailingBookmarkRpc,
+            )
+            .is_err());
+        assert_eq!(ui.bookmark_page, 1);
+        assert_eq!(ui.bookmarks.offset, 8);
     }
 
     #[test]
