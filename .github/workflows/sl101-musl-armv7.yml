@@ -45,6 +45,8 @@ on:
       - scripts/test_native_packages_ci.py
       - scripts/verify_nurabrowser_runtime.py
       - scripts/test_verify_nurabrowser_runtime.py
+      - scripts/audit_nurabrowser_wpe_candidate.py
+      - scripts/test_audit_nurabrowser_wpe_candidate.py
       - scripts/verify-ci-artifact.py
       - scripts/test_verify_ci_artifact.py
       - packaging/alpine/**
@@ -102,6 +104,7 @@ jobs:
           python3 -m unittest scripts/test_native_packages_ci.py -v
           python3 -m unittest scripts/test_verify_ci_artifact.py -v
           python3 -m unittest scripts/test_verify_nurabrowser_runtime.py -v
+          python3 -m unittest scripts/test_audit_nurabrowser_wpe_candidate.py -v
           python3 -m unittest scripts/test_verify_sl101_video_bundle.py -v
           python3 -m unittest scripts/test_verify_packaged_sl101_video.py -v
 
