@@ -23,13 +23,45 @@ apk add --no-cache \
   libgcrypt-dev libsoup3-dev libtasn1-dev libxkbcommon-dev libxml2-dev libxslt-dev hyphen-dev \
   libpng-dev sqlite-dev libwebp-dev zlib-dev freetype-dev \
   json-glib-dev wayland-dev wayland-protocols mesa-dev libdrm-dev \
-  libseccomp-dev bubblewrap xdg-dbus-proxy
+  gettext-dev libseccomp-dev bubblewrap xdg-dbus-proxy
 
 mkdir -p /out/src /out/build /out/stage
 printf '%s  %s\n' \
   f3284e19e47fcb5ac8c63c2e1c113dbd65b2423eb8a545f5b345707829004f56 \
   /work/target/wpe-source/wpewebkit-2.54.2.tar.xz | sha256sum -c -
 tar -xJf /work/target/wpe-source/wpewebkit-2.54.2.tar.xz -C /out/src
+
+# WPE 2.54.2 uses DRM_FORMAT_XRGB8888 in the WPEPlatform Wayland DMA-BUF
+# backing-store path even when USE_LIBDRM=OFF, but this translation unit does
+# not include the UAPI fourcc definitions in that configuration. Keep libdrm
+# disabled for the target runtime and make the compile-time dependency explicit.
+python3 - <<'PY'
+from pathlib import Path
+
+source = Path("/out/src/wpewebkit-2.54.2/Source/WebKit/UIProcess/wpe/AcceleratedBackingStore.cpp")
+text = source.read_text()
+needle = '#elif USE(LIBDRM)\n#include <drm_fourcc.h>\n'
+replacement = '#else\n#include <libdrm/drm_fourcc.h>\n'
+if replacement not in text:
+    if needle not in text:
+        raise SystemExit(f"unexpected WPE 2.54.2 source layout: {source}")
+    source.write_text(text.replace(needle, replacement, 1))
+
+# Link the Alpine gettext and Bubblewrap dependencies on the final shared target.
+cmake = source.parents[2] / "CMakeLists.txt"
+text = cmake.read_text()
+needle = "WEBKIT_FRAMEWORK(WebKit)\n"
+link = (
+    "target_link_libraries(WebKit PRIVATE intl)\n"
+    "if (ENABLE_BUBBLEWRAP_SANDBOX)\n"
+    "    target_link_libraries(WebKit PRIVATE Libseccomp::Libseccomp)\n"
+    "endif ()\n"
+)
+if link not in text:
+    if text.count(needle) != 1:
+        raise SystemExit(f"unexpected WPE 2.54.2 target layout: {cmake}")
+    cmake.write_text(text.replace(needle, needle + link, 1))
+PY
 
 # Tegra2: ARMv7 hardfloat, VFPv3-D16, no NEON or hardware division.
 cpu_flags='-O2 -mcpu=cortex-a9 -mfpu=vfpv3-d16 -mfloat-abi=hard -mno-unaligned-access'
