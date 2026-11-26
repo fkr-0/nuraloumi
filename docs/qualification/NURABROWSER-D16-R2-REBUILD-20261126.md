@@ -233,6 +233,41 @@ Replace the example producer/root paths with the independently verified WPE
 artifact roots. The assembler refuses missing/tampered inputs, always marks
 its output UNQUALIFIED, and never writes into any source tree.
 
+## Direct WebKit executable startup under the original crypto root (2026-11-26)
+
+The previous strict `RTLD_NOW` test of `libWPEWebKit` by late `dlopen`
+reported an `initial-exec TLS resolves to dynamic definition` error.
+That fixture is not equivalent to a normal executable launch. To distinguish
+them, the exact pinned ARMv7/musl producer's `nurabrowser-core` was
+executed with its normal dynamic dependencies in the private graphics-overlay
+root, without any host network or Nura device process:
+
+```sh
+docker run --rm --pull never --platform linux/arm/v7 --network none \
+  --read-only --cap-drop ALL --cap-add SYS_CHROOT \
+  --security-opt no-new-privileges \
+  --mount type=bind,src=/tmp/nura-mesa26-d16-qualification-YmOnBgzl/root-wayland26,dst=/private-root,readonly \
+  nuraloumi-crypto-d16:alpine322-r2 sh -c \
+  'chroot /private-root /usr/libexec/nuraloumi/browser/nurabrowser-core --help'
+```
+
+**PASS (exit 0):** WebKit's original native executable reached its own
+GOption help output and identified `NuraBrowser * native WPE WebKit 2.54+`
+with `--url`, `--platform`, `--no-control`, and `--exit-after-ms`
+options. The full initial `DT_NEEDED` loader/TLS startup needed to reach
+that code path succeeded, notwithstanding the deliberately different
+late-`dlopen` TLS test. This is **not** a successful page render, network
+TLS handshake, GIO plugin resolution or Web/Network auxiliary process start.
+
+A separate network-disabled, tmpfs-state `--url=about:blank`,
+headless bounded attempt did **not** complete in the intended
+five-second headless window under ARMv7 linux-user QEMU; its transient
+diagnostic container was stopped explicitly and no page-load PASS was
+recorded. Do not infer native Nura behavior from this slow QEMU outcome.
+Repeat navigation, plugin/TLS tests and bounded exit in the **combined**
+D16 crypto+graphics candidate, then on a separately supervised device
+canary.
+
 ## Next qualification steps (not yet PASS)
 
 1. Finish Nettle/Hogweed, libgcrypt, and OpenSSL r2 compilation. Validate the
