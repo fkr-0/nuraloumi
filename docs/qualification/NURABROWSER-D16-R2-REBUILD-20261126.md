@@ -1,6 +1,6 @@
 # WPE ARMv7/musl D16 crypto rebuild, Alpine 3.22 OpenSSL r2
 
-Date: 2026-11-26. Status: **BUILD IN PROGRESS / UNQUALIFIED**.
+Date: 2026-11-26. Status: **GRAPHICS LOADER/DLOPEN PREFLIGHT PASS; CRYPTO BUILD IN PROGRESS; RUNTIME UNQUALIFIED**.
 
 ## Original producer stays pinned
 
@@ -98,10 +98,82 @@ dependency name. Therefore **any runtime loading this packaged EGL stack
 necessarily loads the NEON Gallium object**. A D16-qualified Mesa EGL/Gallium
 replacement or a proved EGL-free rendering backend is required; removing
 only `pipe_kmsro.so` cannot qualify the current EGL closure.
-The fresh-root assembler now independently writes all remaining
+The fresh-root assembler independently writes all remaining
 `blocking_neon_elf_attributes` into `candidate/PROVENANCE.json`, with a
 synthetic negative-control test. Its report is evidence, **never** a promotion
 gate or claim that other decoded/JIT instructions are safe.
+
+## Mesa 26.2.4 / LLVM 23 / Wayland 0.26.0 private closure qualification
+
+A private Mesa 26.2.4 software-rendering D16 build on Nura was the
+historically successful **nested** Wayland WPE pixel candidate, not the
+production display release. Eight exact ELF objects were transferred read-only
+from 192.168.23.106 into **host-private scratch staging**. Their SHA256 pins
+are now explicit in `GRAPHICS_FROM_NURA` in the assembler:
+
+- Private `mesa-d16-gnu-tls-candidate-20261124`: `libEGL.so.1.0.0`,
+  `libGLESv2.so.2.0.0`, `libgbm.so.1.0.0`,
+  `libgallium-26.2.4.so` (Gallium SHA256
+  `09e03bea18be4120a6d22dde9887e4a452dcd488df6933c5cf46a4c15ec8e87b`).
+- Existing Nura `/usr/lib`: `libLLVM.so.23.1` (SHA256
+  `99e1add0a47799197eef0d5a70c714310d2301687d69670525f51c19976ac255`),
+  `libGLESv1_CM.so.1.1.0`, `dri/libdril_dri.so`, and
+  `libwayland-client.so.0.26.0` (SHA256
+  `4b8fa24d5b31b3be7444f3683947f71f8d68823ea509184dd5e4958429f6c3a3`).
+
+**8/8** SHA256 checks and D16/hardfloat `readelf -A` checks PASS;
+all report VFPv3-D16, hardfloat, no NEON ELF attribute. The eight-file
+graphic-overlay option in `scripts/assemble_nurabrowser_alpine_d16_root.py`
+rejects missing, tampered or NEON-attributed sources **before** copying the
+root. It preserves four Mesa SONAME aliases; changes the Wayland client alias
+from old Alpine `0.23.1` to Nura `0.26.0` under its truthful versioned
+filename; installs matching Gallium26, LLVM23 and the DRI shim; and removes
+only in a **fresh copied root** the Mesa25 Gallium, incompatible
+`gallium-pipe` and old `gbm/dri_gbm.so` plugins. The WPE producer
+executables and original Alpine base root remain immutable.
+
+Actual copied-root results (not a mock): graphics overlay **8/8 installed**;
+all regular ELF objects rescanned; the original two NEON graphics objects
+are gone, leaving precisely four original crypto blockers
+(`libcrypto.so.3`, `libnettle.so.8.11`, `libgcrypt.so.20.4.3`,
+`ossl-modules/legacy.so`). There is no remaining binary reference to
+`libgallium-25.1.9.so` in the copied root.
+
+The first private musl loader test exposed two missing Wayland symbols
+(`wl_display_dispatch_queue_timeout` and `wl_fixes_interface`) because
+Mesa26 EGL expects Nura's newer Wayland. The Alpine 3.22 client
+`libwayland-client.so.0.23.1` exports neither; target
+`libwayland-client.so.0.26.0` exports both. After the pinned replacement,
+`/lib/ld-musl-armhf.so.1 --list /usr/lib/libEGL.so.1` resolved EGL,
+Gallium26, LLVM23 and their transitive closure with **no missing symbol**.
+
+Stricter **actual ARMv7/musl `dlopen(RTLD_NOW|RTLD_LOCAL)` under QEMU,
+isolated chroot, network disabled, read-only mount**:
+`scripts/fixtures/nurabrowser_d16_dlopen_probe.c` compiled with
+`-mcpu=cortex-a9 -mfpu=vfpv3-d16 -mfloat-abi=hard` (probe SHA256
+`f6f8fef994e94fd19de9f74639c920c11258b821f00bffd36f2dcbee428d1772`).
+EGL, GLESv1, GLESv2, GBM, Gallium26, LLVM23, Wayland-client and DRI
+**8/8 DLOPEN_PASS**, exit 0. A/B negative controls:
+- same private Mesa26 root **without** new Wayland: EGL `DLOPEN_FAIL`
+  for missing `wl_display_dispatch_queue_timeout`, exit 1;
+- upgraded root with a nonexistent SONAME: `DLOPEN_FAIL`
+  `No such file or directory`, exit 1.
+
+The three original WPE native binaries also all pass private-loader
+dependency listing in the Mesa26/Wayland26 root, but the overall probe reports
+`BLOCKED`: exactly six old-crypto D16/NEON attribute issues across
+libcrypto, libnettle and libgcrypt; the matching D16 r2 crypto compilation is
+still ongoing. A standalone `dlopen` of `libWPEWebKit-2.0.so.1.11.5`
+hit a musl `initial-exec TLS resolves to dynamic definition` relocation
+failure. That test is **not equivalent** to loading WebKit as an executable's
+initial `DT_NEEDED` dependency; process startup, TLS and WebKit plugins
+remain explicitly unqualified.
+
+These eight binary artifacts have recorded **device SHA provenance**, not
+a complete independently rebuilt source recipe. D16 attributes and QEMU
+`dlopen` are valuable preflights, not a proof of all ARM/Thumb/JIT opcodes,
+GPU/Wayland pixels, seccomp isolation or production correctness. **Do not
+install or promote on Nura** based on these results alone.
 
 ## Reproducible commands (no tablet access)
 
@@ -129,17 +201,42 @@ process writes compiler logs into the new overlay directory and, if it passes,
 five replacement SONAMEs, the OpenSSL legacy module, a SHA256 inventory,
 source manifest, toolchain ledger and `CANDIDATE-ONLY.txt`.
 
+For the separate **binary-provenance** graphics overlay, with an SSH alias
+`sl101` pointing to the authorized Nura device, the new guarded fetch helper
+uses SCP read-only and refuses an existing destination:
+
+    sh scripts/fetch_nurabrowser_wpe_d16_graphics.sh "$SCRATCH/graphics"
+
+This transfers eight exact pinned ELF files and reruns the per-object SHA256
+and D16/hardfloat preflight. The initial manual read-only transfers and
+preflight succeeded; the new helper's syntax, existing-destination refusal,
+and verifier were checked, but a second complete 139-MiB remote transfer was
+not repeated. An independently reproducible **source build** of Mesa26/LLVM23
+is still a separate qualification requirement. Once the canonical crypto
+build succeeds, assemble the **combined** candidate only into a fresh output:
+
+    python3 scripts/assemble_nurabrowser_alpine_d16_root.py \
+      "$SCRATCH/runtime-root-graphics" "$SCRATCH/producer" \
+      "$SCRATCH/overlay" "$SCRATCH/combined-root" \
+      --graphics-overlay "$SCRATCH/graphics"
+
+Replace the example producer/root paths with the independently verified WPE
+artifact roots. The assembler refuses missing/tampered inputs, always marks
+its output UNQUALIFIED, and never writes into any source tree.
+
 ## Next qualification steps (not yet PASS)
 
 1. Finish Nettle/Hogweed, libgcrypt, and OpenSSL r2 compilation. Validate the
    **actual** five SONAMEs plus legacy module, source provenance and decoded
    D16 ISA, with no NEON or high-register instructions.
-2. Use `scripts/assemble_nurabrowser_alpine_d16_root.py` to copy only into a
-   nonexisting root. It independently matches the four WPE producer bytes,
-   verifies every crypto replacement SHA256 and preserves existing SONAME
-   aliases while replacing their real target files.
-3. Rerun the chroot-private musl loader probe for all three WPE processes.
-   Test separate GIO/graphics/plugins, `dlopen` and Mesa/LLVM provenance.
+2. Use `scripts/assemble_nurabrowser_alpine_d16_root.py` with the optional
+   `--graphics-overlay` containing the **eight pinned** Mesa/LLVM/Wayland
+   files, into a nonexisting root. It matches all four WPE producer bytes,
+   verifies crypto and graphics SHA256, and preserves/updates SONAME aliases.
+3. Rerun the chroot-private musl loader probe for all three WPE processes,
+   then the 8/8 strict graphics RTLD_NOW test in the **combined** root.
+   Test GIO/graphics/dlopen plugins and executable-initial WebKit TLS;
+   independently reproduce the Mesa26/LLVM23 source builds.
 4. Independently prove WebProcess and NetworkProcess Seccomp, mount, socket,
    D-Bus negative controls on target; only then supervised pixels/navigation,
    touch, 30-minute soak, rollback and reviewed `runtime.json`.

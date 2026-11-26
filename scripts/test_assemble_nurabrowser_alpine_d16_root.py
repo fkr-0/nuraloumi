@@ -94,6 +94,106 @@ class AlpineRootD16AssemblyTests(unittest.TestCase):
                 assemble(root, producer, overlay, output)
             self.assertFalse(output.exists())
 
+    def graphics_fixture(self, root, base):
+        from scripts.assemble_nurabrowser_alpine_d16_root import (
+            GRAPHICS_ALIASES, GRAPHICS_FROM_NURA,
+        )
+        import scripts.assemble_nurabrowser_alpine_d16_root as module
+
+        library_dir = root / "usr/lib"
+        for name, soname in GRAPHICS_ALIASES.items():
+            target = library_dir / name
+            target.write_bytes(b"old mesa")
+            (library_dir / soname).symlink_to(target.name)
+        (library_dir / "libgallium-25.1.9.so").write_bytes(b"old gallium")
+        (library_dir / "libwayland-client.so.0.23.1").write_bytes(b"old wayland")
+        (library_dir / "libwayland-client.so.0").symlink_to(
+            "libwayland-client.so.0.23.1")
+        (library_dir / "gbm").mkdir()
+        (library_dir / "gbm/dri_gbm.so").write_bytes(b"old plugin")
+        (library_dir / "dri").mkdir()
+        (library_dir / "dri/libdril_dri.so").write_bytes(b"old dri")
+        (library_dir / "gallium-pipe").mkdir()
+        (library_dir / "gallium-pipe/pipe_kmsro.so").write_bytes(
+            b"\x7fELF old neon plugin")
+        graphics = base / "graphics"
+        graphics.mkdir()
+        pinned = {}
+        for name in GRAPHICS_FROM_NURA:
+            candidate = graphics / name
+            candidate.write_bytes(b"\x7fELF D16:" + name.encode())
+            pinned[name] = digest(candidate)
+        return graphics, patch.object(module, "GRAPHICS_FROM_NURA", pinned)
+
+    def test_pinned_mesa26_replaces_old_mesa_only_in_fresh_root(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, producer, overlay = self.fixture(base)
+            graphics, pins = self.graphics_fixture(root, base)
+            output = base / "mesa-root"
+
+            class D16Readelf:
+                stdout = ("Tag_CPU_arch: v7\\n"
+                          "Tag_FP_arch: VFPv3-D16\\n"
+                          "Tag_ABI_VFP_args: VFP registers\\n")
+
+            with pins, patch(
+                "scripts.assemble_nurabrowser_alpine_d16_root.subprocess.run",
+                return_value=D16Readelf(),
+            ):
+                result = assemble(root, producer, overlay, output,
+                                  graphics=graphics)
+            self.assertEqual(len(result["graphics_replacements"]), 8)
+            self.assertEqual(result["blocking_neon_elf_attributes"], [])
+            self.assertFalse((output / "usr/lib/libgallium-25.1.9.so").exists())
+            self.assertFalse((output / "usr/lib/gallium-pipe").exists())
+            self.assertFalse((output / "usr/lib/gbm/dri_gbm.so").exists())
+            self.assertFalse((output / "usr/lib/libwayland-client.so.0.23.1").exists())
+            self.assertEqual(
+                (output / "usr/lib/libwayland-client.so.0").readlink().name,
+                "libwayland-client.so.0.26.0")
+            self.assertTrue((output / "usr/lib/libEGL.so.1").is_symlink())
+            self.assertEqual(
+                digest(output / "usr/lib/libEGL.so.1"),
+                digest(graphics / "libEGL.so.1.0.0"))
+            self.assertEqual(
+                (root / "usr/lib/libEGL.so.1.0.0").read_bytes(), b"old mesa")
+            self.assertEqual(
+                json.loads((output / "candidate/PROVENANCE.json").read_text())
+                ["graphics_lineage"],
+                "nura-private-mesa-26.2.4-d16-llvm23-20261126")
+
+    def test_graphics_tamper_fails_before_output_created(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, producer, overlay = self.fixture(base)
+            graphics, pins = self.graphics_fixture(root, base)
+            (graphics / "libEGL.so.1.0.0").write_bytes(b"altered")
+            output = base / "must-not-exist"
+            with pins, self.assertRaisesRegex(ValueError,
+                                              "graphics SHA256 mismatch"):
+                assemble(root, producer, overlay, output, graphics=graphics)
+            self.assertFalse(output.exists())
+
+    def test_graphics_neon_attribute_fails_before_output_created(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, producer, overlay = self.fixture(base)
+            graphics, pins = self.graphics_fixture(root, base)
+            output = base / "must-not-exist"
+
+            class NeonReadelf:
+                stdout = ("Tag_FP_arch: VFPv3-D16\\n"
+                          "Tag_ABI_VFP_args: VFP registers\\n"
+                          "Tag_Advanced_SIMD_arch: NEONv1\\n")
+
+            with pins, patch(
+                "scripts.assemble_nurabrowser_alpine_d16_root.subprocess.run",
+                return_value=NeonReadelf(),
+            ), self.assertRaisesRegex(ValueError, "not proved D16"):
+                assemble(root, producer, overlay, output, graphics=graphics)
+            self.assertFalse(output.exists())
+
     def test_remaining_neon_elf_is_recorded_as_release_blocker(self):
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
