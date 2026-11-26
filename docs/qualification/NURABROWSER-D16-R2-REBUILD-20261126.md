@@ -268,6 +268,58 @@ Repeat navigation, plugin/TLS tests and bounded exit in the **combined**
 D16 crypto+graphics candidate, then on a separately supervised device
 canary.
 
+## Direct plugin RTLD_NOW closure preflight (2026-11-26)
+
+The existing isolated ARMv7/musl chroot contains a strict
+`scripts/fixtures/nurabrowser_d16_dlopen_probe.c` binary that calls
+`dlopen(RTLD_NOW | RTLD_LOCAL)` and `dlclose`, failing the command on
+any error. A network-disabled, read-only ARMv7 QEMU Docker invocation
+against the **original, not-yet-crypto-corrected** root
+`/tmp/nura-mesa26-d16-qualification-YmOnBgzl/root-wayland26`
+returned exit **0** for four separately loaded shared objects:
+
+```text
+DLOPEN_PASS /usr/lib/gio/modules/libgiognomeproxy.so
+DLOPEN_PASS /usr/lib/gio/modules/libgiolibproxy.so
+DLOPEN_PASS /usr/lib/libssl.so.3
+DLOPEN_PASS /usr/lib/ossl-modules/legacy.so
+```
+
+These GIO module names were independently identified in the live
+NetworkProcess maps. This checks their immediate **symbol-resolution
+closure**, not GIO module activation, certificate validation, a
+network TLS handshake, WebKit auxiliary-process IPC, or compatibility
+of the old NEON-attributed libcrypto on Tegra20. Repeat all four tests
+in the final combined D16 root after OpenSSL r2 completes.
+
+## Read-only loaded plugin/TLS inventory from existing Nura Canary (2026-11-26)
+
+The **already-running, unmodified** Nura canary was observed through
+`/proc/PID/maps` and host `readelf -A`, not installed or restarted.
+UI PID `14184` maps `libWPEWebKit-2.0.so.1`, ICU 76's three libraries,
+`libsoup-3.0.so.0`, `libgio-2.0.so.0`, Mesa `libEGL.so.1` and
+`libgallium-26.2.4.so`. WebProcess PID `14209` additionally maps
+`libGLESv2.so.2` and the Gallium 26.2.4 driver. NetworkProcess
+PID `14188` maps WebKit, Soup/GIO, ICU 76, **`libssl.so.3` and
+`libcrypto.so.3`**, and both GIO modules
+`modules/gio/libgiognomeproxy.so` and `libgiolibproxy.so`.
+
+`readelf -A` on these **currently loaded** files gave:
+
+| Object | FP attribute | NEON attribute | Disposition |
+| --- | --- | --- | --- |
+| Canary `libcrypto.so.3` | VFPv3 | **NEONv1** | **BLOCKED** for D16 compatibility; this is the old root, not the r2 candidate |
+| Canary GIO `libgiognomeproxy.so` | VFPv3-D16 | none | Plugin attribute preflight only |
+| Canary GIO `libgiolibproxy.so` | VFPv3-D16 | none | Plugin attribute preflight only |
+
+The same live process-status check showed UI and NetworkProcess each
+`NoNewPrivs=1, Seccomp=0, Seccomp_filters=0`, while WebProcess had
+`NoNewPrivs=1, Seccomp=2, Seccomp_filters=1`. These observations prove
+which runtime objects are mapped, **not** that a TLS handshake, HTTPS
+navigation, D-Bus proxy policy, or the new complete D16 root passed.
+The separate native ARMv7 sandbox fixture results are recorded in
+`NURABROWSER-NETWORK-SANDBOX-NEGATIVE-20261125.md`.
+
 ## Next qualification steps (not yet PASS)
 
 1. Finish Nettle/Hogweed, libgcrypt, and OpenSSL r2 compilation. Validate the
