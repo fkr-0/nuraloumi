@@ -175,6 +175,15 @@ a complete independently rebuilt source recipe. D16 attributes and QEMU
 GPU/Wayland pixels, seccomp isolation or production correctness. **Do not
 install or promote on Nura** based on these results alone.
 
+A separate **read-only live Canary process baseline** on Nura is recorded in
+`NURABROWSER-LIVE-CANARY-SANDBOX-BASELINE-20261126.md`. It confirms the
+existing WebProcess has one loaded Seccomp filter and isolated namespaces,
+while the existing NetworkProcess has **Seccomp=0**, shares the UI namespaces,
+and directly sees the session D-Bus address. It also records the present
+`/run/sl101-desktop-user` sockets versus the desired conventional
+`/run/user/10000` state. These are release blockers, not evidence that the
+new combined root is running natively.
+
 ## Reproducible commands (no tablet access)
 
 The repo scripts perform all URL selection and checksum checks. Run with a
