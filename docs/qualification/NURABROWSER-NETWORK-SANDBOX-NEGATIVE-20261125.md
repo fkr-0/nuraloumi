@@ -59,6 +59,86 @@ filter, shared namespace, broad runtime bind and absent process evidence.
 It does not impersonate a real syscall denial, D-Bus request, network denial,
 mount-isolation test or successful page navigation.
 
+## 2026-11-26 native ARMv7 Bubblewrap policy fixture (PASS, not a NetworkProcess launch)
+
+A new bounded negative-control program, `scripts/fixtures/nurabrowser_network_policy_probe.c`,
+was built **on the ARMv7/musl toolchain** with
+`-mcpu=cortex-a9 -mfpu=vfpv3-d16 -mfloat-abi=hard -mno-unaligned-access`
+and `-Wall -Wextra -Werror`. The fixture's single-byte allowed file is
+`scripts/fixtures/nurabrowser_policy_allowed.txt` (`Q\n`).
+The final executable SHA-256 was
+`3797bc409fb408b052a5cdaa0cacd23e69905365340de381a2e1af85df880080`;
+the staged binary on native `sl101` had the identical hash. The allowed
+file SHA-256 was
+`282f82a2d55dbfe663906eecf403ead5ecad4a750d37f8a09d16d99c2283cd61`.
+The earlier QEMU linux-user trial gave `seccomp-install: ENOSYS`, so it
+was **not** counted as a Seccomp success.
+
+The probe was copied to a fresh, unprivileged
+`/tmp/nura-network-policy-XXOFLNga` on `sl101` (ARMv7, Bubblewrap
+0.13.0, UID 10000). The following is the effective native policy used;
+the named probe and fixture files were staged first:
+
+```sh
+bwrap --die-with-parent --new-session \
+  --unshare-user --unshare-pid --unshare-uts --unshare-ipc \
+  --dir /usr --ro-bind /usr /usr \
+  --symlink usr/bin /bin --symlink usr/lib /lib \
+  --dev /dev --proc /proc --tmpfs /tmp \
+  --dir /fixture \
+  --ro-bind /tmp/nura-network-policy-XXOFLNga/nurabrowser_policy_allowed.txt /fixture/allowed.txt \
+  --ro-bind /tmp/nura-network-policy-XXOFLNga/network-policy-probe /probe \
+  --dir /run --dir /run/user --dir /run/user/10000 \
+  --setenv XDG_RUNTIME_DIR /run/user/10000 \
+  --unsetenv DBUS_SESSION_BUS_ADDRESS --unsetenv WAYLAND_DISPLAY \
+  /probe /fixture/allowed.txt /etc/passwd /run/sl101-desktop-user/wayland-1
+```
+
+Native exit **0** with:
+
+```text
+MOUNT_POLICY_PASS allowed-file=read forbidden-host-file=ENOENT
+SOCKET_POLICY_PASS local-unix=connect inet=create forbidden-host=ENOENT
+SECCOMP_POLICY_PASS nnp=1 mode=2 filters=0->1 getppid=EACCES getpid=allowed
+NETWORK_POLICY_FIXTURE=PASS not-a-WebKit-launch
+```
+
+The host-side control independently confirmed `/etc/passwd` exists
+and `/run/sl101-desktop-user/wayland-1` is a live Unix socket. They
+were not mounted inside the private root. The fixture read only its
+explicitly mounted `Q` file, created and connected its own AF_UNIX
+socket under private `/tmp`, and created an AF_INET socket without
+initiating outbound traffic. The hidden host file and Wayland socket
+were both absent (`ENOENT`). The conventional
+`/run/user/10000` was created **empty** inside the namespace; no
+ambient Wayland or session-bus socket was bound. The seccomp BPF filter
+uses an ARM architecture guard; after `PR_SET_NO_NEW_PRIVS` its
+`SECCOMP_SET_MODE_FILTER` operation incremented the live
+`/proc/self/status` filter count from zero to one. A deliberate
+`getppid` syscall then returned `EACCES`, while `getpid` succeeded;
+the separate `ptrace` rule returns `EPERM`.
+
+**Negative control:** repeating the same native invocation with
+`--dir /etc --ro-bind /etc/passwd /etc/passwd` added before
+`--dir /run` deliberately exposed the forbidden host file.
+The probe detected it as
+`POLICY_PROBE_FAIL forbidden-host-file-visible` and exited **1**.
+This establishes that the mount test fails on a real leak rather than
+always reporting success.
+
+**Scope boundary:** This test demonstrates real kernel-enforced
+Seccomp, a narrow mount set, and an effective local Unix socket
+denial on Nura, but is **not** an independently sandboxed
+`WPENetworkProcess`. The BPF deny-two-syscalls program is a test
+fixture, **not** a production allowlist. The `/usr` read-only bind is
+also deliberately broad for fixture execution. No WebKit IPC
+descriptor propagation, DNS/TLS connection, `xdg-dbus-proxy` policy,
+or actual auxiliary-process re-exec has yet passed. Network namespace
+is intentionally **not** unshared for this network-role fixture.
+The existing live NetworkProcess remains `Seccomp=0`, shares the
+UI's namespaces, and stays **NO-GO**. No installed service, runtime
+tree, compositor, or production browser was changed.
+
 ## Outstanding dependency before device qualification
 
 1. Source-matched D16 private runtime closure, interpreter, dlopen plugins,
