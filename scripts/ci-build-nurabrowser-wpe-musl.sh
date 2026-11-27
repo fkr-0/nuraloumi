@@ -31,8 +31,8 @@ apk add --no-cache \
   json-glib-dev wayland-dev wayland-protocols mesa-dev libdrm-dev \
   gettext-dev libseccomp-dev bubblewrap xdg-dbus-proxy
 if [ "${CI_WPE_MEDIA:-0}" = 1 ]; then
-  apk add --no-cache gstreamer-dev gst-plugins-base-dev gst-plugins-good \
-    gst-plugins-bad gst-libav gst-plugins-base
+  apk add --no-cache gstreamer-dev gst-plugins-base-dev gst-plugins-bad-dev \
+    gst-plugins-good gst-plugins-bad gst-libav gst-plugins-base
   media_video=ON
   media_audio=ON
   media_gstreamer=ON

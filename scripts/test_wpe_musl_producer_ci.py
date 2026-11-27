@@ -94,6 +94,9 @@ class WpeMuslProducerCiTests(unittest.TestCase):
         self.assertIn("media builds require a fresh isolated /out", self.builder)
         self.assertIn("media_video=ON", self.builder)
         self.assertIn("media_gstreamer=ON", self.builder)
+        # WPE 2.54.2's FindGStreamer requires MPEG-TS pkg-config files,
+        # provided by gst-plugins-bad-dev on Alpine 3.22 ARMv7.
+        self.assertIn("gst-plugins-bad-dev", self.builder)
         self.assertIn("media_video=OFF", self.builder)
         self.assertIn(
             "python3 -m unittest scripts/test_verify_nurabrowser_media_candidate.py -v",
