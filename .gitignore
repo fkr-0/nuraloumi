@@ -13,6 +13,10 @@ __pycache__/
 # Local Workspace Bridge coordination/runtime state.
 .ws-bridge/
 
+# Persistent, local-only build state and imported application data.
+# Never commit caches, recovery bundles, runtime salts or signing material.
+/local-state/
+
 # Generated Cairo qualification output; source fixtures live in code.
 tests/fixtures/render/launcher.png
 tests/fixtures/render/system.png

@@ -10,6 +10,14 @@ if [ "$#" -ne 2 ]; then
 fi
 inputs=$1
 out=$2
+build_jobs=${NURA_BUILD_JOBS:-1}
+case "$build_jobs" in
+  ''|*[!0-9]*) echo 'invalid NURA_BUILD_JOBS: expected integer 1..20' >&2; exit 2 ;;
+esac
+[ "$build_jobs" -ge 1 ] && [ "$build_jobs" -le 20 ] || {
+  echo 'invalid NURA_BUILD_JOBS: expected integer 1..20' >&2
+  exit 2
+}
 test -d "$inputs"
 test -d "$out"
 test ! -e "$out/work"
@@ -50,6 +58,7 @@ cp "$inputs/SOURCE-MANIFEST.json" "$out/SOURCE-MANIFEST.json"
 (
   printf 'target=%s\n' "$(cc -dumpmachine)"
   printf 'alpine_release=%s\n' "$(cat /etc/alpine-release)"
+  printf 'build_jobs=%s\n' "$build_jobs"
   cc --version | head -n 1
   apk info -v
 ) > "$out/BUILD-TOOLCHAIN.txt"
@@ -72,7 +81,7 @@ toolchain_triplet=$(cc -dumpmachine)
   ./configure --prefix=/usr --libdir=/usr/lib --enable-shared \
     --disable-fat --disable-assembler --disable-arm-neon \
     --disable-openssl > "$out/logs/nettle-configure.log" 2>&1
-  make -j1 > "$out/logs/nettle-build.log" 2>&1
+  make -j"$build_jobs" > "$out/logs/nettle-build.log" 2>&1
   make DESTDIR="$out/stage-nettle" install > "$out/logs/nettle-install.log" 2>&1
 )
 
@@ -84,7 +93,7 @@ toolchain_triplet=$(cc -dumpmachine)
     --prefix=/usr --libdir=/usr/lib --disable-asm \
     --disable-neon-support --disable-arm-crypto-support \
     > "$out/logs/gcrypt-configure.log" 2>&1
-  make -j1 > "$out/logs/gcrypt-build.log" 2>&1
+  make -j"$build_jobs" > "$out/logs/gcrypt-build.log" 2>&1
   make DESTDIR="$out/stage-gcrypt" install > "$out/logs/gcrypt-install.log" 2>&1
 )
 
@@ -100,7 +109,7 @@ toolchain_triplet=$(cc -dumpmachine)
     --openssldir=/etc/ssl enable-ktls shared no-asm no-zlib no-async \
     no-comp no-idea no-mdc2 no-rc5 no-ec2m no-ssl3 no-seed \
     no-weak-ssl-ciphers $CFLAGS > "$out/logs/openssl-configure.log" 2>&1
-  make -j1 > "$out/logs/openssl-build.log" 2>&1
+  make -j"$build_jobs" > "$out/logs/openssl-build.log" 2>&1
   make DESTDIR="$out/stage-openssl" install_sw \
     > "$out/logs/openssl-install.log" 2>&1
 )

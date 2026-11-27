@@ -44,6 +44,13 @@ class CryptoBuildContract(unittest.TestCase):
         self.assertIn("openssl_alpine_release=3.5.9-r2", self.text)
         self.assertIn("source_manifest_sha256=", self.text)
 
+    def test_bounded_configurable_parallel_make(self):
+        self.assertIn('build_jobs=${NURA_BUILD_JOBS:-1}', self.text)
+        self.assertIn('"$build_jobs" -le 20', self.text)
+        self.assertIn('build_jobs=%s', self.text)
+        self.assertEqual(self.text.count('make -j"$build_jobs"'), 3)
+        self.assertNotIn('make -j1', self.text)
+
     def test_crypto_abi_pairs_remain_together(self):
         for soname in ("libnettle.so.8", "libhogweed.so.6",
                        "libgcrypt.so.20", "libcrypto.so.3", "libssl.so.3"):
