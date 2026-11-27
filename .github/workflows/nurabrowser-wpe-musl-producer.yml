@@ -8,6 +8,11 @@ on:
         required: false
         type: boolean
         default: false
+      media_enabled:
+        description: 'Opt in to a fresh, UNQUALIFIED WPE GStreamer/video candidate (never resume old no-video build)'
+        required: false
+        type: boolean
+        default: false
       resume_run_id:
         description: 'Exact failed WPE producer run ID containing an unqualified build checkpoint'
         required: false
@@ -89,6 +94,7 @@ jobs:
           set -euo pipefail
           python3 -m unittest scripts/test_verify_nurabrowser_runtime.py -v
           python3 -m unittest scripts/test_wpe_musl_producer_ci.py -v
+          python3 -m unittest scripts/test_verify_nurabrowser_media_candidate.py -v
           sh scripts/ci-fetch-nurabrowser-wpe-source.sh target/wpe-source
       - name: Reject incomplete resume selection
         if: ${{ github.event_name == 'workflow_dispatch' }}
@@ -96,11 +102,16 @@ jobs:
         env:
           RESUME_RUN: ${{ inputs.resume_run_id }}
           RESUME_SHA256: ${{ inputs.resume_archive_sha256 }}
+          MEDIA_ENABLED: ${{ inputs.media_enabled && '1' || '0' }}
         run: |
           set -euo pipefail
           if [[ -n "$RESUME_RUN" && -z "$RESUME_SHA256" ]] || \
              [[ -z "$RESUME_RUN" && -n "$RESUME_SHA256" ]]; then
             echo 'Both WPE checkpoint run ID and SHA256 are required together' >&2
+            exit 2
+          fi
+          if [[ "$MEDIA_ENABLED" = 1 && -n "$RESUME_RUN" ]]; then
+            echo 'Media-enabled WPE requires a fresh build; do not resume the no-video Ninja tree' >&2
             exit 2
           fi
       - name: Validate exact same-commit resume provenance
@@ -157,6 +168,7 @@ jobs:
             docker run --rm --cidfile "$cidfile" --platform linux/arm/v7 \
               -e CI_SOURCE_SHA="$GITHUB_SHA" \
               -e CI_WPE_RESUME="${{ inputs.resume_run_id != '' && '1' || '0' }}" \
+              -e CI_WPE_MEDIA="${{ github.event_name == 'workflow_dispatch' && inputs.media_enabled && '1' || '0' }}" \
               -v "$PWD:/work:ro" \
               -v "$PWD/target/wpe-producer-candidate:/out" \
               alpine:3.22 /bin/sh /work/scripts/ci-build-nurabrowser-wpe-musl.sh \

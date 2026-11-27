@@ -14,6 +14,11 @@ test -d /work/components/nura-browser-engine
 test -d /out
 test ! -e /out/stage
 case "${CI_WPE_RESUME:-0}" in 0|1) ;; *) echo 'invalid resume mode' >&2; exit 2 ;; esac
+case "${CI_WPE_MEDIA:-0}" in 0|1) ;; *) echo 'invalid media mode' >&2; exit 2 ;; esac
+if [ "${CI_WPE_MEDIA:-0}" = 1 ] && [ "${CI_WPE_RESUME:-0}" = 1 ]; then
+  echo 'media builds require a fresh isolated /out, not the video-disabled Ninja cache' >&2
+  exit 2
+fi
 
 # Build on the target libc/ISA rather than mixing glibc and musl development
 # sysroots. Dependencies are explicit; hosted Arm64 must pass native AArch32 preflight.
@@ -25,6 +30,17 @@ apk add --no-cache \
   libpng-dev sqlite-dev libwebp-dev zlib-dev freetype-dev \
   json-glib-dev wayland-dev wayland-protocols mesa-dev libdrm-dev \
   gettext-dev libseccomp-dev bubblewrap xdg-dbus-proxy
+if [ "${CI_WPE_MEDIA:-0}" = 1 ]; then
+  apk add --no-cache gstreamer-dev gst-plugins-base-dev gst-plugins-good \
+    gst-plugins-bad gst-libav gst-plugins-base
+  media_video=ON
+  media_audio=ON
+  media_gstreamer=ON
+else
+  media_video=OFF
+  media_audio=OFF
+  media_gstreamer=OFF
+fi
 
 mkdir -p /out/src /out/build /out/stage
 printf '%s  %s\n' \
@@ -101,7 +117,7 @@ cmake -S /out/src/wpewebkit-2.54.2 -B /out/build/webkit -G Ninja \
   -DENABLE_WPE_PLATFORM_HEADLESS=ON -DENABLE_WPE_PLATFORM_DRM=OFF \
   -DENABLE_WPE_LEGACY_API=OFF -DENABLE_BUBBLEWRAP_SANDBOX=ON \
   -DENABLE_GPU_PROCESS=OFF -DUSE_GBM=OFF -DUSE_LIBDRM=OFF \
-  -DENABLE_VIDEO=OFF -DENABLE_WEB_AUDIO=OFF -DENABLE_WEBGL=OFF -DUSE_GSTREAMER=OFF \
+  -DENABLE_VIDEO="$media_video" -DENABLE_WEB_AUDIO="$media_audio" -DENABLE_WEBGL=OFF -DUSE_GSTREAMER="$media_gstreamer" \
   -DENABLE_MEDIA_STREAM=OFF -DENABLE_MEDIA_RECORDER=OFF \
   -DENABLE_INTROSPECTION=OFF -DENABLE_DOCUMENTATION=OFF \
   -DENABLE_SPELLCHECK=OFF -DENABLE_SPEECH_SYNTHESIS=OFF \
@@ -115,6 +131,14 @@ grep -Fx 'CMAKE_SYSTEM_PROCESSOR:INTERNAL=armv7l' /out/build/webkit/CMakeCache.t
   echo 'WPE CMake did not select the ARMv7 target processor' >&2
   exit 2
 }
+if [ "${CI_WPE_MEDIA:-0}" = 1 ]; then
+  for feature in ENABLE_VIDEO ENABLE_WEB_AUDIO USE_GSTREAMER; do
+    grep -Fx "$feature:BOOL=ON" /out/build/webkit/CMakeCache.txt >/dev/null || {
+      echo "media feature was not enabled: $feature" >&2
+      exit 2
+    }
+  done
+fi
 grep -Fx 'USE_MIMALLOC:BOOL=ON' /out/build/webkit/CMakeCache.txt >/dev/null || {
   echo 'WPE CMake did not select the ARMv7 mimalloc backend' >&2
   exit 2
@@ -153,6 +177,7 @@ test -x /out/stage/usr/libexec/nuraloumi/browser/libexec/WPENetworkProcess
   echo 'upstream_wpewebkit=2.54.2'
   echo 'target=armv7-unknown-linux-musleabihf'
   echo 'runtime_qualification=UNQUALIFIED'
+  echo "media_build_requested=${CI_WPE_MEDIA:-0}"
   echo 'device_deployment=FORBIDDEN'
   echo 'missing=transitive_elf_dlopen_sandbox_real_pixels'
 } > /out/CANDIDATE-ONLY.txt

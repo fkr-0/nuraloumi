@@ -79,6 +79,27 @@ class WpeMuslProducerCiTests(unittest.TestCase):
         self.assertNotIn("setup-qemu-action", job)
         self.assertNotIn("qemu-arm-static", job)
 
+    def test_opt_in_media_candidate_is_fresh_and_never_the_default(self):
+        # A source-only CI_WPE_MEDIA gate is inert unless the hosted producer
+        # forwards it. Normal pull requests retain the previous no-video build.
+        self.assertIn("      media_enabled:", self.workflow)
+        self.assertIn("        default: false", self.workflow.split(
+            "      media_enabled:", 1)[1].split("      resume_run_id:", 1)[0])
+        self.assertIn(
+            "-e CI_WPE_MEDIA=\"${{ github.event_name == 'workflow_dispatch' && inputs.media_enabled && '1' || '0' }}\"",
+            self.workflow,
+        )
+        self.assertIn("MEDIA_ENABLED:", self.workflow)
+        self.assertIn("Media-enabled WPE requires a fresh build", self.workflow)
+        self.assertIn("media builds require a fresh isolated /out", self.builder)
+        self.assertIn("media_video=ON", self.builder)
+        self.assertIn("media_gstreamer=ON", self.builder)
+        self.assertIn("media_video=OFF", self.builder)
+        self.assertIn(
+            "python3 -m unittest scripts/test_verify_nurabrowser_media_candidate.py -v",
+            self.workflow,
+        )
+
     def test_build_shell_syntax_parses_without_docker(self):
         part = self.workflow.split(
             "      - name: Build native Alpine 3.22 ARMv7 candidate", 1
