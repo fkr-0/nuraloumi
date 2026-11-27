@@ -1,5 +1,7 @@
 # NuraBrowser D16 persistent recovery (2026-11-27)
 
+**Later update:** SSH authentication was restored and the complete 6-Crypto + 8-Graphics ARMv7/musl root passed the host-only loader and 16/16 RTLD_NOW probes. See `docs/qualification/NURABROWSER-D16-FULL-CLOSURE-20261127.md` for the latest state. The historical SSH blocker below is retained as incident evidence.
+
 This is a build-host recovery record, **not** a release approval. The exact GitHub WPE producer is still marked `UNQUALIFIED` and `device_deployment=FORBIDDEN`. Do not install this host candidate on Nura.
 
 ## State layout
@@ -64,7 +66,7 @@ This is **host-only** loader preflight, not a native GPU/WebKit/Seccomp PASS. Th
 - Rebuilt `scripts/fixtures/nurabrowser_d16_dlopen_probe.c` as ARMv7 D16-hardfloat (`local-state/build/nurabrowser-d16/dlopen-probe/d16-dlopen-probe`, SHA-256 `d02bd5ff4e1cf6d1afa34c274dad622073409e05ce326b5f79a9e1de35916cf2`). On a **separate copy** `assembled-rtldnow-test/` with only this probe installed, a read-only, networkless, chroot-isolated `RTLD_NOW|RTLD_LOCAL` cycle loaded and closed **8/8**: the five crypto libraries, OpenSSL legacy provider, and both GIO proxy modules. A nonexistent SONAME failed as expected with exit **1** (`No such file or directory`). No original root was modified for this test.
 - These facts prove source/ABI, direct loader and selected `dlopen` preflights only. No TLS handshake, GPU/Wayland rendering, WPE subprocess sandbox, Seccomp negative control or device soak has passed.
 
-## Remaining qualification blockers
+## Qualification blockers recorded before SSH restoration (historical)
 
 1. Fetch the exact eight SHA-256-pinned Nura Mesa **26.2.4**, LLVM **23.1** and Wayland **0.26** objects through the user-managed SSH alias `sl101`, then run the assembler with `--graphics-overlay`. On 2026-11-27 the read-only `scripts/fetch_nurabrowser_wpe_d16_graphics.sh` transfer failed at SSH authentication (`Permission denied`). Do not replace these objects with the older Mesa/LLVM 20 files from the recovered Docker image.
 2. Extend the passing GIO/Crypto `RTLD_NOW` checks to the **entire Mesa/Wayland/plugin dlopen closure** after acquiring pinned graphics; test Web-/NetworkProcess namespaces, D-Bus/socket policy and Seccomp denial rules.
