@@ -23,6 +23,14 @@ class WpeMuslProducerCiTests(unittest.TestCase):
         cls.workflow = WORKFLOW.read_text(encoding="utf-8")
         cls.builder = BUILDER.read_text(encoding="utf-8")
 
+    def test_native_producer_requires_gpu_media_contract(self):
+        # A successful video-disabled build is not a GPU-media artifact.
+        self.assertIn("-e CI_WPE_MEDIA=1", self.workflow)
+        for flag in ("USE_GSTREAMER_GL", "USE_GSTREAMER", "USE_GBM", "USE_LIBDRM", "ENABLE_VIDEO"):
+            self.assertIn(f"$feature:BOOL=ON", self.builder)
+            self.assertIn(flag, self.builder)
+        self.assertIn('python3 /work/scripts/patch_wpe_egl_bootstrap.py', self.builder)
+
     def test_build_is_bounded_and_preserves_failure_status(self):
         for part in (
             "timeout-minutes: 360",

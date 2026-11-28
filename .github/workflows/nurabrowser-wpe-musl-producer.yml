@@ -156,6 +156,7 @@ jobs:
           timeout --signal=TERM --kill-after=120s 270m \
             docker run --rm --cidfile "$cidfile" --platform linux/arm/v7 \
               -e CI_SOURCE_SHA="$GITHUB_SHA" \
+              -e CI_WPE_MEDIA=1 \
               -e CI_WPE_RESUME="${{ inputs.resume_run_id != '' && '1' || '0' }}" \
               -v "$PWD:/work:ro" \
               -v "$PWD/target/wpe-producer-candidate:/out" \
