@@ -25,7 +25,26 @@ esac
     [ "$(hostname)" = sl101-nura ] ||
     { echo "QUAL_FAIL wrong device/user" >&2; exit 65; }
 base=/home/user/.local/state/nura-sandbox-qualification-20261127
-root="$base/runtime-root"
+root=${NURA_QUAL_ROOT:-$base/runtime-root}
+# Private CI media candidates may be exercised in their own immutable test
+# roots. Never accept an arbitrary root, symlink pivot or production path.
+if [ "$root" != "$base/runtime-root" ]; then
+    case "$root" in
+        /home/user/.local/state/nura-media-60s-*/runtime-root) ;;
+        *) echo "QUAL_FAIL private runtime path not allowed" >&2; exit 65 ;;
+    esac
+    case "$root" in
+        *..*|*//*)
+            echo "QUAL_FAIL unsafe runtime path" >&2; exit 65 ;;
+    esac
+    test -d "$root" && test "$(readlink -f "$root")" = "$root" ||
+        { echo "QUAL_FAIL private runtime root unresolved" >&2; exit 65; }
+fi
+case ${NURA_QUAL_EGL_TRACE:-0} in
+    0) egl_log_level=warning; libgl_debug=quiet ;;
+    1) egl_log_level=debug; libgl_debug=verbose ;;
+    *) echo "QUAL_FAIL invalid EGL trace mode" >&2; exit 64 ;;
+esac
 core="$root/usr/libexec/nuraloumi/browser/nurabrowser-core"
 test -x "$core" &&
 test -x "$root/usr/libexec/nuraloumi/browser/libexec/WPEWebProcess" &&
@@ -165,6 +184,7 @@ cleanup() {
 trap cleanup EXIT HUP INT TERM
 echo "QUAL_START=$out"
 echo "QUAL_MARK=$marker"
+echo "QUAL_RUNTIME_ROOT=$root"
 
 # The outer role gets a private conventional XDG_RUNTIME_DIR and only the
 # named compositor socket. No host /home, /run/sl101-desktop-user or session
@@ -196,6 +216,8 @@ bwrap --die-with-parent --unshare-user --unshare-pid --unshare-uts --unshare-ipc
     --setenv XDG_DATA_HOME /run/qualification/data \
     --setenv XDG_STATE_HOME /run/qualification/state \
     --setenv LIBGL_ALWAYS_SOFTWARE 1 \
+    --setenv EGL_LOG_LEVEL "$egl_log_level" \
+    --setenv LIBGL_DEBUG "$libgl_debug" \
     --setenv GALLIUM_DRIVER softpipe \
     --setenv MESA_SHADER_CACHE_DISABLE true \
     --setenv OPENSSL_armcap 0 \

@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="de">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NuraBrowser – Tagesschau HLS smoke</title>
+<style>
+  body { margin: 0; background: #101820; color: #fafafa;
+         font: 21px system-ui, sans-serif; }
+  video { display: block; width: min(100%, 960px); height: auto;
+          background: black; }
+  #status { padding: 12px; font-family: monospace; font-size: 18px; }
+</style>
+<video id="stream" autoplay muted playsinline controls
+       src="https://tagesschau-live.ard-mcdn.de/tagesschau/live/hls/de/master360p1200.m3u8"></video>
+<div id="status" aria-live="polite">Starting live HLS…</div>
+<script>
+(() => {
+  "use strict";
+  const video = document.getElementById("stream");
+  const status = document.getElementById("status");
+  const started = performance.now();
+  let callbacks = 0;
+  let lastError = "";
+  const frameCallback = typeof video.requestVideoFrameCallback === "function";
+  if (frameCallback) {
+    const onFrame = () => {
+      callbacks += 1;
+      video.requestVideoFrameCallback(onFrame);
+    };
+    video.requestVideoFrameCallback(onFrame);
+  }
+  video.addEventListener("error", () => {
+    lastError = String(video.error?.code ?? "unknown");
+  });
+  const summary = () => {
+    const quality = video.getVideoPlaybackQuality?.();
+    const fields = {
+      wall: Math.round((performance.now() - started) / 1000),
+      time: video.currentTime.toFixed(2),
+      frames: String(callbacks),
+      total: String(quality?.totalVideoFrames ?? -1),
+      dropped: String(quality?.droppedVideoFrames ?? -1),
+      width: String(video.videoWidth),
+      height: String(video.videoHeight),
+      ready: String(video.readyState),
+      paused: String(video.paused),
+      vfc: String(frameCallback),
+      canplay: video.canPlayType("application/vnd.apple.mpegurl"),
+      error: lastError || "none"
+    };
+    status.textContent = Object.entries(fields)
+      .map(([key, value]) => key + "=" + value).join(" ");
+    // The private loopback HTTP server logs each heartbeat. A 404 is expected;
+    // playback must be judged from decoded frames, currentTime and screenshots.
+    const beacon = new Image();
+    beacon.src = "/heartbeat?" + new URLSearchParams(fields);
+  };
+  video.play().catch(error => { lastError = error.name; });
+  summary();
+  setInterval(summary, 2000);
+})();
+</script>
+</html>
