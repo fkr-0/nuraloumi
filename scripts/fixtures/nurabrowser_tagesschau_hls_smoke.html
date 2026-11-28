@@ -20,11 +20,17 @@
   const status = document.getElementById("status");
   const started = performance.now();
   let callbacks = 0;
+  let presented = 0;
+  let mediaTime = -1;
   let lastError = "";
   const frameCallback = typeof video.requestVideoFrameCallback === "function";
   if (frameCallback) {
-    const onFrame = () => {
+    const onFrame = (_now, metadata) => {
       callbacks += 1;
+      if (Number.isFinite(metadata?.presentedFrames))
+        presented = Math.max(presented, metadata.presentedFrames);
+      if (Number.isFinite(metadata?.mediaTime))
+        mediaTime = Math.max(mediaTime, metadata.mediaTime);
       video.requestVideoFrameCallback(onFrame);
     };
     video.requestVideoFrameCallback(onFrame);
@@ -38,6 +44,8 @@
       wall: Math.round((performance.now() - started) / 1000),
       time: video.currentTime.toFixed(2),
       frames: String(callbacks),
+      presented: String(presented),
+      mediaTime: String(mediaTime),
       total: String(quality?.totalVideoFrames ?? -1),
       dropped: String(quality?.droppedVideoFrames ?? -1),
       width: String(video.videoWidth),
