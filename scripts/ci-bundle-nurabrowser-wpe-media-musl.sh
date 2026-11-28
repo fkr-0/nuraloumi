@@ -60,6 +60,25 @@ mkdir -p "$root/candidate" "$root/proc" "$root/sys" \
     "$root/dev" "$root/run" "$root/tmp" "$root/home" "$root/opt"
 cp -a /out/producer-extract/stage/usr/. "$root/usr/"
 cp /input/CANDIDATE-ONLY.txt "$root/candidate/CANDIDATE-ONLY.txt"
+
+# Alpine's build/container account files and privileged D-Bus helper do not
+# belong in a portable, unprivileged browser runtime.  Remove them ONLY from
+# the newly generated candidate root, before hashing or host-side packaging.
+# This also prevents root-only files from silently breaking the runner's tar.
+rm -f "$root/etc/shadow" "$root/etc/shadow-" \
+    "$root/etc/crontabs/root" \
+    "$root/usr/libexec/dbus-daemon-launch-helper" \
+    "$root/lib/apk/db/lock"
+unshippable=$(find "$root" -type f \( ! -perm /004 -o -perm /6000 \) -print -quit)
+test -z "$unshippable" || {
+    echo "unreadable or privileged runtime file: $unshippable" >&2
+    exit 2
+}
+untraversable=$(find "$root" -type d ! -perm /005 -print -quit)
+test -z "$untraversable" || {
+    echo "untraversable runtime directory: $untraversable" >&2
+    exit 2
+}
 test ! -e "$root/usr/libexec/nuraloumi/browser/runtime.json"
 test -x "$root/usr/libexec/nuraloumi/browser/libexec/WPEWebProcess"
 test -x "$root/usr/libexec/nuraloumi/browser/libexec/WPENetworkProcess"

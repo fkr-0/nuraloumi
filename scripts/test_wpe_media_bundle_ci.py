@@ -48,6 +48,21 @@ class NativeMediaBundleTests(unittest.TestCase):
         for forbidden in ("ssh ", "scp ", "runtime_qualification=PASS"):
             self.assertNotIn(forbidden, self.script)
 
+    def test_generated_root_is_unprivileged_packagable(self):
+        # Regresses the first CI packaging failure: the native ARMv7 container
+        # could inspect the files, but the unprivileged host runner could not.
+        for file_path in (
+            "$root/etc/shadow", "$root/etc/shadow-",
+            "$root/etc/crontabs/root",
+            "$root/usr/libexec/dbus-daemon-launch-helper",
+            "$root/lib/apk/db/lock",
+        ):
+            self.assertIn(file_path, self.script)
+        self.assertIn('find "$root" -type f', self.script)
+        self.assertIn("! -perm /004 -o -perm /6000", self.script)
+        self.assertIn("untraversable", self.script)
+        self.assertIn('test -z "$unshippable"', self.script)
+
     def test_workflow_native_reuse_without_rebuild(self):
         for token in (
             "bundle_source_run_id:", "bundle_source_sha:",
