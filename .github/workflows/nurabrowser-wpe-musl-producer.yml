@@ -13,6 +13,21 @@ on:
         required: false
         type: boolean
         default: false
+      bundle_source_run_id:
+        description: 'Reuse exact successful native ARMv7 media producer run instead of recompiling WebKit'
+        required: false
+        type: string
+        default: ''
+      bundle_source_sha:
+        description: 'Exact 40-hex source commit of the successful media producer'
+        required: false
+        type: string
+        default: ''
+      bundle_tar_sha256:
+        description: 'Exact SHA-256 of its unqualified WPE candidate TAR'
+        required: false
+        type: string
+        default: ''
       resume_run_id:
         description: 'Exact failed WPE producer run ID containing an unqualified build checkpoint'
         required: false
@@ -33,6 +48,8 @@ on:
       - scripts/test_wpe_musl_producer_ci.py
       - scripts/ci-probe-armv7-native-compat.sh
       - scripts/test_wpe_arm_runner_ci.py
+      - scripts/ci-bundle-nurabrowser-wpe-media-musl.sh
+      - scripts/test_wpe_media_bundle_ci.py
 
 permissions:
   contents: read
@@ -68,7 +85,7 @@ jobs:
           retention-days: 14
 
   native-armv7-musl-wpe-candidate:
-    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.probe_only) }}
+    if: ${{ !(github.event_name == 'workflow_dispatch' && (inputs.probe_only || inputs.bundle_source_run_id != '')) }}
     # This is a build candidate, not a regular APK, qualification, or deploy.
     # This Arm64 host runs real 32-bit ARMv7 userspace, as proven by /proc/PID/exe.
     runs-on: ubuntu-24.04-arm
@@ -244,3 +261,132 @@ jobs:
             target/wpe-producer-candidate/ALPINE-PACKAGES.txt
           if-no-files-found: error
           retention-days: 7
+
+  native-armv7-musl-wpe-media-bundle:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.bundle_source_run_id != '' }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 50
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Validate pinned source run before artifact access
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN: ${{ inputs.bundle_source_run_id }}
+          SOURCE_SHA: ${{ inputs.bundle_source_sha }}
+          SOURCE_TAR_SHA: ${{ inputs.bundle_tar_sha256 }}
+          PROBE_ONLY: ${{ inputs.probe_only && '1' || '0' }}
+          MEDIA_ENABLED: ${{ inputs.media_enabled && '1' || '0' }}
+        run: |
+          set -euo pipefail
+          test "$PROBE_ONLY" = 0 && test "$MEDIA_ENABLED" = 0
+          [[ "$SOURCE_RUN" =~ ^[1-9][0-9]*$ ]]
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$SOURCE_TAR_SHA" =~ ^[0-9a-f]{64}$ ]]
+          curl --fail --silent --show-error \
+            -H 'Accept: application/vnd.github+json' \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN" |
+            python3 -c '
+          import json, os, sys
+          r = json.load(sys.stdin)
+          assert r.get("path") == ".github/workflows/nurabrowser-wpe-musl-producer.yml"
+          assert r.get("head_sha") == os.environ["SOURCE_SHA"]
+          assert r.get("event") == "workflow_dispatch"
+          assert r.get("status") == "completed" and r.get("conclusion") == "success"
+          '
+      - name: Retrieve immutable producer candidate from exact source run
+        uses: actions/download-artifact@v4
+        with:
+          name: nurabrowser-wpe-musl-unqualified-${{ inputs.bundle_source_sha }}
+          run-id: ${{ inputs.bundle_source_run_id }}
+          github-token: ${{ github.token }}
+          path: target/media-input
+      - name: Retrieve independent producer CMake evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: nurabrowser-wpe-musl-build-log-${{ inputs.bundle_source_run_id }}-${{ inputs.bundle_source_sha }}
+          run-id: ${{ inputs.bundle_source_run_id }}
+          github-token: ${{ github.token }}
+          path: target/media-producer-log
+      - name: Verify SHA, media configuration and safe TAR paths
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.bundle_source_sha }}
+          SOURCE_TAR_SHA: ${{ inputs.bundle_tar_sha256 }}
+        run: |
+          set -euo pipefail
+          printf '%s  %s\n' "$SOURCE_TAR_SHA" \
+            target/media-input/nurabrowser-wpe-musl-candidate.tar | sha256sum -c -
+          grep -Fx "source_sha=$SOURCE_SHA" target/media-input/CANDIDATE-ONLY.txt
+          grep -Fx 'media_build_requested=1' target/media-input/CANDIDATE-ONLY.txt
+          grep -Fx 'runtime_qualification=UNQUALIFIED' target/media-input/CANDIDATE-ONLY.txt
+          grep -E '^--  ENABLE_VIDEO[ .]+ON$' target/media-producer-log/BUILD-LOG.txt
+          grep -E '^--  ENABLE_WEB_AUDIO[ .]+ON$' target/media-producer-log/BUILD-LOG.txt
+          grep -E '^--  USE_GSTREAMER[ .]+ON$' target/media-producer-log/BUILD-LOG.txt
+          python3 - <<'PY'
+          from pathlib import PurePosixPath
+          import posixpath
+          import tarfile
+          with tarfile.open("target/media-input/nurabrowser-wpe-musl-candidate.tar") as t:
+              for m in t:
+                  p = PurePosixPath(m.name)
+                  assert not p.is_absolute() and ".." not in p.parts, m.name
+                  if m.issym() or m.islnk():
+                      dest = posixpath.normpath(posixpath.join(posixpath.dirname(m.name), m.linkname))
+                      assert not dest.startswith("../") and not dest.startswith("/"), m.name
+          PY
+      - name: Prove native ARMv7 execution and bundle private media runtime
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.bundle_source_sha }}
+          SOURCE_RUN: ${{ inputs.bundle_source_run_id }}
+          SOURCE_TAR_SHA: ${{ inputs.bundle_tar_sha256 }}
+        run: |
+          set -euo pipefail
+          bash scripts/ci-probe-armv7-native-compat.sh target/media-native-probe
+          python3 -m unittest scripts/test_wpe_media_bundle_ci.py -v
+          mkdir -p target/media-bundle
+          timeout --signal=TERM --kill-after=30s 35m \
+            docker run --rm --platform linux/arm/v7 \
+              -e CI_BUNDLE_SOURCE_SHA="$SOURCE_SHA" \
+              -e CI_BUNDLE_RUN_ID="$SOURCE_RUN" \
+              -e CI_BUNDLE_TAR_SHA256="$SOURCE_TAR_SHA" \
+              -v "$PWD:/work:ro" \
+              -v "$PWD/target/media-input:/input:ro" \
+              -v "$PWD/target/media-bundle:/out" \
+              alpine:3.22 /bin/sh /work/scripts/ci-bundle-nurabrowser-wpe-media-musl.sh \
+              2>&1 | tee target/media-bundle/BUILD-LOG.txt
+          grep -Fx 'MEDIA_RUNTIME_BUNDLE=HOST_PREFLIGHT_PASS_DEVICE_NOT_RUN' \
+            target/media-bundle/BUILD-LOG.txt
+          test ! -e target/media-bundle/runtime-root/usr/libexec/nuraloumi/browser/runtime.json
+          grep -Fx 'runtime_qualification=UNQUALIFIED' target/media-bundle/BUNDLE-PROVENANCE.txt
+          command -v zstd || { sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends zstd; }
+          tar -C target/media-bundle -cf - runtime-root | zstd -T0 -6 \
+            -o target/media-bundle/runtime-root.tar.zst
+          sha256sum target/media-bundle/runtime-root.tar.zst \
+            > target/media-bundle/runtime-root.tar.zst.sha256
+      - name: Upload pinned UNQUALIFIED runtime bundle and all factory evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: nurabrowser-wpe-media-runtime-unqualified-${{ github.run_id }}
+          path: |
+            target/media-bundle/runtime-root.tar.zst
+            target/media-bundle/runtime-root.tar.zst.sha256
+            target/media-bundle/BUNDLE-PROVENANCE.txt
+            target/media-bundle/ALPINE-RUNTIME-PACKAGES.txt
+            target/media-bundle/FACTORIES.tsv
+            target/media-bundle/RUNTIME-SHA256SUMS.txt
+            target/media-bundle/probe/ELF-NEEDED.txt
+            target/media-bundle/BUILD-LOG.txt
+            target/media-native-probe/RESULT.txt
+          if-no-files-found: warn
+          compression-level: 0
+          retention-days: 14

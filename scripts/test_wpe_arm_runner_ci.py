@@ -33,7 +33,7 @@ class ArmRunnerProbeTests(unittest.TestCase):
         self.assertNotIn("setup-qemu-action", job)
         self.assertNotIn("ci-build-nurabrowser-wpe-musl.sh", job)
         self.assertIn(
-            "if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.probe_only) }}",
+            "if: ${{ !(github.event_name == 'workflow_dispatch' && (inputs.probe_only || inputs.bundle_source_run_id != '')) }}",
             self.workflow,
         )
 
