@@ -25,6 +25,19 @@ apk add --no-cache \
   libpng-dev sqlite-dev libwebp-dev zlib-dev freetype-dev \
   json-glib-dev wayland-dev wayland-protocols mesa-dev libdrm-dev \
   gettext-dev libseccomp-dev bubblewrap xdg-dbus-proxy
+if [ "${CI_WPE_MEDIA:-0}" = 1 ]; then
+  apk add --no-cache gstreamer-dev gst-plugins-base-dev gst-plugins-bad-dev \
+    gst-plugins-good gst-plugins-bad gst-libav gst-plugins-base
+  media_video=ON
+  media_audio=ON
+  media_gstreamer=ON
+  media_gbm=ON
+else
+  media_video=OFF
+  media_audio=OFF
+  media_gstreamer=OFF
+  media_gbm=OFF
+fi
 
 mkdir -p /out/src /out/build /out/stage
 printf '%s  %s\n' \
@@ -79,6 +92,11 @@ if link not in text:
         raise SystemExit(f"unexpected WPE 2.54.2 target layout: {cmake}")
     cmake.write_text(text.replace(needle, needle + link, 1))
 PY
+if [ "${CI_WPE_MEDIA:-0}" = 1 ]; then
+  # The WebProcess tries its hardware GBM display before surfaceless EGL.
+  # A supported client extension alone cannot guarantee eglInitialize.
+  python3 /work/scripts/patch_wpe_egl_bootstrap.py /out/src/wpewebkit-2.54.2
+fi
 fi
 
 # Tegra2: ARMv7 hardfloat, VFPv3-D16, no NEON or hardware division.
@@ -100,8 +118,9 @@ cmake -S /out/src/wpewebkit-2.54.2 -B /out/build/webkit -G Ninja \
   -DENABLE_WPE_PLATFORM=ON -DENABLE_WPE_PLATFORM_WAYLAND=ON \
   -DENABLE_WPE_PLATFORM_HEADLESS=ON -DENABLE_WPE_PLATFORM_DRM=OFF \
   -DENABLE_WPE_LEGACY_API=OFF -DENABLE_BUBBLEWRAP_SANDBOX=ON \
-  -DENABLE_GPU_PROCESS=OFF -DUSE_GBM=OFF -DUSE_LIBDRM=OFF \
-  -DENABLE_VIDEO=OFF -DENABLE_WEB_AUDIO=OFF -DENABLE_WEBGL=OFF -DUSE_GSTREAMER=OFF \
+  -DENABLE_GPU_PROCESS=OFF -DUSE_GBM="$media_gbm" -DUSE_LIBDRM="$media_gbm" \
+  -DENABLE_VIDEO="$media_video" -DENABLE_WEB_AUDIO="$media_audio" -DENABLE_WEBGL=OFF -DUSE_GSTREAMER="$media_gstreamer" \
+  -DUSE_GSTREAMER_GL="$media_gstreamer" \
   -DENABLE_MEDIA_STREAM=OFF -DENABLE_MEDIA_RECORDER=OFF \
   -DENABLE_INTROSPECTION=OFF -DENABLE_DOCUMENTATION=OFF \
   -DENABLE_SPELLCHECK=OFF -DENABLE_SPEECH_SYNTHESIS=OFF \
@@ -115,6 +134,14 @@ grep -Fx 'CMAKE_SYSTEM_PROCESSOR:INTERNAL=armv7l' /out/build/webkit/CMakeCache.t
   echo 'WPE CMake did not select the ARMv7 target processor' >&2
   exit 2
 }
+if [ "${CI_WPE_MEDIA:-0}" = 1 ]; then
+  for feature in ENABLE_VIDEO USE_GSTREAMER USE_GSTREAMER_GL USE_GBM USE_LIBDRM; do
+    grep -Fx "$feature:BOOL=ON" /out/build/webkit/CMakeCache.txt >/dev/null || {
+      echo "GPU media feature not enabled: $feature" >&2
+      exit 2
+    }
+  done
+fi
 grep -Fx 'USE_MIMALLOC:BOOL=ON' /out/build/webkit/CMakeCache.txt >/dev/null || {
   echo 'WPE CMake did not select the ARMv7 mimalloc backend' >&2
   exit 2
