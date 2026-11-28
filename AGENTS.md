@@ -61,6 +61,16 @@ Core design:
 - Preserve unrelated work. Use ws-bridge claims/transactions in concurrent work.
 - Before handoff run the narrow crate tests, then cargo test --workspace and cargo clippy --workspace --all-targets -- -D warnings when practical.
 
+
+## NuraBrowser media CI reuse-first rule
+
+- **Inspect existing producer CI before rebuilding.** Inventory local Docker images/layers, build trees, caches, WPE runtime packages, ELF artifacts, CI logs and manifest hashes. Distinguish WPE 2.54.0-2 from 2.54.2 and glibc from ARMv7-musl; never assert compatibility from an image tag alone.
+- Prefer a verifiably compatible existing build or incremental continuation. Preserve source and build caches; do not require a fresh upstream tarball if existing independently traceable binaries satisfy the task. Missing original archive is a rebuild-input gap, **not automatically a runtime candidate NO-GO**.
+- Disk capacity is an operational measurement, not a hypothetical policy barrier: inspect actual `df`, `du`, active build footprint, layer reuse and writable upper-layer growth. A historic 20/40-GiB estimate is **not a measured lower bound**. Require a positive practical reserve and monitor usage, but do not demand an authenticated full fresh peak trace before a small, bounded, reversible stage. Avoid unchecked full rebuilds on a nearly full root.
+- Keep distinct gates: (1) reuse/build feasibility, (2) artifact ABI/loader/media plugin qualification, (3) device Play/pixel safety. Do not let a missing full-rebuild precondition veto inspection or reuse. Do not fabricate ARM/factory/device PASS; evidence remains required at the gate actually exercised.
+- No Docker prune, image/volume/cache deletion, cleanup of shared checkouts or active workers without exact owner authorization. Claims, worktrees and user changes remain protected.
+- For a blocked task, first name a concrete runnable reuse/continuation path and the exact missing observation. Avoid recursive NO-GO reports, speculative capacity arithmetic or repeated source-custody bureaucracy that does not advance the user's 60s playback goal.
+
 ## SL101 power-state safety
 
 - Never run unattended `rtcwake -m mem`, force `mem/deep` through `/sys/power/state`, or use `loginctl -i` / `--ignore-inhibitors` on the SL101.
