@@ -61,6 +61,52 @@ Core design:
 - Preserve unrelated work. Use ws-bridge claims/transactions in concurrent work.
 - Before handoff run the narrow crate tests, then cargo test --workspace and cargo clippy --workspace --all-targets -- -D warnings when practical.
 
+## Execution-first contract: no status-only work and mandatory gates only
+
+- **A status declaration is not a deliverable.** For an owner-requested fix,
+  integration, test, deployment or review-with-fixes, do not terminate with
+  `BLOCKED`, `NO-GO`, `UNKNOWN`, a readiness matrix, or another prose-only
+  diagnosis while an authorized, bounded implementation or test action remains.
+  Execute that action and verify its outcome. Accurate status is allowed only
+  as evidence accompanying work or when a truly mandatory stop is proven.
+- **Default for proposed gates is non-blocking.** A historical checklist,
+  agent-authored policy, reviewer preference, speculative storage estimate,
+  optional attestation, or missing ideal evidence does not become a prerequisite
+  merely because a worker called it a gate. First attempt a safe, reversible
+  route within the task's actual scope; downgrade unverified gates to follow-up
+  diagnostics rather than recursively producing NO-GO reports.
+- **Burden of proof for a mandatory stop:** identify (1) the exact current
+  authority: explicit owner constraint, active repository safety rule, actual
+  permission/security boundary or hardware-damage risk, or required executable
+  dependency; (2) the precise operation it forbids; (3) current first-hand
+  evidence or an attempted negative test; and (4) why no safe in-scope variant
+  can continue. A stale worker assertion or a hypothetical failure is not
+  proof. If any element is missing, do not stop the rest of the work.
+- **Distinguish test from release.** `UNQUALIFIED` and
+  `device_deployment=FORBIDDEN` on a candidate forbid promoting it into
+  production, changing active boot/session/release state or claiming a
+  qualified PASS. They do not, by themselves, forbid an explicitly authorized,
+  isolated, temporary private device smoke test with verified target identity,
+  bounded duration/resources, independent logs, cleanup and rollback. Do not
+  change the marker to manufacture a release.
+- **Use real observations, not ceremonial provenance.** For an authorized
+  60-second browser video smoke, prefer a genuine bounded playback attempt,
+  browser/media logs and compositor-frame evidence. An extra signed physical
+  touch-event custodian, protected nonce service, complete rebuild-peak audit
+  or exact hardware-input source is optional unless the actual test objective
+  or a verified mandatory authority requires it. Label synthetic/automated
+  input honestly; never misrepresent it as physical touch.
+- **After a failure, fix or narrow immediately.** Reuse known CI artifacts,
+  repair the smallest broken runtime/packaging/launch path, rerun the failing
+  step and preserve positive and falsifying evidence. Continue independent
+  work when one step truly blocks. A relength child is justified by a concrete
+  runnable fix and acceptance test, not by a restatement of the prior status.
+- **Non-negotiable protections stay intact:** real permission denials, owner
+  consent boundaries, production/boot/suspend safety, device identity,
+  preservation of live Sway/WayVNC and existing releases, private credentials,
+  exclusive ownership, resource/thermal aborts and rollback requirements must
+  never be bypassed for a nominal test success.
+
 
 ## NuraBrowser media CI reuse-first rule
 
