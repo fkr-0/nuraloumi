@@ -103,6 +103,16 @@ class WpeMuslProducerCiTests(unittest.TestCase):
             self.workflow,
         )
 
+    def test_media_cpu_video_disables_gstreamer_egl_before_compile(self):
+        # A native SL101 media build with upstream's GStreamer GL default ON
+        # crashes its WebProcess on surfaceless EGL before the first video frame.
+        self.assertIn("-DUSE_GSTREAMER_GL=OFF", self.builder)
+        self.assertIn("USE_GSTREAMER_GL:BOOL=OFF", self.builder)
+        self.assertLess(
+            self.builder.index("USE_GSTREAMER_GL:BOOL=OFF"),
+            self.builder.index("cmake --build /out/build/webkit"),
+        )
+
     def test_build_shell_syntax_parses_without_docker(self):
         part = self.workflow.split(
             "      - name: Build native Alpine 3.22 ARMv7 candidate", 1

@@ -118,6 +118,7 @@ cmake -S /out/src/wpewebkit-2.54.2 -B /out/build/webkit -G Ninja \
   -DENABLE_WPE_LEGACY_API=OFF -DENABLE_BUBBLEWRAP_SANDBOX=ON \
   -DENABLE_GPU_PROCESS=OFF -DUSE_GBM=OFF -DUSE_LIBDRM=OFF \
   -DENABLE_VIDEO="$media_video" -DENABLE_WEB_AUDIO="$media_audio" -DENABLE_WEBGL=OFF -DUSE_GSTREAMER="$media_gstreamer" \
+  -DUSE_GSTREAMER_GL=OFF \
   -DENABLE_MEDIA_STREAM=OFF -DENABLE_MEDIA_RECORDER=OFF \
   -DENABLE_INTROSPECTION=OFF -DENABLE_DOCUMENTATION=OFF \
   -DENABLE_SPELLCHECK=OFF -DENABLE_SPEECH_SYNTHESIS=OFF \
@@ -132,6 +133,12 @@ grep -Fx 'CMAKE_SYSTEM_PROCESSOR:INTERNAL=armv7l' /out/build/webkit/CMakeCache.t
   exit 2
 }
 if [ "${CI_WPE_MEDIA:-0}" = 1 ]; then
+  # Video needs the CPU GStreamer sink on the Tegra2 SL101. WPE's upstream
+  # GStreamer-GL default pulls in surfaceless EGL, which fails on this target.
+  grep -Fx 'USE_GSTREAMER_GL:BOOL=OFF' /out/build/webkit/CMakeCache.txt >/dev/null || {
+    echo 'GStreamer GL must be disabled for the SL101 CPU video path' >&2
+    exit 2
+  }
   for feature in ENABLE_VIDEO ENABLE_WEB_AUDIO USE_GSTREAMER; do
     grep -Fx "$feature:BOOL=ON" /out/build/webkit/CMakeCache.txt >/dev/null || {
       echo "media feature was not enabled: $feature" >&2
